@@ -140,6 +140,34 @@ npm run dev:kv
 ---
 
 
+## External database (BYO DB) & Node.js / EdgeOne deploy
+
+This fork adds **frontend-configurable external MySQL** (BYO DB) plus a plain Node.js server
+entry, so the vault no longer depends on Cloudflare D1. The database can live anywhere
+(TiDB Cloud free tier, self-hosted MySQL on a NAS, any cloud DB) and be swapped at any time.
+
+Quick start (Node + MySQL):
+
+```bash
+npm install && npm run build
+export JWT_SECRET="32+ chars"
+export DB_HOST=... DB_PORT=4000 DB_USER=... DB_PASSWORD=... DB_NAME=nodewarden DB_SSL=true
+export DB_CONFIG_KEY="passphrase-for-encrypted-admin-config"
+npm run start:node          # http://localhost:8787
+```
+
+Then open **Admin → Database settings** (`/admin/database`) to edit/test the connection
+(AES-256-GCM encrypted, password never echoed). `/healthz` reports DB mode/version.
+Without `DB_HOST` the app falls back to D1 — `npm run deploy` works exactly like upstream.
+
+Notes on the Node runtime: realtime push (Durable Objects) degrades to client polling and
+the backup-center remote runner is unavailable; export/import and everything else works.
+See `README_ZH.md` (外接数据库部署教程) for the full tutorial: TiDB Serverless setup,
+D1→MySQL data migration, FC/SCF/EdgeOne deployment options, and Dockerfile.
+
+---
+
+
 ## License
 
 LGPL-3.0 License

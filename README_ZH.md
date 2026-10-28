@@ -138,6 +138,129 @@ npm run dev:kv
 ---
 
 
+## 外接数据库（BYO DB）与 Node.js / EdgeOne 部署教程
+
+> 本分支新增能力：**数据库配置前台化 + 外接 MySQL**（BYO DB）。数据库不再绑定 Cloudflare D1，
+> 可以部署在任何地方（TiDB Serverless 免费层、家里 NAS 自建 MySQL、任意云数据库），由应用按配置直连。
+> 库随时可搬，彻底摆脱平台续费锁定。配套 Node.js 运行入口，可部署到 阿里云 FC / 腾讯云 SCF / EdgeOne Pages / 任意 Node 主机。
+
+### 1. 功能总览
+
+| 能力 | 说明 |
+|---|---|
+| 前台配置 UI | 管理后台 → `/admin/database`：填写 host/端口/账号/密码/库名/TLS，支持**测试连接**、**一键建表** |
+| 加密存储 | 配置用 AES-256-GCM 加密保存（主密钥来自 `DB_CONFIG_KEY`），密码永不回显 |
+| 环境变量配置 | 也可以直接用 `DB_HOST` 等环境变量（优先级高于前台配置） |
+| MySQL 适配器 | 业务 SQL 自动从 SQLite/D1 方言翻译为 MySQL（含 upsert/json/PRAGMA 等 20+ 处差异），19 张表自动建表 |
+| 双存储路由 | 未配置 MySQL 时自动使用 D1（Cloudflare Workers 原样可用）；配置后即时切换，无需重启 |
+| 健康检查 | `GET /healthz` 返回数据库模式、连接状态、版本 |
+| 数据迁移 | 用内置备份导出/导入（`/api/admin/backup`）把 D1 数据搬到 MySQL（见下文） |
+
+### 2. 快速开始（Node.js + 外接 MySQL）
+
+```bash
+git clone <本仓库>
+cd nodewarden
+npm install
+npm run build            # 构建 Web 管理界面到 dist/
+
+# 配置环境变量后启动（MySQL 配置也可以启动后在 /admin/database 页面里填）
+export JWT_SECRET="至少32位随机字符串"
+export DB_HOST="你的MySQL地址"      # 例如 TiDB: gz-xxx.tidbcloud.com
+export DB_PORT=4000                  # TiDB Serverless 为 4000，自建多为 3306
+export DB_USER="nodewarden"
+export DB_PASSWORD="********"
+export DB_NAME="nodewarden"
+export DB_SSL=true                   # TiDB 必须开启
+export DB_CONFIG_KEY="任意口令或base64(32字节)"  # 前台配置的加密主密钥
+
+npm run start:node                   # 默认监听 http://localhost:8787
+```
+
+启动后访问 `http://localhost:8787` 完成注册；管理员登录后进入 **管理后台 → 数据库设置**（`/admin/database`）可随时查看/修改连接配置。
+
+**常用环境变量**
+
+| 变量 | 必填 | 说明 |
+|---|---|---|
+| `JWT_SECRET` | ✅ | 32 位以上随机串 |
+| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` | 二选一 | 外接 MySQL 连接（与前台配置二选一，环境变量优先） |
+| `DB_SSL` | — | 默认 `true`；TiDB Serverless 必须开启 |
+| `DB_CONN_LIMIT` | — | 连接池上限，默认 5 |
+| `DB_CONFIG_KEY` | 前台配置时必填 | 前台保存配置的加密主密钥 |
+| `DATA_DIR` | — | 数据目录（附件/配置文件），默认 `./data` |
+| `PORT` | — | 监听端口，默认 8787 |
+| `HIDE_WEB_VAULT` / `WEBAUTHN_*` | — | 与 Workers 版一致 |
+
+### 3. 数据库去处推荐（个人免费/极低价）
+
+| 方案 | 价格 | 说明 |
+|---|---|---|
+| **TiDB Cloud Starter（推荐）** | 免费层：25GiB 存储 + 250M RU/月 | MySQL 协议兼容、托管免运维、TLS 强制（端口 4000）；机房在海外，跨境延迟略高 |
+| 自建 MySQL（NAS/云主机） | ¥0 起 | 国内延迟最低；**必须** TLS + 强密码 + 非默认端口 + 最小权限账号（函数出口 IP 不固定，无法做 IP 白名单） |
+| 国内云数据库（RDS/TDSQL-C） | 按量/包年 | 延迟最低，注意新人价续费陷阱 |
+
+### 4. 从 Cloudflare D1 迁移数据
+
+1. 在旧部署（D1）的管理后台使用 **备份导出**（`/api/admin/backup/export`，需主密码）下载加密归档；
+2. 部署新实例并连上目标 MySQL（启动时自动建表）；
+3. 在新实例管理后台使用 **备份导入**（`/api/admin/backup/import`）恢复；
+4. 客户端重新登录并同步，确认数据一致后下线旧实例。
+
+### 5. 部署到云平台
+
+**方式 A：任意 Node 主机 / 容器 / FC / SCF 自定义运行时（推荐）**
+
+`npm run start:node` 就是一个标准 HTTP 服务（监听 `PORT`），可直接跑在云主机、Docker、
+阿里云 FC 自定义运行时、腾讯云 SCF 等任何能跑 Node 22 的地方。容器示例：
+
+```dockerfile
+FROM node:22-slim
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev
+COPY . .
+RUN npm run build
+ENV PORT=8787
+CMD ["npm", "run", "start:node"]
+```
+
+**方式 B：EdgeOne Pages（Node Functions）**
+
+- 静态资源部署 `dist/`；
+- 动态 API 部署为 Node Functions：可将 `server/index.ts` 的 `handleRequest` 管线按官方
+  [mysql-template](https://github.com/TencentEdgeOne/mysql-template) 的 `node-functions/*` 约定包装（`onRequest(context)` 入口，`context.env` 注入 `DB_*`/`JWT_SECRET`），
+  数据库逻辑放在 Cloud Functions（Node 运行时）而非 Edge Functions；
+- 页面配置区绑定 `SETTINGS_KV`（或使用 `DB_*` 环境变量）以便前台保存配置。
+
+**方式 C：Cloudflare Workers（原版 D1，零改动）**
+
+```bash
+npm run deploy      # R2 模式
+npm run deploy:kv   # KV 模式
+```
+
+未配置 `DB_HOST` 时自动走 D1，行为与上游完全一致。
+
+### 6. 功能降级说明（Node 运行时）
+
+- **实时推送**：Durable Objects 在 Node 运行时不可用，`/notifications/hub` 返回 501，
+  Bitwarden 客户端自动降级为轮询同步（功能不缺，实时性略降）；
+- **备份中心远程备份/恢复**：依赖 Durable Objects 的后台执行体，Node 运行时暂不支持（导出/导入可用）；
+- **限流/同步缓存**：`caches.*` 为进程内内存缓存，多实例部署时按实例独立（个人单实例无影响）。
+
+### 7. 测试与验证
+
+```bash
+npm run test:mysql-dialect   # SQL 方言翻译器单元测试（22 项）
+npx tsc --noEmit             # 类型检查
+npm run build                # 前端构建
+curl http://localhost:8787/healthz   # 健康检查（返回数据库模式/版本/延迟）
+```
+
+---
+
+
 ## 开源协议
 
 LGPL-3.0 License

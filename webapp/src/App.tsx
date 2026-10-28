@@ -2024,6 +2024,7 @@ export default function App() {
     profile,
     profileLoading: profileQuery.isFetching && !profile,
     session,
+    authedFetch,
     mobileLayout,
     mobileSidebarToggleKey,
     themePreference,

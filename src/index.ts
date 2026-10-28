@@ -3,6 +3,7 @@ import { NotificationsHub } from './durable/notifications-hub';
 import { BackupTransferRunner } from './durable/backup-transfer-runner';
 import { handleRequest } from './router';
 import { StorageService } from './services/storage';
+import { getDatabase, getDatabaseStatus } from './services/storage-factory';
 import { applyCors, jsonResponse } from './utils/response';
 import { runScheduledBackupIfDue } from './handlers/backup';
 import {
@@ -58,7 +59,11 @@ async function ensureDatabaseInitialized(env: Env): Promise<void> {
 
   if (!dbInitPromise) {
     dbInitPromise = (async () => {
-      const storage = new StorageService(env.DB);
+      // Swap env.DB for the MySQL adapter when an external DB is configured
+      // (env vars or encrypted runtime config). Every repo reads env.DB.
+      const db = await getDatabase(env);
+      (env as { DB: D1Database }).DB = db;
+      const storage = new StorageService(db);
       await storage.initializeDatabase();
       dbInitialized = true;
       dbInitError = null;
@@ -75,6 +80,21 @@ async function ensureDatabaseInitialized(env: Env): Promise<void> {
   await dbInitPromise;
 }
 
+async function handleHealthz(env: Env): Promise<Response> {
+  const status = await getDatabaseStatus(env);
+  return jsonResponse(
+    {
+      ok: status.ok,
+      db: status.ok ? 'up' : 'down',
+      mode: status.mode,
+      source: status.source,
+      ...(status.version ? { version: status.version } : {}),
+      ...(status.error ? { error: status.error } : {}),
+    },
+    status.ok ? 200 : 503
+  );
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     void ctx;
@@ -88,6 +108,10 @@ export default {
     const assetResponse = await maybeServeAsset(normalizedRequest, env);
     if (assetResponse) {
       return applyCors(normalizedRequest, assetResponse, env);
+    }
+
+    if (requestPath === '/healthz' || requestPath === '/api/healthz') {
+      return applyCors(normalizedRequest, await handleHealthz(env), env);
     }
 
     await ensureDatabaseInitialized(env);

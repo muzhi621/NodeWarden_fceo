@@ -18,6 +18,19 @@ export interface Env {
   WEBAUTHN_ALLOWED_ORIGINS?: string;
   YUBICO_VALIDATION_URLS?: string;
   'globalSettings__yubico__validationUrls'?: string;
+  // ---- BYO-DB (external MySQL) support ----
+  // When DB_HOST is set, storage switches from D1 to the MySQL adapter.
+  DB_HOST?: string;
+  DB_PORT?: string;
+  DB_USER?: string;
+  DB_PASSWORD?: string;
+  DB_NAME?: string;
+  DB_SSL?: string;
+  DB_CONN_LIMIT?: string;
+  // Master key for the encrypted runtime DB config written from the admin UI.
+  DB_CONFIG_KEY?: string;
+  // Optional KV-like store for the encrypted runtime DB config.
+  SETTINGS_KV?: KVNamespace;
 }
 
 export type UserRole = 'admin' | 'user';

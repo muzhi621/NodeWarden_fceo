@@ -223,6 +223,13 @@ export default function AdminPage(props: AdminPageProps) {
           </button>
         </div>
       </section>
+      <section className="card">
+        <div className="section-head">
+          <h3>数据库设置（外接 MySQL）</h3>
+          <a className="btn btn-secondary small" href="/admin/database">打开</a>
+        </div>
+        <p className="muted-inline">配置外接 MySQL（TiDB / 自建 / 云数据库）连接，支持测试连接、加密保存与一键建表。</p>
+      </section>
     </div>
   );
 }
