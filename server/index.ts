@@ -20,8 +20,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { handleRequest } from '../src/router';
-import { StorageService } from '../src/services/storage';
-import { getDatabase, getDatabaseStatus } from '../src/services/storage-factory';
+import { ensureDatabaseInitialized, getDbInitError } from '../src/services/db-lifecycle';
+import { getDatabaseStatus } from '../src/services/storage-factory';
 import { applyCors, jsonResponse } from '../src/utils/response';
 import { isBackendRequestPath, isWebVaultHidden, webVaultNotFoundResponse } from '../src/web-vault-visibility';
 import type { Env } from '../src/types';
@@ -264,24 +264,10 @@ function toRequest(input: RequestInfo | URL): Request {
 // ---------------------------------------------------------------------------
 // Request pipeline (mirrors src/index.ts fetch())
 // ---------------------------------------------------------------------------
-
-let dbInitialized = false;
-let dbInitError: string | null = null;
-
-async function ensureDatabaseInitialized(env: Env): Promise<void> {
-  if (dbInitialized) return;
-  try {
-    const db = await getDatabase(env);
-    (env as { DB: D1Database }).DB = db;
-    const storage = new StorageService(db);
-    await storage.initializeDatabase();
-    dbInitialized = true;
-    dbInitError = null;
-  } catch (error) {
-    dbInitError = error instanceof Error ? error.message : String(error);
-    console.error('Database initialization failed:', error);
-  }
-}
+// Database resolution + per-request env.DB attachment + one-time schema init
+// live in src/services/db-lifecycle (shared with the Worker entry). The Node
+// runtime builds a fresh env per request (DB starts null), so the lifecycle
+// module re-attaches the resolved DB on every call.
 
 async function handleHealthz(env: Env): Promise<Response> {
   const status = await getDatabaseStatus(env);
@@ -317,6 +303,7 @@ async function pipeline(request: Request, env: Env): Promise<Response> {
   }
 
   await ensureDatabaseInitialized(env);
+  const dbInitError = getDbInitError();
   if (dbInitError) {
     const resp = jsonResponse(
       {

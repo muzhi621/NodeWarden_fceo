@@ -2,8 +2,8 @@ import { Env } from './types';
 import { NotificationsHub } from './durable/notifications-hub';
 import { BackupTransferRunner } from './durable/backup-transfer-runner';
 import { handleRequest } from './router';
-import { StorageService } from './services/storage';
-import { getDatabase, getDatabaseStatus } from './services/storage-factory';
+import { ensureDatabaseInitialized, getDbInitError } from './services/db-lifecycle';
+import { getDatabaseStatus } from './services/storage-factory';
 import { applyCors, jsonResponse } from './utils/response';
 import { runScheduledBackupIfDue } from './handlers/backup';
 import {
@@ -11,10 +11,6 @@ import {
   isWebVaultHidden,
   webVaultNotFoundResponse,
 } from './web-vault-visibility';
-
-let dbInitialized = false;
-let dbInitError: string | null = null;
-let dbInitPromise: Promise<void> | null = null;
 
 function normalizeRequestUrl(request: Request): Request {
   const url = new URL(request.url);
@@ -54,32 +50,6 @@ async function maybeServeAsset(request: Request, env: Env): Promise<Response | n
   return addSearchIndexHeaders(request, response);
 }
 
-async function ensureDatabaseInitialized(env: Env): Promise<void> {
-  if (dbInitialized) return;
-
-  if (!dbInitPromise) {
-    dbInitPromise = (async () => {
-      // Swap env.DB for the MySQL adapter when an external DB is configured
-      // (env vars or encrypted runtime config). Every repo reads env.DB.
-      const db = await getDatabase(env);
-      (env as { DB: D1Database }).DB = db;
-      const storage = new StorageService(db);
-      await storage.initializeDatabase();
-      dbInitialized = true;
-      dbInitError = null;
-    })()
-      .catch((error: unknown) => {
-        console.error('Failed to initialize database:', error);
-        dbInitError = error instanceof Error ? error.message : 'Unknown database initialization error';
-      })
-      .finally(() => {
-        dbInitPromise = null;
-      });
-  }
-
-  await dbInitPromise;
-}
-
 async function handleHealthz(env: Env): Promise<Response> {
   const status = await getDatabaseStatus(env);
   return jsonResponse(
@@ -115,6 +85,7 @@ export default {
     }
 
     await ensureDatabaseInitialized(env);
+    const dbInitError = getDbInitError();
     if (dbInitError) {
       // Log full error server-side, return generic message to client.
       console.error('DB init error (not forwarded to client):', dbInitError);
@@ -139,6 +110,7 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     void controller;
     await ensureDatabaseInitialized(env);
+    const dbInitError = getDbInitError();
     if (dbInitError) {
       console.error('Skipping scheduled backup because DB init failed:', dbInitError);
       return;

@@ -26,6 +26,7 @@
     "test:webauthn-connector": "node --test scripts/webauthn-connector.test.mjs && tsx --test scripts/webauthn-connector-headers.test.ts",
     "test:webauthn-connectors": "node --test scripts/webauthn-mobile-connector.test.mjs scripts/webauthn-connector.test.mjs && tsx --test scripts/webauthn-connector-headers.test.ts",
     "test:mysql-dialect": "tsx --test scripts/mysql-dialect.test.ts",
+    "test:db-lifecycle": "tsx --test scripts/db-lifecycle.test.ts",
     "migrate:d1-to-mysql": "tsx scripts/migrate-d1-to-mysql.ts",
     "start:node": "node --import ./server/register-cf-stub.mjs --import tsx server/index.ts",
     "deploy": "wrangler deploy",
