@@ -113,6 +113,31 @@ test('CREATE TABLE: users table keeps UNIQUE email indexable', () => {
   assert.match(out, /role VARCHAR\(2048\) NOT NULL DEFAULT 'user'/);
 });
 
+test('CREATE TABLE: table options ENGINE/CHARSET/COLLATE after closing paren (regression)', () => {
+  resetDialectTableCache();
+  // Covers every CREATE TABLE shape from storage-schema.ts: inline PK, reserved
+  // word `key`, composite PK, FOREIGN KEY constraint, TEXT DEFAULT.
+  const statements = [
+    'CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    'CREATE TABLE IF NOT EXISTS devices (user_id TEXT NOT NULL, device_identifier TEXT NOT NULL, banned INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, device_identifier))',
+    "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, key TEXT NOT NULL, kdf_type INTEGER NOT NULL, role TEXT NOT NULL DEFAULT 'user')",
+    "CREATE TABLE IF NOT EXISTS domain_settings (user_id TEXT PRIMARY KEY, equivalent_domains TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
+    'CREATE TABLE IF NOT EXISTS webauthn_challenges (challenge_hash TEXT PRIMARY KEY, scope TEXT NOT NULL, user_id TEXT, expires_at INTEGER NOT NULL, used_at TEXT, created_at INTEGER NOT NULL)',
+  ];
+  for (const stmt of statements) {
+    const out = translateSql(stmt);
+    // Table options must come after the column-definition closing paren.
+    assert.match(out, /\)\s*ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci\s*$/, `bad tail: ${out}`);
+    // And must not leak inside the parenthesized column definitions.
+    const openIdx = out.indexOf('(');
+    const closeIdx = out.lastIndexOf(')');
+    const columnDefs = out.slice(openIdx + 1, closeIdx);
+    assert.doesNotMatch(columnDefs, /ENGINE=/i, `ENGINE= inside parens: ${out}`);
+    assert.doesNotMatch(columnDefs, /CHARSET=/i, `CHARSET= inside parens: ${out}`);
+    assert.doesNotMatch(columnDefs, /COLLATE=/i, `COLLATE= inside parens: ${out}`);
+  }
+});
+
 test('CREATE INDEX: IF NOT EXISTS dropped, text columns get prefix', () => {
   resetDialectTableCache();
   translateSql("CREATE TABLE IF NOT EXISTS ciphers (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, updated_at TEXT NOT NULL, favorite INTEGER NOT NULL DEFAULT 0)");

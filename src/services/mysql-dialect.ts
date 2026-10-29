@@ -257,10 +257,10 @@ function translateCreateTable(sql: string): string {
   });
 
   let translated = `${headerMatch[1]}${table} (${translatedParts.join(', ')}`;
-  // Append engine clause before the closing paren.
-  const closing = tail.replace(/^\)/, ')');
+  // Table options must come AFTER the column definitions' closing paren (MySQL grammar).
   const engineClause = ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci';
-  translated = translated + engineClause + closing;
+  const closing = tail.replace(/^\)/, `)${engineClause}`);
+  translated = translated + closing;
   return translated;
 }
 
