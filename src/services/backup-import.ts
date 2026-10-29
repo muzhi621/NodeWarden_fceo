@@ -9,6 +9,7 @@ import {
   parseBackupArchive,
   validateBackupPayloadContents,
 } from './backup-archive';
+import { isMySqlDatabase } from './storage-mysql';
 
 // CONTRACT:
 // Restore is intentionally whitelist-based. Old backups may contain retired
@@ -83,6 +84,15 @@ async function queryRows(db: D1Database, sql: string, ...values: unknown[]): Pro
 }
 
 async function getTableCreateSql(db: D1Database, table: BackupTableName): Promise<string> {
+  // MySQL keeps no SQLite catalog: read the live DDL instead. Backtick
+  // identifiers are normalized to double quotes so the shadow-table rewrite
+  // below (and the dialect translator) handle both dialects identically.
+  if (isMySqlDatabase(db)) {
+    const ddlRow = await db.prepare(`SHOW CREATE TABLE ${table}`).first<Record<string, unknown>>();
+    const ddl = String(ddlRow?.['Create Table'] ?? '').trim();
+    if (ddl) return ddl.replace(/`([^`]+)`/g, '"$1"');
+  }
+
   const row = await db
     .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
     .bind(table)

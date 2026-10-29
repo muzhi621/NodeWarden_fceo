@@ -201,14 +201,30 @@ export class StorageService {
     return stmt.bind(...values.map(v => v === undefined ? null : v));
   }
 
+  /**
+   * Schema self-check: are all REQUIRED_SCHEMA_TABLES present?
+   *
+   * The query goes through the dialect layer, which rewrites the SQLite
+   * `sqlite_master` catalog to information_schema for MySQL. A metadata failure
+   * must never take the whole instance down — an unreadable catalog is treated
+   * as "tables missing" so the idempotent schema statements run again.
+   */
   private async hasRequiredSchemaTables(): Promise<boolean> {
     const placeholders = REQUIRED_SCHEMA_TABLES.map(() => '?').join(', ');
-    const result = await this.db
-      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})`)
-      .bind(...REQUIRED_SCHEMA_TABLES)
-      .all<{ name: string }>();
-    const found = new Set((result.results || []).map((row) => row.name));
-    return REQUIRED_SCHEMA_TABLES.every((table) => found.has(table));
+    try {
+      const result = await this.db
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})`)
+        .bind(...REQUIRED_SCHEMA_TABLES)
+        .all<{ name: string }>();
+      const found = new Set((result.results || []).map((row) => row.name));
+      return REQUIRED_SCHEMA_TABLES.every((table) => found.has(table));
+    } catch (error) {
+      console.warn(
+        'Schema table probe failed; re-running idempotent schema statements:',
+        error instanceof Error ? error.message : String(error)
+      );
+      return false;
+    }
   }
 
   private sqlChunkSize(fixedBindCount: number, bindCountPerItem = 1): number {

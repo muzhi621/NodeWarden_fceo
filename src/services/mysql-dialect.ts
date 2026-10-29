@@ -20,6 +20,10 @@
 // - TEXT column in FOREIGN KEY (col)            -> VARCHAR(512) (FK requires exact type/length match)
 // - composite PRIMARY KEY text columns          -> VARCHAR(512) for FK members, VARCHAR(255) for others
 //   (InnoDB index key budget is 3072 bytes: 512+255 utf8mb4 chars = 3068 bytes)
+// - SELECT ... FROM sqlite_master / sqlite_schema -> derived information_schema.TABLES
+//   (MySQL has no sqlite_master: error 1146 "Table 'db.sqlite_master' doesn't exist"
+//    used to break EVERY request once the schema version marker was stored, because
+//    StorageService.hasRequiredSchemaTables() always queries that catalog first.)
 
 const STRING_INDEX_COLUMNS = new Set([
   'id', 'user_id', 'cipher_id', 'folder_id', 'device_identifier', 'request_device_identifier',
@@ -160,12 +164,16 @@ function quoteIdentifier(name: string): string {
 
 /** Quote the reserved word `key` when used as an identifier (not PRIMARY KEY / FOREIGN KEY / DUPLICATE KEY / string). */
 function quoteKeyIdentifier(sql: string): string {
-  return sql.replace(/(?<!\w)(?<!PRIMARY\s)(?<!FOREIGN\s)(?<!DUPLICATE\s)(?<!`)key(?!\w)(?!`)/gi, (match, offset, whole: string) => {
-    // Keep PRIMARY KEY / FOREIGN KEY / ON DUPLICATE KEY intact.
-    const before = whole.slice(Math.max(0, offset - 12), offset).toUpperCase();
-    if (/(PRIMARY|FOREIGN|DUPLICATE)\s+$/.test(before)) return match;
-    return '`key`';
-  });
+  // `key` is a column name in several tables but a keyword in index clauses.
+  // UNIQUE KEY appears in MySQL-sourced DDL (SHOW CREATE TABLE, backup restore).
+  return sql.replace(
+    /(?<!\w)(?<!PRIMARY\s)(?<!FOREIGN\s)(?<!UNIQUE\s)(?<!DUPLICATE\s)(?<!`)key(?!\w)(?!`)/gi,
+    (match, offset, whole: string) => {
+      const before = whole.slice(Math.max(0, offset - 14), offset).toUpperCase();
+      if (/(PRIMARY|FOREIGN|UNIQUE|DUPLICATE)\s+$/.test(before)) return match;
+      return '`key`';
+    }
+  );
 }
 
 function translateColumnDef(def: string, table: string): string {
@@ -281,7 +289,9 @@ function translateCreateTable(sql: string): string {
   let translated = `${headerMatch[1]}${table} (${translatedParts.join(', ')}`;
   // Table options must come AFTER the column definitions' closing paren (MySQL grammar).
   const engineClause = ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci';
-  const closing = tail.replace(/^\)/, `)${engineClause}`);
+  // DDL that already carries table options (MySQL SHOW CREATE TABLE output, used
+  // by the shadow-table restore path) must not get a second ENGINE clause.
+  const closing = /\bENGINE\s*=/i.test(tail) ? tail : tail.replace(/^\)/, `)${engineClause}`);
   translated = translated + closing;
   return translated;
 }
@@ -326,6 +336,33 @@ function translatePragma(sql: string): string {
   return 'SELECT 1';
 }
 
+// MySQL has no SQLite system catalog. NodeWarden reads table metadata from
+// `sqlite_master` (schema self-check, backup shadow-table restore), so the
+// catalog is replaced with a derived table exposing the same column names
+// (name / type / sql) — the surrounding WHERE clauses keep working verbatim.
+//
+// The `sql` column stays NULL on purpose: MySQL DDL is fetched with
+// SHOW CREATE TABLE by the caller (see backup-import.getTableCreateSql).
+// Called on *masked* SQL (string literals replaced by \u0000N\u0000 markers) so the
+// word sqlite_master inside a literal is never rewritten; the mock `type`
+// value is injected through the same mask so `type = 'table'` filters match.
+function rewriteSqliteCatalog(sql: string, literals: string[]): string {
+  if (!/\bsqlite_(?:master|schema)\b/i.test(sql)) return sql;
+  const tableLiteral = maskToLiteral(literals.length);
+  literals.push("'table'");
+  // `sql` is a reserved word in MySQL 8 — the alias (and the caller's
+  // `SELECT sql` projection) must be backticked or MySQL answers ER_PARSE_ERROR.
+  const catalog =
+    `(SELECT TABLE_NAME AS name, ${tableLiteral} AS type, NULL AS \`sql\` ` +
+    'FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE())';
+  // `SELECT sql FROM sqlite_master WHERE ...` (backup shadow-table restore).
+  const projected = sql.replace(/^(\s*SELECT\s+)sql\b/i, '$1`sql`');
+  return projected.replace(
+    /\b(?:main\.)?sqlite_(?:master|schema)\b/gi,
+    `${catalog} AS sqlite_master`
+  );
+}
+
 export function translateSql(input: string): string {
   let sql = input.trim();
   if (!sql) return sql;
@@ -366,7 +403,10 @@ export function translateSql(input: string): string {
   // Reserved word `key` as identifier.
   out = quoteKeyIdentifier(out);
 
-  return unmaskLiterals(out, literals);
+  // Catalog rewrite runs while literals are still masked: it must not touch the
+  // word sqlite_master inside string literals, and it injects its own literal
+  // through the same mask.
+  return unmaskLiterals(rewriteSqliteCatalog(out, literals), literals);
 }
 
 export const __testing = { maskLiterals, unmaskLiterals, translateCreateTable, translateCreateIndex, maskToLiteral };

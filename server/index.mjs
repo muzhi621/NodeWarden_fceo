@@ -41,7 +41,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// nodewarden-git/src/config/limits.ts
+// src/config/limits.ts
 function getRefreshTokenSlidingTtlMs(clientType) {
   const normalized = String(clientType || "").trim().toLowerCase();
   if (normalized === "web") return LIMITS.auth.refreshTokenWebSlidingTtlMs;
@@ -50,7 +50,7 @@ function getRefreshTokenSlidingTtlMs(clientType) {
 }
 var LIMITS;
 var init_limits = __esm({
-  "nodewarden-git/src/config/limits.ts"() {
+  "src/config/limits.ts"() {
     "use strict";
     LIMITS = {
       auth: {
@@ -223,7 +223,7 @@ var init_limits = __esm({
   }
 });
 
-// nodewarden-git/src/utils/jwt.ts
+// src/utils/jwt.ts
 function base64UrlEncode(data) {
   const base643 = btoa(String.fromCharCode(...data));
   return base643.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -495,14 +495,14 @@ async function verifySendAccessToken(token, secret) {
 }
 var hmacKeyCache;
 var init_jwt = __esm({
-  "nodewarden-git/src/utils/jwt.ts"() {
+  "src/utils/jwt.ts"() {
     "use strict";
     init_limits();
     hmacKeyCache = /* @__PURE__ */ new Map();
   }
 });
 
-// nodewarden-git/src/services/storage-config-repo.ts
+// src/services/storage-config-repo.ts
 async function isRegistered(db) {
   const row = await db.prepare("SELECT value FROM config WHERE key = ?").bind("registered").first();
   return row?.value === "true";
@@ -518,12 +518,12 @@ async function setRegistered(db) {
   await db.prepare("INSERT INTO config(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind("registered", "true").run();
 }
 var init_storage_config_repo = __esm({
-  "nodewarden-git/src/services/storage-config-repo.ts"() {
+  "src/services/storage-config-repo.ts"() {
     "use strict";
   }
 });
 
-// nodewarden-git/src/services/push-relay.ts
+// src/services/push-relay.ts
 async function fetchPushEndpoint(url, init, errorMessage) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PUSH_REQUEST_TIMEOUT_MS);
@@ -713,7 +713,7 @@ async function notifyMobilePush(env, input) {
 }
 var PUSH_RELAY_URI, PUSH_IDENTITY_URI, INSTALLATIONS_URI, PUSH_INSTALLATION_ID_KEY, PUSH_INSTALLATION_KEY_KEY, PUSH_REQUEST_TIMEOUT_MS, cachedPushAccessToken;
 var init_push_relay = __esm({
-  "nodewarden-git/src/services/push-relay.ts"() {
+  "src/services/push-relay.ts"() {
     "use strict";
     init_storage_config_repo();
     PUSH_RELAY_URI = "https://push.bitwarden.com";
@@ -726,7 +726,7 @@ var init_push_relay = __esm({
   }
 });
 
-// nodewarden-git/src/services/storage-schema.ts
+// src/services/storage-schema.ts
 async function executeSchemaStatement(db, statement) {
   try {
     await db.prepare(statement).run();
@@ -755,7 +755,7 @@ async function ensureStorageSchema(db) {
 }
 var SCHEMA_STATEMENTS;
 var init_storage_schema = __esm({
-  "nodewarden-git/src/services/storage-schema.ts"() {
+  "src/services/storage-schema.ts"() {
     "use strict";
     SCHEMA_STATEMENTS = [
       "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT, master_password_hint TEXT, master_password_hash TEXT NOT NULL, key TEXT NOT NULL, private_key TEXT, public_key TEXT, kdf_type INTEGER NOT NULL, kdf_iterations INTEGER NOT NULL, kdf_memory INTEGER, kdf_parallelism INTEGER, security_stamp TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', status TEXT NOT NULL DEFAULT 'active', verify_devices INTEGER NOT NULL DEFAULT 0, totp_secret TEXT, totp_recovery_code TEXT, yubikey_key1 TEXT, yubikey_key2 TEXT, yubikey_key3 TEXT, yubikey_key4 TEXT, yubikey_key5 TEXT, yubikey_nfc INTEGER NOT NULL DEFAULT 0, api_key TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
@@ -856,7 +856,7 @@ var init_storage_schema = __esm({
   }
 });
 
-// nodewarden-git/src/services/storage-user-repo.ts
+// src/services/storage-user-repo.ts
 function mapUserRow(row) {
   return {
     id: row.id,
@@ -994,13 +994,13 @@ async function deleteUserById(db, id) {
 }
 var USER_SELECT_COLUMNS;
 var init_storage_user_repo = __esm({
-  "nodewarden-git/src/services/storage-user-repo.ts"() {
+  "src/services/storage-user-repo.ts"() {
     "use strict";
     USER_SELECT_COLUMNS = "id, email, name, master_password_hint, master_password_hash, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, role, status, verify_devices, totp_secret, totp_recovery_code, yubikey_key1, yubikey_key2, yubikey_key3, yubikey_key4, yubikey_key5, yubikey_nfc, api_key, created_at, updated_at";
   }
 });
 
-// nodewarden-git/src/services/storage-admin-repo.ts
+// src/services/storage-admin-repo.ts
 function auditLogFromRow(row) {
   return {
     id: row.id,
@@ -1154,12 +1154,12 @@ async function listAuditLogs(db, options) {
   };
 }
 var init_storage_admin_repo = __esm({
-  "nodewarden-git/src/services/storage-admin-repo.ts"() {
+  "src/services/storage-admin-repo.ts"() {
     "use strict";
   }
 });
 
-// nodewarden-git/src/services/storage-folder-repo.ts
+// src/services/storage-folder-repo.ts
 function mapFolderRow(row) {
   return {
     id: row.id,
@@ -1241,12 +1241,12 @@ async function getFoldersPage(db, userId, limit, offset) {
   return (res.results || []).map((row) => mapFolderRow(row));
 }
 var init_storage_folder_repo = __esm({
-  "nodewarden-git/src/services/storage-folder-repo.ts"() {
+  "src/services/storage-folder-repo.ts"() {
     "use strict";
   }
 });
 
-// nodewarden-git/src/services/storage-cipher-repo.ts
+// src/services/storage-cipher-repo.ts
 function normalizeOptionalId(value) {
   if (value == null) return null;
   const normalized = String(value).trim();
@@ -1500,7 +1500,7 @@ async function bulkUnarchiveCiphers(db, sqlChunkSize, updateRevisionDate2, ids, 
 }
 var CIPHER_SCALAR_DATA_KEYS;
 var init_storage_cipher_repo = __esm({
-  "nodewarden-git/src/services/storage-cipher-repo.ts"() {
+  "src/services/storage-cipher-repo.ts"() {
     "use strict";
     CIPHER_SCALAR_DATA_KEYS = /* @__PURE__ */ new Set([
       "id",
@@ -1536,7 +1536,7 @@ var init_storage_cipher_repo = __esm({
   }
 });
 
-// nodewarden-git/src/services/storage-attachment-repo.ts
+// src/services/storage-attachment-repo.ts
 async function getAttachment(db, id) {
   const row = await db.prepare("SELECT id, cipher_id, file_name, size, size_name, key FROM attachments WHERE id = ?").bind(id).first();
   if (!row) return null;
@@ -1684,12 +1684,12 @@ async function updateCipherRevisionDate(getCipherById, saveCipherRecord, updateR
   return { userId: cipher.userId, revisionDate };
 }
 var init_storage_attachment_repo = __esm({
-  "nodewarden-git/src/services/storage-attachment-repo.ts"() {
+  "src/services/storage-attachment-repo.ts"() {
     "use strict";
   }
 });
 
-// nodewarden-git/src/services/storage-send-repo.ts
+// src/services/storage-send-repo.ts
 function mapSendRow(row) {
   return {
     id: row.id,
@@ -1809,12 +1809,12 @@ async function getSendsPage(db, userId, limit, offset) {
   return (res.results || []).map((row) => mapSendRow(row));
 }
 var init_storage_send_repo = __esm({
-  "nodewarden-git/src/services/storage-send-repo.ts"() {
+  "src/services/storage-send-repo.ts"() {
     "use strict";
   }
 });
 
-// nodewarden-git/src/services/storage-refresh-token-repo.ts
+// src/services/storage-refresh-token-repo.ts
 async function saveRefreshToken(db, refreshTokenKey, maybeCleanupExpiredRefreshTokens, token, userId, expiresAtMs, deviceIdentifier, deviceSessionStamp, securityStamp, clientType, absoluteExpiresAtMs) {
   await maybeCleanupExpiredRefreshTokens(Date.now());
   const tokenKey = await refreshTokenKey(token);
@@ -1887,22 +1887,22 @@ async function deleteRefreshTokensByDevice(db, userId, deviceIdentifier) {
   return Number(result.meta.changes ?? 0);
 }
 var init_storage_refresh_token_repo = __esm({
-  "nodewarden-git/src/services/storage-refresh-token-repo.ts"() {
+  "src/services/storage-refresh-token-repo.ts"() {
     "use strict";
   }
 });
 
-// nodewarden-git/src/utils/uuid.ts
+// src/utils/uuid.ts
 function generateUUID() {
   return crypto.randomUUID();
 }
 var init_uuid = __esm({
-  "nodewarden-git/src/utils/uuid.ts"() {
+  "src/utils/uuid.ts"() {
     "use strict";
   }
 });
 
-// nodewarden-git/src/services/storage-device-repo.ts
+// src/services/storage-device-repo.ts
 function mapDeviceRow(row) {
   return {
     userId: row.user_id,
@@ -2085,13 +2085,13 @@ async function getTrustedTwoFactorDeviceTokenUserId(db, trustedTokenKey, token, 
   return row.user_id;
 }
 var init_storage_device_repo = __esm({
-  "nodewarden-git/src/services/storage-device-repo.ts"() {
+  "src/services/storage-device-repo.ts"() {
     "use strict";
     init_uuid();
   }
 });
 
-// nodewarden-git/src/services/storage-auth-request-repo.ts
+// src/services/storage-auth-request-repo.ts
 function mapAuthRequestRow(row) {
   return {
     id: row.id,
@@ -2183,14 +2183,14 @@ async function pruneExpiredAuthRequests(db, nowMs = Date.now()) {
 }
 var AUTH_REQUEST_EXPIRATION_MS, AUTH_REQUEST_SELECT;
 var init_storage_auth_request_repo = __esm({
-  "nodewarden-git/src/services/storage-auth-request-repo.ts"() {
+  "src/services/storage-auth-request-repo.ts"() {
     "use strict";
     AUTH_REQUEST_EXPIRATION_MS = 15 * 60 * 1e3;
     AUTH_REQUEST_SELECT = "SELECT id, user_id, organization_id, type, request_device_identifier, request_device_type, request_ip_address, request_country_name, response_device_identifier, access_code, public_key, key, master_password_hash, approved, creation_date, response_date, authentication_date FROM auth_requests";
   }
 });
 
-// nodewarden-git/src/services/storage-attachment-token-repo.ts
+// src/services/storage-attachment-token-repo.ts
 async function ensureUsedAttachmentDownloadTokenTable(db) {
   await db.prepare(
     "CREATE TABLE IF NOT EXISTS used_attachment_download_tokens (jti TEXT PRIMARY KEY, expires_at INTEGER NOT NULL)"
@@ -2213,12 +2213,12 @@ async function consumeAttachmentDownloadToken(db, shouldRunPeriodicCleanup, last
   };
 }
 var init_storage_attachment_token_repo = __esm({
-  "nodewarden-git/src/services/storage-attachment-token-repo.ts"() {
+  "src/services/storage-attachment-token-repo.ts"() {
     "use strict";
   }
 });
 
-// nodewarden-git/src/services/storage-totp-replay-repo.ts
+// src/services/storage-totp-replay-repo.ts
 async function consumeTotpLoginCounter(db, shouldRunPeriodicCleanup, lastCleanupAt, cleanupIntervalMs, userId, timeCounter, consumedAtMs, markerTtlMs) {
   let cleanedUpAt = null;
   if (shouldRunPeriodicCleanup(lastCleanupAt, cleanupIntervalMs)) {
@@ -2234,12 +2234,12 @@ async function consumeTotpLoginCounter(db, shouldRunPeriodicCleanup, lastCleanup
   };
 }
 var init_storage_totp_replay_repo = __esm({
-  "nodewarden-git/src/services/storage-totp-replay-repo.ts"() {
+  "src/services/storage-totp-replay-repo.ts"() {
     "use strict";
   }
 });
 
-// nodewarden-git/src/services/storage-revision-repo.ts
+// src/services/storage-revision-repo.ts
 async function getRevisionDate(db, userId) {
   const row = await db.prepare("SELECT revision_date FROM user_revisions WHERE user_id = ?").bind(userId).first();
   if (row?.revision_date) return row.revision_date;
@@ -2257,15 +2257,15 @@ async function updateRevisionDate(db, userId) {
   return date;
 }
 var init_storage_revision_repo = __esm({
-  "nodewarden-git/src/services/storage-revision-repo.ts"() {
+  "src/services/storage-revision-repo.ts"() {
     "use strict";
   }
 });
 
-// nodewarden-git/src/static/global_domains.bitwarden.json
+// src/static/global_domains.bitwarden.json
 var global_domains_bitwarden_default;
 var init_global_domains_bitwarden = __esm({
-  "nodewarden-git/src/static/global_domains.bitwarden.json"() {
+  "src/static/global_domains.bitwarden.json"() {
     global_domains_bitwarden_default = [
       { type: 0, domains: ["youtube.com", "google.com", "gmail.com"], excluded: false },
       { type: 1, domains: ["apple.com", "icloud.com"], excluded: false },
@@ -2293,17 +2293,17 @@ var init_global_domains_bitwarden = __esm({
   }
 });
 
-// nodewarden-git/src/static/global_domains.custom.json
+// src/static/global_domains.custom.json
 var global_domains_custom_default;
 var init_global_domains_custom = __esm({
-  "nodewarden-git/src/static/global_domains.custom.json"() {
+  "src/static/global_domains.custom.json"() {
     global_domains_custom_default = [
       { type: -10001, domains: ["nodewarden.example", "nw.example"], excluded: false, source: "nodewarden" }
     ];
   }
 });
 
-// nodewarden-git/shared/domain-normalize.ts
+// shared/domain-normalize.ts
 function extractHost(input) {
   let raw = input.trim().toLowerCase();
   if (!raw) return "";
@@ -2342,7 +2342,7 @@ function normalizeEquivalentDomain(value) {
 }
 var MULTI_LABEL_PUBLIC_SUFFIXES;
 var init_domain_normalize = __esm({
-  "nodewarden-git/shared/domain-normalize.ts"() {
+  "shared/domain-normalize.ts"() {
     "use strict";
     MULTI_LABEL_PUBLIC_SUFFIXES = /* @__PURE__ */ new Set([
       "ac.cn",
@@ -2444,7 +2444,7 @@ var init_domain_normalize = __esm({
   }
 });
 
-// nodewarden-git/src/services/domain-rules.ts
+// src/services/domain-rules.ts
 function normalizeDomain(value) {
   return normalizeEquivalentDomain(value);
 }
@@ -2592,7 +2592,7 @@ function buildDomainsResponse(equivalentDomains, customEquivalentDomains, exclud
 }
 var bitwardenGlobalDomains, customGlobalDomains, globalDomains;
 var init_domain_rules = __esm({
-  "nodewarden-git/src/services/domain-rules.ts"() {
+  "src/services/domain-rules.ts"() {
     "use strict";
     init_global_domains_bitwarden();
     init_global_domains_custom();
@@ -2606,7 +2606,7 @@ var init_domain_rules = __esm({
   }
 });
 
-// nodewarden-git/src/services/storage-domain-rules-repo.ts
+// src/services/storage-domain-rules-repo.ts
 function parseJsonArray(raw, fallback) {
   if (!raw) return fallback;
   try {
@@ -2641,13 +2641,13 @@ async function saveUserDomainSettings(db, userId, equivalentDomains, customEquiv
   ).run();
 }
 var init_storage_domain_rules_repo = __esm({
-  "nodewarden-git/src/services/storage-domain-rules-repo.ts"() {
+  "src/services/storage-domain-rules-repo.ts"() {
     "use strict";
     init_domain_rules();
   }
 });
 
-// nodewarden-git/src/services/storage-account-passkey-repo.ts
+// src/services/storage-account-passkey-repo.ts
 async function tableColumns(db, tableName) {
   const result = await db.prepare(`PRAGMA table_info(${tableName})`).all();
   return new Set((result.results || []).map((row) => String(row.name || "").trim()).filter(Boolean));
@@ -2814,7 +2814,7 @@ async function consumeAccountPasskeyChallenge(db, challengeHash, scope, userId, 
 }
 var accountPasskeySchemaReady, ACCOUNT_PASSKEY_CREDENTIAL_COLUMN_DEFS, ACCOUNT_PASSKEY_CHALLENGE_COLUMNS;
 var init_storage_account_passkey_repo = __esm({
-  "nodewarden-git/src/services/storage-account-passkey-repo.ts"() {
+  "src/services/storage-account-passkey-repo.ts"() {
     "use strict";
     accountPasskeySchemaReady = false;
     ACCOUNT_PASSKEY_CREDENTIAL_COLUMN_DEFS = [
@@ -2846,10 +2846,10 @@ var init_storage_account_passkey_repo = __esm({
   }
 });
 
-// nodewarden-git/src/services/storage.ts
+// src/services/storage.ts
 var TWO_FACTOR_REMEMBER_TTL_MS, STORAGE_SCHEMA_VERSION_KEY, STORAGE_SCHEMA_VERSION, REQUIRED_SCHEMA_TABLES, StorageService;
 var init_storage = __esm({
-  "nodewarden-git/src/services/storage.ts"() {
+  "src/services/storage.ts"() {
     "use strict";
     init_limits();
     init_push_relay();
@@ -2898,11 +2898,27 @@ var init_storage = __esm({
       safeBind(stmt, ...values) {
         return stmt.bind(...values.map((v) => v === void 0 ? null : v));
       }
+      /**
+       * Schema self-check: are all REQUIRED_SCHEMA_TABLES present?
+       *
+       * The query goes through the dialect layer, which rewrites the SQLite
+       * `sqlite_master` catalog to information_schema for MySQL. A metadata failure
+       * must never take the whole instance down — an unreadable catalog is treated
+       * as "tables missing" so the idempotent schema statements run again.
+       */
       async hasRequiredSchemaTables() {
         const placeholders = REQUIRED_SCHEMA_TABLES.map(() => "?").join(", ");
-        const result = await this.db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})`).bind(...REQUIRED_SCHEMA_TABLES).all();
-        const found = new Set((result.results || []).map((row) => row.name));
-        return REQUIRED_SCHEMA_TABLES.every((table) => found.has(table));
+        try {
+          const result = await this.db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})`).bind(...REQUIRED_SCHEMA_TABLES).all();
+          const found = new Set((result.results || []).map((row) => row.name));
+          return REQUIRED_SCHEMA_TABLES.every((table) => found.has(table));
+        } catch (error) {
+          console.warn(
+            "Schema table probe failed; re-running idempotent schema statements:",
+            error instanceof Error ? error.message : String(error)
+          );
+          return false;
+        }
       }
       sqlChunkSize(fixedBindCount, bindCountPerItem = 1) {
         const safeFixedBindCount = Math.max(0, Math.floor(fixedBindCount));
@@ -3442,7 +3458,7 @@ var init_storage = __esm({
   }
 });
 
-// nodewarden-git/src/utils/api-key.ts
+// src/utils/api-key.ts
 function constantTimeEquals(a, b) {
   const encA = new TextEncoder().encode(a);
   const encB = new TextEncoder().encode(b);
@@ -3474,13 +3490,13 @@ async function verifyApiKey(apiKey2, storedApiKey) {
 }
 var API_KEY_HASH_PREFIX;
 var init_api_key = __esm({
-  "nodewarden-git/src/utils/api-key.ts"() {
+  "src/utils/api-key.ts"() {
     "use strict";
     API_KEY_HASH_PREFIX = "sha256:";
   }
 });
 
-// nodewarden-git/src/services/password-verifier.ts
+// src/services/password-verifier.ts
 function toBase64(bytes) {
   return btoa(String.fromCharCode(...bytes));
 }
@@ -3536,7 +3552,7 @@ function needsPasswordVerifierUpgrade(stored) {
 }
 var ITERATIONS, LEGACY_PREFIX, PREFIX, SALT_BYTES, DUMMY_SALT, BASE64_32_BYTES;
 var init_password_verifier = __esm({
-  "nodewarden-git/src/services/password-verifier.ts"() {
+  "src/services/password-verifier.ts"() {
     "use strict";
     init_api_key();
     ITERATIONS = 1e5;
@@ -3548,10 +3564,10 @@ var init_password_verifier = __esm({
   }
 });
 
-// nodewarden-git/src/services/auth.ts
+// src/services/auth.ts
 var AUTH_CONTEXT_CACHE_TTL_MS, AuthService;
 var init_auth = __esm({
-  "nodewarden-git/src/services/auth.ts"() {
+  "src/services/auth.ts"() {
     "use strict";
     init_jwt();
     init_limits();
@@ -3780,7 +3796,7 @@ var init_auth = __esm({
   }
 });
 
-// nodewarden-git/src/utils/origins.ts
+// src/utils/origins.ts
 function normalizeOrigin(value) {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -3819,7 +3835,7 @@ function isConfiguredWebAuthnAllowedOrigin(env, origin) {
 }
 var OFFICIAL_BITWARDEN_BROWSER_EXTENSION_ORIGINS, OFFICIAL_BITWARDEN_DESKTOP_ORIGINS;
 var init_origins = __esm({
-  "nodewarden-git/src/utils/origins.ts"() {
+  "src/utils/origins.ts"() {
     "use strict";
     OFFICIAL_BITWARDEN_BROWSER_EXTENSION_ORIGINS = [
       "chrome-extension://nngceckbapebfimnlniiiahkandclblb",
@@ -3832,7 +3848,7 @@ var init_origins = __esm({
   }
 });
 
-// nodewarden-git/src/utils/response.ts
+// src/utils/response.ts
 function isWildcardCorsPath(path2) {
   return path2.startsWith("/icons/") || path2.startsWith("/fill-assist/") || path2 === "/v1/assetlinks:check" || path2 === "/api/v1/assetlinks:check" || path2 === "/config" || path2 === "/api/config" || path2 === "/api/version";
 }
@@ -3951,7 +3967,7 @@ function handleCors(request, env) {
 }
 var CORS_METHODS, DEFAULT_CORS_HEADERS;
 var init_response = __esm({
-  "nodewarden-git/src/utils/response.ts"() {
+  "src/utils/response.ts"() {
     "use strict";
     init_limits();
     init_origins();
@@ -3975,7 +3991,7 @@ var init_response = __esm({
   }
 });
 
-// nodewarden-git/src/services/audit-events.ts
+// src/services/audit-events.ts
 function normalizePositiveInteger(value, allowed) {
   if (value === null || value === 0 || value === "0" || value === "forever" || value === "unlimited") return null;
   const parsed = Math.floor(Number(value));
@@ -4084,7 +4100,7 @@ async function safeWriteAuditEvent(env, event) {
 }
 var SENSITIVE_KEY_RE, MAX_METADATA_BYTES, AUDIT_CLEANUP_INTERVAL_MS, AUDIT_CLEANUP_PROBABILITY, AUDIT_LOG_SETTINGS_KEY, DEFAULT_AUDIT_LOG_SETTINGS, lastAuditCleanupAt, ALLOWED_METADATA_KEYS;
 var init_audit_events = __esm({
-  "nodewarden-git/src/services/audit-events.ts"() {
+  "src/services/audit-events.ts"() {
     "use strict";
     init_uuid();
     init_storage();
@@ -4158,7 +4174,7 @@ var init_audit_events = __esm({
   }
 });
 
-// nodewarden-git/src/utils/yubico-otp.ts
+// src/utils/yubico-otp.ts
 function normalizeYubiKeyOtp(input) {
   return String(input || "").replace(/\s+/g, "").toLowerCase();
 }
@@ -4295,7 +4311,7 @@ async function verifyYubicoOtp(env, otpInput, credentials) {
 }
 var YUBIKEY_PUBLIC_ID_LENGTH, YUBIKEY_MIN_OTP_LENGTH, YUBIKEY_MAX_OTP_LENGTH, YUBICO_DEFAULT_VALIDATION_URL, YUBICO_GET_API_KEY_URL, MODHEX_RE;
 var init_yubico_otp = __esm({
-  "nodewarden-git/src/utils/yubico-otp.ts"() {
+  "src/utils/yubico-otp.ts"() {
     "use strict";
     YUBIKEY_PUBLIC_ID_LENGTH = 12;
     YUBIKEY_MIN_OTP_LENGTH = 32;
@@ -4306,7 +4322,7 @@ var init_yubico_otp = __esm({
   }
 });
 
-// nodewarden-git/src/services/yubico-config.ts
+// src/services/yubico-config.ts
 async function getYubicoCredentials(db) {
   const result = await db.prepare("SELECT key, value FROM config WHERE key IN (?, ?)").bind(YUBICO_CLIENT_ID_CONFIG_KEY, YUBICO_SECRET_KEY_CONFIG_KEY).all();
   const values = new Map((result.results || []).map((row) => [row.key, String(row.value || "").trim()]));
@@ -4362,7 +4378,7 @@ async function initializeYubicoCredentialsOnce(db, email, otp) {
 }
 var YUBICO_CLIENT_ID_CONFIG_KEY, YUBICO_SECRET_KEY_CONFIG_KEY, YUBICO_BOOTSTRAP_CLAIM_CONFIG_KEY, YUBICO_BOOTSTRAP_CLAIM_TTL_MS;
 var init_yubico_config = __esm({
-  "nodewarden-git/src/services/yubico-config.ts"() {
+  "src/services/yubico-config.ts"() {
     "use strict";
     init_yubico_otp();
     YUBICO_CLIENT_ID_CONFIG_KEY = "globalSettings__yubico__clientId";
@@ -4372,7 +4388,7 @@ var init_yubico_config = __esm({
   }
 });
 
-// nodewarden-git/src/durable/notifications-hub.ts
+// src/durable/notifications-hub.ts
 import { DurableObject, waitUntil } from "cloudflare:workers";
 function notifyUserVaultSync(env, userId, revisionDate, contextId) {
   waitUntil(notifyUserUpdate(env, userId, SIGNALR_UPDATE_TYPE_SYNC_VAULT, revisionDate, contextId ?? null, null));
@@ -4636,7 +4652,7 @@ async function notifyUserBackupRestoreProgress(env, userId, progress, targetDevi
 }
 var SIGNALR_RECORD_SEPARATOR, SIGNALR_HANDSHAKE_ACK, SIGNALR_UPDATE_TYPE_SYNC_CIPHER_UPDATE, SIGNALR_UPDATE_TYPE_SYNC_CIPHER_CREATE, SIGNALR_UPDATE_TYPE_SYNC_FOLDER_DELETE, SIGNALR_UPDATE_TYPE_SYNC_CIPHERS, SIGNALR_UPDATE_TYPE_SYNC_VAULT, SIGNALR_UPDATE_TYPE_SYNC_FOLDER_CREATE, SIGNALR_UPDATE_TYPE_SYNC_FOLDER_UPDATE, SIGNALR_UPDATE_TYPE_SYNC_CIPHER_DELETE, SIGNALR_UPDATE_TYPE_LOG_OUT, SIGNALR_UPDATE_TYPE_SYNC_SEND_CREATE, SIGNALR_UPDATE_TYPE_SYNC_SEND_UPDATE, SIGNALR_UPDATE_TYPE_SYNC_SEND_DELETE, SIGNALR_UPDATE_TYPE_AUTH_REQUEST, SIGNALR_UPDATE_TYPE_BACKUP_RESTORE_PROGRESS, WEBSOCKET_CONNECTION_TOKEN_TTL_MS;
 var init_notifications_hub = __esm({
-  "nodewarden-git/src/durable/notifications-hub.ts"() {
+  "src/durable/notifications-hub.ts"() {
     "use strict";
     init_push_relay();
     SIGNALR_RECORD_SEPARATOR = 30;
@@ -4659,7 +4675,7 @@ var init_notifications_hub = __esm({
   }
 });
 
-// nodewarden-git/src/utils/direct-upload.ts
+// src/utils/direct-upload.ts
 function buildDirectUploadUrl(request, path2, token) {
   const version = "2023-11-03";
   const expiresAt = "2099-12-31T23:59:59Z";
@@ -4742,7 +4758,7 @@ async function parseDirectUploadPayload(request, options) {
 }
 var MULTIPART_FORMDATA_OVERHEAD_BYTES;
 var init_direct_upload = __esm({
-  "nodewarden-git/src/utils/direct-upload.ts"() {
+  "src/utils/direct-upload.ts"() {
     "use strict";
     init_limits();
     init_response();
@@ -4750,7 +4766,7 @@ var init_direct_upload = __esm({
   }
 });
 
-// nodewarden-git/src/services/blob-store.ts
+// src/services/blob-store.ts
 function hasR2Storage(env) {
   return !!env.ATTACHMENTS;
 }
@@ -4833,14 +4849,14 @@ async function deleteBlobObject(env, key) {
 }
 var DEFAULT_CONTENT_TYPE, KV_MAX_OBJECT_BYTES;
 var init_blob_store = __esm({
-  "nodewarden-git/src/services/blob-store.ts"() {
+  "src/services/blob-store.ts"() {
     "use strict";
     DEFAULT_CONTENT_TYPE = "application/octet-stream";
     KV_MAX_OBJECT_BYTES = 25 * 1024 * 1024;
   }
 });
 
-// nodewarden-git/src/utils/passkey.ts
+// src/utils/passkey.ts
 function bytesToBase64Url(bytes) {
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
@@ -4866,12 +4882,12 @@ function parseClientDataJSON(base64Url) {
   }
 }
 var init_passkey = __esm({
-  "nodewarden-git/src/utils/passkey.ts"() {
+  "src/utils/passkey.ts"() {
     "use strict";
   }
 });
 
-// nodewarden-git/node_modules/fflate/esm/index.mjs
+// node_modules/fflate/esm/index.mjs
 import { createRequire } from "module";
 function deflateSync(data, opts) {
   return dopt(data, opts || {}, 0, 0);
@@ -5013,7 +5029,7 @@ function unzipSync(data, opts) {
 }
 var require2, _a, Worker, isMarkedAsUntransferable, u8, u16, i32, fleb, fdeb, clim, freb, _a, fl, revfl, _b, fd, revfd, rev, x, i, hMap, flt, i, i, i, i, fdt, i, flm, flrm, fdm, fdrm, max, bits, bits16, shft, slc, ec, err, inflt, wbits, wbits16, hTree, ln, lc, clen, wfblk, wblk, deo, et, dflt, crct, crc, dopt, mrg, b2, b4, b8, wbytes, fltn, te, td, tds, dutf8, slzh, zh, z64hs, exfl, wzh, wzf;
 var init_esm = __esm({
-  "nodewarden-git/node_modules/fflate/esm/index.mjs"() {
+  "node_modules/fflate/esm/index.mjs"() {
     require2 = createRequire("/");
     try {
       _a = require2("worker_threads"), Worker = _a.Worker, isMarkedAsUntransferable = _a.isMarkedAsUntransferable;
@@ -5852,16 +5868,16 @@ var init_esm = __esm({
   }
 });
 
-// nodewarden-git/shared/app-version.ts
+// shared/app-version.ts
 var APP_VERSION;
 var init_app_version = __esm({
-  "nodewarden-git/shared/app-version.ts"() {
+  "shared/app-version.ts"() {
     "use strict";
     APP_VERSION = "1.8.1";
   }
 });
 
-// nodewarden-git/src/services/backup-settings-crypto.ts
+// src/services/backup-settings-crypto.ts
 function bytesToBase642(bytes) {
   let text = "";
   for (let index = 0; index < bytes.length; index += 1) {
@@ -6043,7 +6059,7 @@ async function decryptBackupSettingsRuntime(raw, env) {
 }
 var RUNTIME_SALT, RUNTIME_INFO, PORTABLE_ALGORITHM, PORTABLE_HASH, AES_GCM_ALGORITHM, AES_GCM_IV_BYTES, PORTABLE_DEK_BYTES;
 var init_backup_settings_crypto = __esm({
-  "nodewarden-git/src/services/backup-settings-crypto.ts"() {
+  "src/services/backup-settings-crypto.ts"() {
     "use strict";
     RUNTIME_SALT = "nodewarden.backup-settings.runtime.v2";
     RUNTIME_INFO = "runtime";
@@ -6055,7 +6071,7 @@ var init_backup_settings_crypto = __esm({
   }
 });
 
-// nodewarden-git/shared/backup-schema.ts
+// shared/backup-schema.ts
 function createBackupRandomId() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -6129,7 +6145,7 @@ function createDefaultBackupSettings(timezone = BACKUP_DEFAULT_TIMEZONE, options
 }
 var BACKUP_DEFAULT_TIMEZONE, BACKUP_DEFAULT_RETENTION_COUNT, BACKUP_DEFAULT_S3_REGION, BACKUP_DEFAULT_S3_ROOT_PATH, BACKUP_DEFAULT_WEBDAV_REMOTE_PATH, BACKUP_DEFAULT_INTERVAL_HOURS, BACKUP_DEFAULT_START_TIME;
 var init_backup_schema = __esm({
-  "nodewarden-git/shared/backup-schema.ts"() {
+  "shared/backup-schema.ts"() {
     "use strict";
     BACKUP_DEFAULT_TIMEZONE = "UTC";
     BACKUP_DEFAULT_RETENTION_COUNT = 30;
@@ -6141,7 +6157,7 @@ var init_backup_schema = __esm({
   }
 });
 
-// nodewarden-git/src/services/backup-config.ts
+// src/services/backup-config.ts
 function defaultScheduleConfig(timezone = "UTC") {
   return { ...createDefaultBackupScheduleConfig(assertValidTimeZone(timezone)) };
 }
@@ -6725,7 +6741,7 @@ function getBackupLocalDateKey(date, timezone) {
 }
 var BACKUP_SETTINGS_CONFIG_KEY, BACKUP_RUNTIME_CONFIG_KEY, REDACTED_BACKUP_SECRET, MAX_BACKUP_DESTINATIONS;
 var init_backup_config = __esm({
-  "nodewarden-git/src/services/backup-config.ts"() {
+  "src/services/backup-config.ts"() {
     "use strict";
     init_backup_settings_crypto();
     init_backup_schema();
@@ -6736,7 +6752,7 @@ var init_backup_config = __esm({
   }
 });
 
-// nodewarden-git/src/services/backup-archive.ts
+// src/services/backup-archive.ts
 async function queryRows(db, sql, ...values) {
   const result = await db.prepare(sql).bind(...values).all();
   return (result.results || []).map((row) => ({ ...row }));
@@ -7137,7 +7153,7 @@ async function buildBackupArchive(env, date = /* @__PURE__ */ new Date(), option
 }
 var BACKUP_FORMAT_VERSION, BACKUP_RUNNER_LOCK_CONFIG_KEY, BACKUP_FILE_HASH_PREFIX_LENGTH, BACKUP_TEXT_COMPRESSION_LEVEL, BACKUP_JSON_INDENT, MAX_BACKUP_ARCHIVE_BYTES, MAX_BACKUP_ARCHIVE_ENTRY_COUNT, MAX_BACKUP_EXTRACTED_BYTES, MAX_BACKUP_DB_JSON_BYTES, MAX_BACKUP_PATH_SEGMENT_LENGTH;
 var init_backup_archive = __esm({
-  "nodewarden-git/src/services/backup-archive.ts"() {
+  "src/services/backup-archive.ts"() {
     "use strict";
     init_esm();
     init_app_version();
@@ -7158,7 +7174,546 @@ var init_backup_archive = __esm({
   }
 });
 
-// nodewarden-git/src/services/backup-import.ts
+// src/services/mysql-dialect.ts
+function recordColumn(table, column, kind) {
+  let cols = tableColumnKinds.get(table);
+  if (!cols) {
+    cols = /* @__PURE__ */ new Map();
+    tableColumnKinds.set(table, cols);
+  }
+  cols.set(column, kind);
+}
+function columnIsText(table, column) {
+  const cols = tableColumnKinds.get(table);
+  const kind = cols?.get(column);
+  if (kind) return kind === "text";
+  return STRING_INDEX_COLUMNS.has(column);
+}
+function maskLiterals(sql) {
+  const literals = [];
+  const masked = sql.replace(/'(?:[^']|'')*'/g, (match) => {
+    literals.push(match);
+    return `\0${literals.length - 1}\0`;
+  });
+  return { masked, literals };
+}
+function unmaskLiterals(sql, literals) {
+  return sql.replace(/\u0000(\d+)\u0000/g, (_, idx) => literals[Number(idx)] ?? "");
+}
+function maskToLiteral(index) {
+  return `\0${index}\0`;
+}
+function rewriteJsonExtract(sql) {
+  const callRe = /\bjson_extract\s*\(/gi;
+  let result = sql;
+  let match;
+  while ((match = callRe.exec(result)) !== null) {
+    const openParen = match.index + match[0].length - 1;
+    const closeParen = findMatchingParen(result, openParen);
+    if (closeParen < 0) break;
+    const inner = result.slice(openParen + 1, closeParen);
+    const replacement = `JSON_UNQUOTE(JSON_EXTRACT(${inner}))`;
+    result = result.slice(0, match.index) + replacement + result.slice(closeParen + 1);
+    callRe.lastIndex = match.index + replacement.length;
+  }
+  return result;
+}
+function findMatchingParen(text, openIndex) {
+  let depth = 0;
+  let inString = false;
+  for (let i2 = openIndex; i2 < text.length; i2 += 1) {
+    const ch = text[i2];
+    if (inString) {
+      if (ch === "'") inString = false;
+      continue;
+    }
+    if (ch === "'") {
+      inString = true;
+      continue;
+    }
+    if (ch === "(") depth += 1;
+    else if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) return i2;
+    }
+  }
+  return -1;
+}
+function rewriteOnConflict(sql) {
+  const conflictRe = /\bON\s+CONFLICT\s*\(([^)]*)\)\s*DO\s+(NOTHING|UPDATE\s+SET\s+([\s\S]*))$/i;
+  const match = sql.match(conflictRe);
+  if (!match) return sql;
+  const head = sql.slice(0, match.index);
+  const action = (match[2] || "").toUpperCase();
+  if (action.startsWith("NOTHING")) {
+    const conflictCols = (match[1] || "").split(",").map((c) => c.trim()).filter(Boolean);
+    const firstCol = conflictCols[0] || "id";
+    return `${head}ON DUPLICATE KEY UPDATE ${quoteIdentifier(firstCol)}=${quoteIdentifier(firstCol)}`;
+  }
+  let setTail = match[3] || "";
+  let whereCond = "";
+  const whereMatch = setTail.match(/\s+WHERE\s+([\s\S]+)$/i);
+  if (whereMatch) {
+    whereCond = whereMatch[1].trim();
+    setTail = setTail.slice(0, whereMatch.index);
+  }
+  const items = setTail.split(",").map((s) => s.trim()).filter(Boolean);
+  const assignments = [];
+  for (const item of items) {
+    const itemMatch = item.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*excluded\.([A-Za-z_][A-Za-z0-9_]*)$/i);
+    if (!itemMatch) {
+      assignments.push(item.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, "VALUES($1)"));
+      continue;
+    }
+    const targetCol = quoteIdentifier(itemMatch[1]);
+    const valueExpr = `VALUES(${quoteIdentifier(itemMatch[2])})`;
+    if (whereCond) {
+      const cond = whereCond.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, "VALUES($1)");
+      assignments.push(`${targetCol}=IF(${cond}, ${valueExpr}, ${targetCol})`);
+    } else {
+      assignments.push(`${targetCol}=${valueExpr}`);
+    }
+  }
+  return `${head}ON DUPLICATE KEY UPDATE ${assignments.join(", ")}`;
+}
+function quoteIdentifier(name) {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : name;
+}
+function quoteKeyIdentifier(sql) {
+  return sql.replace(
+    /(?<!\w)(?<!PRIMARY\s)(?<!FOREIGN\s)(?<!UNIQUE\s)(?<!DUPLICATE\s)(?<!`)key(?!\w)(?!`)/gi,
+    (match, offset, whole) => {
+      const before = whole.slice(Math.max(0, offset - 14), offset).toUpperCase();
+      if (/(PRIMARY|FOREIGN|UNIQUE|DUPLICATE)\s+$/.test(before)) return match;
+      return "`key`";
+    }
+  );
+}
+function translateColumnDef(def, table) {
+  let out = def;
+  const nameMatch = out.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
+  const columnName = nameMatch ? nameMatch[1] : "";
+  if (/\bTEXT\s+PRIMARY\s+KEY\b/i.test(out)) {
+    out = out.replace(/\bTEXT(\s+PRIMARY\s+KEY)/i, "VARCHAR(512)$1");
+    if (columnName) recordColumn(table, columnName, "text");
+    return out;
+  }
+  if (/\bTEXT\b[^,]*\bUNIQUE\b/i.test(out)) {
+    out = out.replace(/\bTEXT\b/i, "VARCHAR(512)");
+    if (columnName) recordColumn(table, columnName, "text");
+    return out;
+  }
+  if (/\bTEXT\b/i.test(out)) {
+    if (/\bDEFAULT\b/i.test(out)) {
+      out = out.replace(/\bTEXT\b/i, "VARCHAR(2048)");
+    } else {
+      out = out.replace(/\bTEXT\b/i, "LONGTEXT");
+    }
+    if (columnName) recordColumn(table, columnName, "text");
+    return out;
+  }
+  if (/\bINTEGER\b/i.test(out)) {
+    out = out.replace(/\bINTEGER\b/i, "BIGINT");
+    if (columnName) recordColumn(table, columnName, "int");
+    return out;
+  }
+  return out;
+}
+function translateCreateTable(sql) {
+  const headerMatch = sql.match(/^(\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)([A-Za-z_"][A-Za-z0-9_"]*)\s*\(/i);
+  if (!headerMatch) return sql;
+  const table = headerMatch[2].replace(/"/g, "");
+  const bodyStart = headerMatch[0].length;
+  const bodyEnd = sql.lastIndexOf(")");
+  if (bodyEnd < bodyStart) return sql;
+  const body = sql.slice(bodyStart, bodyEnd);
+  const tail2 = sql.slice(bodyEnd);
+  const pkMatch = body.match(/PRIMARY\s+KEY\s*\(([^)]*)\)/i);
+  const pkCols = pkMatch ? pkMatch[1].split(",").map((c) => c.trim().replace(/"/g, "")).filter(Boolean) : [];
+  const fkCols = /* @__PURE__ */ new Set();
+  for (const fk of body.matchAll(/FOREIGN\s+KEY\s*\(([^)]*)\)/gi)) {
+    for (const raw of fk[1].split(",")) {
+      const name = raw.trim().replace(/"/g, "");
+      if (name) fkCols.add(name);
+    }
+  }
+  const parts = [];
+  let depth = 0;
+  let current = "";
+  for (const ch of body) {
+    if (ch === "(") depth += 1;
+    if (ch === ")") depth -= 1;
+    if (ch === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) parts.push(current);
+  const translatedParts = parts.map((rawPart) => {
+    const part = rawPart.trim();
+    if (!part) return part;
+    if (/^(PRIMARY|FOREIGN|UNIQUE|CONSTRAINT|CHECK)\b/i.test(part)) {
+      if (/^PRIMARY\s+KEY\s*\(/i.test(part)) {
+        for (const col of pkCols) recordColumn(table, col, "text");
+      }
+      return part.replace(/PRIMARY\s+KEY\s*\(/i, "PRIMARY KEY (");
+    }
+    const colDef = translateColumnDef(part, table);
+    const nameMatch = colDef.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
+    const colName = nameMatch ? nameMatch[1] : "";
+    if (colName && (/LONGTEXT/i.test(colDef) || /VARCHAR\(2048\)/i.test(colDef))) {
+      if (pkCols.includes(colName)) {
+        const size = pkCols.length === 1 || fkCols.has(colName) ? 512 : 255;
+        recordColumn(table, colName, "text");
+        return colDef.replace(/\bLONGTEXT\b/i, `VARCHAR(${size})`).replace(/\bVARCHAR\(2048\)/i, `VARCHAR(${size})`);
+      }
+      if (fkCols.has(colName)) {
+        recordColumn(table, colName, "text");
+        return colDef.replace(/\bLONGTEXT\b/i, "VARCHAR(512)").replace(/\bVARCHAR\(2048\)/i, "VARCHAR(512)");
+      }
+    }
+    return colDef;
+  });
+  let translated = `${headerMatch[1]}${table} (${translatedParts.join(", ")}`;
+  const engineClause = " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci";
+  const closing = /\bENGINE\s*=/i.test(tail2) ? tail2 : tail2.replace(/^\)/, `)${engineClause}`);
+  translated = translated + closing;
+  return translated;
+}
+function translateCreateIndex(sql) {
+  let out = sql.replace(/\bIF\s+NOT\s+EXISTS\b/gi, "");
+  out = out.replace(/(\bON\s+[A-Za-z_"][A-Za-z0-9_"]*\s*)\(([^)]*)\)/i, (full, head, cols) => {
+    const tableMatch = head.match(/ON\s+([A-Za-z_"][A-Za-z0-9_"]*)/i);
+    const table = (tableMatch ? tableMatch[1] : "").replace(/"/g, "");
+    const translatedCols = cols.split(",").map((rawCol) => {
+      const col = rawCol.trim();
+      const plain = col.replace(/\s*\(\d+\)\s*$/, "");
+      if (/\(\d+\)\s*$/.test(col)) return col;
+      if (columnIsText(table, plain)) return `${plain}(191)`;
+      return col;
+    });
+    return `${head}(${translatedCols.join(", ")})`;
+  });
+  return out;
+}
+function translateAlterTable(sql) {
+  let out = sql;
+  const addMatch = out.match(/(\bADD\s+COLUMN\s+)([A-Za-z_"][A-Za-z0-9_"]*\s+[\s\S]+)$/i);
+  if (addMatch) {
+    const tableNameMatch = out.match(/ALTER\s+TABLE\s+([A-Za-z_"][A-Za-z0-9_"]*)/i);
+    const table = (tableNameMatch ? tableNameMatch[1] : "").replace(/"/g, "");
+    const colDef = translateColumnDef(addMatch[2], table);
+    out = out.slice(0, addMatch.index) + addMatch[1] + colDef;
+  }
+  return out;
+}
+function translatePragma(sql) {
+  const tableInfo = sql.match(/^\s*PRAGMA\s+table_info\s*\(\s*([A-Za-z_"][A-Za-z0-9_"]*)\s*\)/i);
+  if (tableInfo) {
+    const table = tableInfo[1].replace(/"/g, "");
+    return `SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '${table}'`;
+  }
+  return "SELECT 1";
+}
+function rewriteSqliteCatalog(sql, literals) {
+  if (!/\bsqlite_(?:master|schema)\b/i.test(sql)) return sql;
+  const tableLiteral = maskToLiteral(literals.length);
+  literals.push("'table'");
+  const catalog = `(SELECT TABLE_NAME AS name, ${tableLiteral} AS type, NULL AS \`sql\` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE())`;
+  const projected = sql.replace(/^(\s*SELECT\s+)sql\b/i, "$1`sql`");
+  return projected.replace(
+    /\b(?:main\.)?sqlite_(?:master|schema)\b/gi,
+    `${catalog} AS sqlite_master`
+  );
+}
+function translateSql(input) {
+  let sql = input.trim();
+  if (!sql) return sql;
+  if (/^\s*PRAGMA\b/i.test(sql)) {
+    return translatePragma(sql);
+  }
+  sql = sql.replace(
+    /CAST\s*\(\s*strftime\s*\(\s*'%s'\s*,\s*'now'\s*\)\s+AS\s+INTEGER\s*\)\s*\*\s*1000/gi,
+    "(UNIX_TIMESTAMP() * 1000)"
+  );
+  sql = sql.replace(/strftime\s*\(\s*'%s'\s*,\s*'now'\s*\)/gi, "UNIX_TIMESTAMP()");
+  sql = rewriteJsonExtract(sql);
+  sql = sql.replace(/\bjson_valid\s*\(/gi, "JSON_VALID(");
+  const { masked, literals } = maskLiterals(sql);
+  let out = masked;
+  out = out.replace(/"([A-Za-z_][A-Za-z0-9_]*)"/g, "`$1`");
+  out = rewriteOnConflict(out);
+  out = out.replace(/\bINSERT\s+OR\s+IGNORE\b/gi, "INSERT IGNORE");
+  out = out.replace(/\bINSERT\s+OR\s+REPLACE\b/gi, "REPLACE");
+  if (/^\s*CREATE\s+TABLE\b/i.test(out)) {
+    out = translateCreateTable(out);
+  } else if (/^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\b/i.test(out)) {
+    out = translateCreateIndex(out);
+  } else if (/^\s*ALTER\s+TABLE\b/i.test(out)) {
+    out = translateAlterTable(out);
+  }
+  out = quoteKeyIdentifier(out);
+  return unmaskLiterals(rewriteSqliteCatalog(out, literals), literals);
+}
+var STRING_INDEX_COLUMNS, tableColumnKinds;
+var init_mysql_dialect = __esm({
+  "src/services/mysql-dialect.ts"() {
+    "use strict";
+    STRING_INDEX_COLUMNS = /* @__PURE__ */ new Set([
+      "id",
+      "user_id",
+      "cipher_id",
+      "folder_id",
+      "device_identifier",
+      "request_device_identifier",
+      "response_device_identifier",
+      "token",
+      "code",
+      "ip",
+      "jti",
+      "challenge_hash",
+      "credential_id",
+      "bucket_key",
+      "email",
+      "status",
+      "scope",
+      "category",
+      "level",
+      "created_by",
+      "used_by",
+      "actor_user_id",
+      "security_stamp",
+      "device_session_stamp",
+      "client_type",
+      "role",
+      "purpose",
+      "revision_date",
+      "updated_at",
+      "created_at",
+      "deleted_at",
+      "archived_at",
+      "banned_at",
+      "last_seen_at",
+      "creation_date",
+      "response_date",
+      "authentication_date",
+      "deletion_date",
+      "expiration_date",
+      "expires_at"
+    ]);
+    tableColumnKinds = /* @__PURE__ */ new Map();
+  }
+});
+
+// src/services/storage-mysql.ts
+function normalizeParams(params) {
+  return params.map((value) => {
+    if (typeof value === "boolean") return value ? 1 : 0;
+    if (value === void 0) return null;
+    return value;
+  });
+}
+function isDuplicateDdlError(error) {
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return msg.includes("duplicate column name") || msg.includes("duplicate key name") || msg.includes("already exists") || msg.includes("duplicate entry");
+}
+function isDdlStatement(sql) {
+  return /^\s*(CREATE|ALTER|DROP)\b/i.test(sql);
+}
+function toResult(rows, affectedRows, insertId) {
+  const list = Array.isArray(rows) ? rows : [];
+  return {
+    results: list,
+    success: true,
+    meta: {
+      changes: Number(affectedRows ?? list.length ?? 0),
+      last_row_id: Number(insertId ?? 0)
+    }
+  };
+}
+function isMySqlDatabase(db) {
+  return !!db && typeof db === "object" && db.dialect === "mysql";
+}
+var MySqlStatement, MySqlDatabase;
+var init_storage_mysql = __esm({
+  "src/services/storage-mysql.ts"() {
+    "use strict";
+    init_mysql_dialect();
+    MySqlStatement = class {
+      constructor(db, translatedSql, originalSql) {
+        this.db = db;
+        this.translatedSql = translatedSql;
+        this.originalSql = originalSql;
+      }
+      db;
+      translatedSql;
+      originalSql;
+      params = [];
+      bind(...params) {
+        this.params = normalizeParams(params);
+        return this;
+      }
+      async run() {
+        try {
+          const [rawResult] = await this.db.query(this.translatedSql, this.params);
+          const result = rawResult;
+          return toResult([], result?.affectedRows ?? 0, result?.insertId ?? 0);
+        } catch (error) {
+          if (isDdlStatement(this.originalSql) && isDuplicateDdlError(error)) {
+            return toResult([], 0, 0);
+          }
+          throw error;
+        }
+      }
+      async first() {
+        const all = await this.all();
+        return all.results[0] ?? null;
+      }
+      async all() {
+        try {
+          const [rows, fields] = await this.db.query(this.translatedSql, this.params);
+          const list = Array.isArray(rows) ? rows : [];
+          const affected = Array.isArray(rows) ? void 0 : rows?.affectedRows;
+          void fields;
+          return toResult(list, affected ?? list.length);
+        } catch (error) {
+          if (isDdlStatement(this.originalSql) && isDuplicateDdlError(error)) {
+            return toResult([]);
+          }
+          throw error;
+        }
+      }
+      getSql() {
+        return this.translatedSql;
+      }
+      getParams() {
+        return this.params;
+      }
+    };
+    MySqlDatabase = class {
+      constructor(config) {
+        this.config = config;
+      }
+      config;
+      dialect = "mysql";
+      pool = null;
+      poolPromise = null;
+      getConfig() {
+        return this.config;
+      }
+      async getPool() {
+        if (this.pool) return this.pool;
+        if (!this.poolPromise) {
+          this.poolPromise = (async () => {
+            const moduleName = "mysql2/promise";
+            const mysql = await import(
+              /* @vite-ignore */
+              moduleName
+            );
+            const pool = mysql.createPool({
+              host: this.config.host,
+              port: this.config.port,
+              user: this.config.user,
+              password: this.config.password,
+              database: this.config.database,
+              waitForConnections: true,
+              connectionLimit: this.config.connectionLimit,
+              connectTimeout: this.config.connectTimeoutMs,
+              charset: "utf8mb4",
+              timezone: "+08:00",
+              enableKeepAlive: true,
+              keepAliveInitialDelay: 1e4,
+              multipleStatements: false,
+              ssl: this.config.ssl ? { rejectUnauthorized: false } : void 0,
+              typeCast: (field, next) => {
+                if (field.type === "LONGLONG" || field.type === "NEWDECIMAL") {
+                  const raw = field.string();
+                  return raw === null ? null : Number(raw);
+                }
+                return next();
+              }
+            });
+            this.pool = pool;
+            return pool;
+          })();
+        }
+        return this.poolPromise;
+      }
+      /** Raw query used by the statement wrapper (and health checks). */
+      async query(sql, params) {
+        const pool = await this.getPool();
+        try {
+          return await pool.query(sql, params);
+        } catch (error) {
+          const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+          if (msg.includes("connection") && (msg.includes("lost") || msg.includes("closed") || msg.includes("reset"))) {
+            await this.close();
+            const fresh = await this.getPool();
+            return await fresh.query(sql, params);
+          }
+          throw error;
+        }
+      }
+      prepare(sql) {
+        return new MySqlStatement(this, translateSql(sql), sql);
+      }
+      async batch(statements) {
+        const pool = await this.getPool();
+        const conn = await pool.getConnection();
+        const results = [];
+        try {
+          await conn.beginTransaction();
+          for (const statement of statements) {
+            const stmt = statement;
+            const sql = typeof stmt.getSql === "function" ? stmt.getSql() : translateSql("");
+            const params = typeof stmt.getParams === "function" ? stmt.getParams() : [];
+            try {
+              const [rawResult] = await conn.query(sql, params);
+              const result = rawResult;
+              if (Array.isArray(result)) {
+                results.push(toResult(result));
+              } else {
+                results.push(toResult([], result?.affectedRows ?? 0, result?.insertId ?? 0));
+              }
+            } catch (error) {
+              const original = statement.originalSql ?? "";
+              if (isDdlStatement(original) && isDuplicateDdlError(error)) {
+                results.push(toResult([], 0, 0));
+                continue;
+              }
+              throw error;
+            }
+          }
+          await conn.commit();
+          return results;
+        } catch (error) {
+          try {
+            await conn.rollback();
+          } catch {
+          }
+          throw error;
+        } finally {
+          conn.release();
+        }
+      }
+      async close() {
+        const pool = this.pool;
+        this.pool = null;
+        this.poolPromise = null;
+        if (pool) {
+          try {
+            await pool.end();
+          } catch {
+          }
+        }
+      }
+    };
+  }
+});
+
+// src/services/backup-import.ts
 function shadowTableName(table) {
   return `${table}__restore`;
 }
@@ -7167,6 +7722,11 @@ async function queryRows2(db, sql, ...values) {
   return (response.results || []).map((row) => ({ ...row }));
 }
 async function getTableCreateSql(db, table) {
+  if (isMySqlDatabase(db)) {
+    const ddlRow = await db.prepare(`SHOW CREATE TABLE ${table}`).first();
+    const ddl = String(ddlRow?.["Create Table"] ?? "").trim();
+    if (ddl) return ddl.replace(/`([^`]+)`/g, '"$1"');
+  }
   const row = await db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").bind(table).first();
   const sql = String(row?.sql || "").trim();
   if (!sql) {
@@ -7919,12 +8479,13 @@ async function importRemoteBackupArchiveBytes(archiveBytes, env, actorUserId, re
 }
 var BACKUP_TABLES, KV_BLOB_SKIP_REASON, BLOB_STORAGE_UNAVAILABLE_SKIP_REASON, ATTACHMENT_RESTORE_FAILED_REASON;
 var init_backup_import = __esm({
-  "nodewarden-git/src/services/backup-import.ts"() {
+  "src/services/backup-import.ts"() {
     "use strict";
     init_blob_store();
     init_backup_config();
     init_yubico_config();
     init_backup_archive();
+    init_storage_mysql();
     BACKUP_TABLES = [
       "config",
       "users",
@@ -7941,7 +8502,7 @@ var init_backup_import = __esm({
   }
 });
 
-// nodewarden-git/src/services/backup-uploader.ts
+// src/services/backup-uploader.ts
 function isBackupArchiveName(name) {
   return /\.zip$/i.test(String(name || "").trim());
 }
@@ -8563,13 +9124,13 @@ function ensureRemoteRestoreCandidate(relativePath) {
   return normalized;
 }
 var init_backup_uploader = __esm({
-  "nodewarden-git/src/services/backup-uploader.ts"() {
+  "src/services/backup-uploader.ts"() {
     "use strict";
     init_backup_config();
   }
 });
 
-// nodewarden-git/src/utils/user-verification-token.ts
+// src/utils/user-verification-token.ts
 function textBytes2(value) {
   return new TextEncoder().encode(value);
 }
@@ -8627,7 +9188,7 @@ async function verifyPasskeyUserVerificationToken(env, token, userId, purpose) {
 }
 var USER_VERIFICATION_TOKEN_TYPE, USER_VERIFICATION_TOKEN_TTL_MS;
 var init_user_verification_token = __esm({
-  "nodewarden-git/src/utils/user-verification-token.ts"() {
+  "src/utils/user-verification-token.ts"() {
     "use strict";
     init_passkey();
     USER_VERIFICATION_TOKEN_TYPE = "nodewarden.user-verification.v1";
@@ -8635,7 +9196,7 @@ var init_user_verification_token = __esm({
   }
 });
 
-// nodewarden-git/src/handlers/backup.ts
+// src/handlers/backup.ts
 var backup_exports = {};
 __export(backup_exports, {
   executeConfiguredBackup: () => executeConfiguredBackup,
@@ -9698,7 +10259,7 @@ async function seedDefaultBackupSettings(env) {
 }
 var REMOTE_ATTACHMENT_INDEX_PATH, REMOTE_ATTACHMENT_SYNC_EXTERNAL_SUBREQUEST_LIMIT, REMOTE_ATTACHMENT_SYNC_SUBREQUEST_RESERVE, REMOTE_ATTACHMENT_SYNC_MAX_WEB_DAV_BATCH_SIZE, REMOTE_ATTACHMENT_SYNC_MAX_S3_BATCH_SIZE, REMOTE_ATTACHMENT_RESTORE_BATCH_SIZE;
 var init_backup = __esm({
-  "nodewarden-git/src/handlers/backup.ts"() {
+  "src/handlers/backup.ts"() {
     "use strict";
     init_response();
     init_backup_archive();
@@ -9722,9 +10283,9 @@ var init_backup = __esm({
   }
 });
 
-// nodewarden-git/node_modules/pvtsutils/build/index.js
+// node_modules/pvtsutils/build/index.js
 var require_build = __commonJS({
-  "nodewarden-git/node_modules/pvtsutils/build/index.js"(exports) {
+  "node_modules/pvtsutils/build/index.js"(exports) {
     "use strict";
     var ARRAY_BUFFER_NAME = "[object ArrayBuffer]";
     var BufferSourceConverter = class _BufferSourceConverter {
@@ -10086,9 +10647,9 @@ var require_build = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/pvutils/build/utils.js
+// node_modules/pvutils/build/utils.js
 var require_utils = __commonJS({
-  "nodewarden-git/node_modules/pvutils/build/utils.js"(exports) {
+  "node_modules/pvutils/build/utils.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     function getUTCDate(date) {
@@ -10439,9 +11000,9 @@ var require_utils = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/asn1js/build/index.js
+// node_modules/asn1js/build/index.js
 var require_build2 = __commonJS({
-  "nodewarden-git/node_modules/asn1js/build/index.js"(exports) {
+  "node_modules/asn1js/build/index.js"(exports) {
     "use strict";
     var pvtsutils = require_build();
     var pvutils = require_utils();
@@ -13554,7 +14115,7 @@ ${values.join("\n")}` : `${blockName} :`;
   }
 });
 
-// nodewarden-git/node_modules/tslib/tslib.es6.mjs
+// node_modules/tslib/tslib.es6.mjs
 var tslib_es6_exports = {};
 __export(tslib_es6_exports, {
   __addDisposableResource: () => __addDisposableResource,
@@ -13993,7 +14554,7 @@ function __rewriteRelativeImportExtension(path2, preserveJsx) {
 }
 var extendStatics, __assign, __createBinding, __setModuleDefault, ownKeys, _SuppressedError, tslib_es6_default;
 var init_tslib_es6 = __esm({
-  "nodewarden-git/node_modules/tslib/tslib.es6.mjs"() {
+  "node_modules/tslib/tslib.es6.mjs"() {
     extendStatics = function(d, b) {
       extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b3) {
         d2.__proto__ = b3;
@@ -14079,9 +14640,9 @@ var init_tslib_es6 = __esm({
   }
 });
 
-// nodewarden-git/node_modules/reflect-metadata/Reflect.js
+// node_modules/reflect-metadata/Reflect.js
 var require_Reflect = __commonJS({
-  "nodewarden-git/node_modules/reflect-metadata/Reflect.js"() {
+  "node_modules/reflect-metadata/Reflect.js"() {
     var Reflect2;
     (function(Reflect3) {
       (function(factory) {
@@ -15164,9 +15725,9 @@ var require_Reflect = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/utils/build/cjs/bytes/buffer-source.js
+// node_modules/@peculiar/utils/build/cjs/bytes/buffer-source.js
 var require_buffer_source = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/utils/build/cjs/bytes/buffer-source.js"(exports) {
+  "node_modules/@peculiar/utils/build/cjs/bytes/buffer-source.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.isArrayBuffer = isArrayBuffer2;
@@ -15283,9 +15844,9 @@ var require_buffer_source = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/utils/build/cjs/bytes/concat.js
+// node_modules/@peculiar/utils/build/cjs/bytes/concat.js
 var require_concat = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/utils/build/cjs/bytes/concat.js"(exports) {
+  "node_modules/@peculiar/utils/build/cjs/bytes/concat.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.concatToUint8Array = concatToUint8Array2;
@@ -15328,9 +15889,9 @@ var require_concat = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/utils/build/cjs/bytes/equal.js
+// node_modules/@peculiar/utils/build/cjs/bytes/equal.js
 var require_equal = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/utils/build/cjs/bytes/equal.js"(exports) {
+  "node_modules/@peculiar/utils/build/cjs/bytes/equal.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.equal = equal2;
@@ -15351,9 +15912,9 @@ var require_equal = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/utils/build/cjs/bytes/sequence.js
+// node_modules/@peculiar/utils/build/cjs/bytes/sequence.js
 var require_sequence = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/utils/build/cjs/bytes/sequence.js"(exports) {
+  "node_modules/@peculiar/utils/build/cjs/bytes/sequence.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.indexOf = indexOf2;
@@ -15518,9 +16079,9 @@ var require_sequence = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/utils/build/cjs/bytes/index.js
+// node_modules/@peculiar/utils/build/cjs/bytes/index.js
 var require_bytes = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/utils/build/cjs/bytes/index.js"(exports) {
+  "node_modules/@peculiar/utils/build/cjs/bytes/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.tail = exports.startsWith = exports.slice = exports.lastIndexOf = exports.indexOf = exports.includes = exports.endsWith = exports.copy = exports.compare = exports.equal = exports.concatToUint8Array = exports.concat = exports.toViewCopy = exports.toView = exports.toUint8ArrayCopy = exports.toUint8Array = exports.toArrayBufferLike = exports.toArrayBuffer = exports.isSharedArrayBuffer = exports.isBufferSource = exports.isArrayBufferView = exports.isArrayBufferLike = exports.isArrayBuffer = exports.assertBufferSource = void 0;
@@ -15603,9 +16164,9 @@ var require_bytes = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/enums.js
+// node_modules/@peculiar/asn1-schema/build/cjs/enums.js
 var require_enums = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/enums.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/enums.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AsnPropTypes = exports.AsnTypeTypes = void 0;
@@ -15648,9 +16209,9 @@ var require_enums = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/types/bit_string.js
+// node_modules/@peculiar/asn1-schema/build/cjs/types/bit_string.js
 var require_bit_string = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/types/bit_string.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/types/bit_string.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.BitString = void 0;
@@ -15719,9 +16280,9 @@ var require_bit_string = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/types/octet_string.js
+// node_modules/@peculiar/asn1-schema/build/cjs/types/octet_string.js
 var require_octet_string = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/types/octet_string.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/types/octet_string.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.OctetString = void 0;
@@ -15767,9 +16328,9 @@ var require_octet_string = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/types/index.js
+// node_modules/@peculiar/asn1-schema/build/cjs/types/index.js
 var require_types = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/types/index.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/types/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -15778,9 +16339,9 @@ var require_types = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/converters.js
+// node_modules/@peculiar/asn1-schema/build/cjs/converters.js
 var require_converters = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/converters.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/converters.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AsnNullConverter = exports.AsnGeneralizedTimeConverter = exports.AsnUTCTimeConverter = exports.AsnCharacterStringConverter = exports.AsnGeneralStringConverter = exports.AsnVisibleStringConverter = exports.AsnGraphicStringConverter = exports.AsnIA5StringConverter = exports.AsnVideotexStringConverter = exports.AsnTeletexStringConverter = exports.AsnPrintableStringConverter = exports.AsnNumericStringConverter = exports.AsnUniversalStringConverter = exports.AsnBmpStringConverter = exports.AsnUtf8StringConverter = exports.AsnConstructedOctetStringConverter = exports.AsnOctetStringConverter = exports.AsnBooleanConverter = exports.AsnObjectIdentifierConverter = exports.AsnBitStringConverter = exports.AsnIntegerBigIntConverter = exports.AsnIntegerArrayBufferConverter = exports.AsnEnumeratedConverter = exports.AsnIntegerConverter = exports.AsnAnyConverter = void 0;
@@ -15924,9 +16485,9 @@ var require_converters = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/helper.js
+// node_modules/@peculiar/asn1-schema/build/cjs/helper.js
 var require_helper = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/helper.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/helper.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.isConvertible = isConvertible2;
@@ -15972,9 +16533,9 @@ var require_helper = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/schema.js
+// node_modules/@peculiar/asn1-schema/build/cjs/schema.js
 var require_schema = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/schema.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/schema.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AsnSchemaStorage = void 0;
@@ -16134,9 +16695,9 @@ var require_schema = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/storage.js
+// node_modules/@peculiar/asn1-schema/build/cjs/storage.js
 var require_storage = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/storage.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/storage.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.schemaStorage = void 0;
@@ -16145,9 +16706,9 @@ var require_storage = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/decorators.js
+// node_modules/@peculiar/asn1-schema/build/cjs/decorators.js
 var require_decorators = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/decorators.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/decorators.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AsnProp = exports.AsnSequenceType = exports.AsnSetType = exports.AsnChoiceType = exports.AsnType = void 0;
@@ -16201,9 +16762,9 @@ var require_decorators = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/errors/schema_validation.js
+// node_modules/@peculiar/asn1-schema/build/cjs/errors/schema_validation.js
 var require_schema_validation = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/errors/schema_validation.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/errors/schema_validation.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AsnSchemaValidationError = void 0;
@@ -16214,9 +16775,9 @@ var require_schema_validation = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/errors/index.js
+// node_modules/@peculiar/asn1-schema/build/cjs/errors/index.js
 var require_errors = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/errors/index.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/errors/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -16224,9 +16785,9 @@ var require_errors = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/parser.js
+// node_modules/@peculiar/asn1-schema/build/cjs/parser.js
 var require_parser = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/parser.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/parser.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AsnParser = void 0;
@@ -16517,9 +17078,9 @@ var require_parser = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/serializer.js
+// node_modules/@peculiar/asn1-schema/build/cjs/serializer.js
 var require_serializer = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/serializer.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/serializer.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AsnSerializer = void 0;
@@ -16662,9 +17223,9 @@ var require_serializer = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/objects.js
+// node_modules/@peculiar/asn1-schema/build/cjs/objects.js
 var require_objects = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/objects.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/objects.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AsnArray = void 0;
@@ -16684,9 +17245,9 @@ var require_objects = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/convert.js
+// node_modules/@peculiar/asn1-schema/build/cjs/convert.js
 var require_convert = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/convert.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/convert.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AsnConvert = void 0;
@@ -16715,9 +17276,9 @@ var require_convert = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/index.js
+// node_modules/@peculiar/asn1-schema/build/cjs/index.js
 var require_cjs = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-schema/build/cjs/index.js"(exports) {
+  "node_modules/@peculiar/asn1-schema/build/cjs/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AsnSerializer = exports.AsnParser = exports.AsnPropTypes = exports.AsnTypeTypes = exports.AsnSetType = exports.AsnSequenceType = exports.AsnChoiceType = exports.AsnType = exports.AsnProp = void 0;
@@ -16761,9 +17322,9 @@ var require_cjs = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/binary.js
+// node_modules/@peculiar/utils/build/cjs/encoding/binary.js
 var require_binary = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/binary.js"(exports) {
+  "node_modules/@peculiar/utils/build/cjs/encoding/binary.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.binary = void 0;
@@ -16793,9 +17354,9 @@ var require_binary = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/hex.js
+// node_modules/@peculiar/utils/build/cjs/encoding/hex.js
 var require_hex = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/hex.js"(exports) {
+  "node_modules/@peculiar/utils/build/cjs/encoding/hex.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.hex = exports.formats = void 0;
@@ -17026,9 +17587,9 @@ var require_hex = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/utf8.js
+// node_modules/@peculiar/utils/build/cjs/encoding/utf8.js
 var require_utf8 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/utf8.js"(exports) {
+  "node_modules/@peculiar/utils/build/cjs/encoding/utf8.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.utf8 = void 0;
@@ -17045,9 +17606,9 @@ var require_utf8 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/utf16.js
+// node_modules/@peculiar/utils/build/cjs/encoding/utf16.js
 var require_utf16 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/utf16.js"(exports) {
+  "node_modules/@peculiar/utils/build/cjs/encoding/utf16.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.utf16 = void 0;
@@ -17075,9 +17636,9 @@ var require_utf16 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/base64.js
+// node_modules/@peculiar/utils/build/cjs/encoding/base64.js
 var require_base64 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/base64.js"(exports) {
+  "node_modules/@peculiar/utils/build/cjs/encoding/base64.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.base64 = void 0;
@@ -17129,9 +17690,9 @@ var require_base64 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/base64url.js
+// node_modules/@peculiar/utils/build/cjs/encoding/base64url.js
 var require_base64url = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/base64url.js"(exports) {
+  "node_modules/@peculiar/utils/build/cjs/encoding/base64url.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.base64url = void 0;
@@ -17161,9 +17722,9 @@ var require_base64url = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/index.js
+// node_modules/@peculiar/utils/build/cjs/encoding/index.js
 var require_encoding = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/utils/build/cjs/encoding/index.js"(exports) {
+  "node_modules/@peculiar/utils/build/cjs/encoding/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.base64url = exports.base64 = exports.utf16 = exports.utf8 = exports.hex = exports.binary = void 0;
@@ -17177,9 +17738,9 @@ var require_encoding = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/ip_converter.js
+// node_modules/@peculiar/asn1-x509/build/cjs/ip_converter.js
 var require_ip_converter = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/ip_converter.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/ip_converter.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.IpConverter = void 0;
@@ -17353,9 +17914,9 @@ var require_ip_converter = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/name.js
+// node_modules/@peculiar/asn1-x509/build/cjs/name.js
 var require_name = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/name.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/name.js"(exports) {
     "use strict";
     var RelativeDistinguishedName_12;
     var RDNSequence_12;
@@ -17471,9 +18032,9 @@ var require_name = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/general_name.js
+// node_modules/@peculiar/asn1-x509/build/cjs/general_name.js
 var require_general_name = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/general_name.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/general_name.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.GeneralName = exports.EDIPartyName = exports.OtherName = exports.AsnIpConverter = void 0;
@@ -17609,9 +18170,9 @@ var require_general_name = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/object_identifiers.js
+// node_modules/@peculiar/asn1-x509/build/cjs/object_identifiers.js
 var require_object_identifiers = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/object_identifiers.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/object_identifiers.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.id_ce = exports.id_ad_caRepository = exports.id_ad_timeStamping = exports.id_ad_caIssuers = exports.id_ad_ocsp = exports.id_qt_unotice = exports.id_qt_csp = exports.id_ad = exports.id_kp = exports.id_qt = exports.id_pe = exports.id_pkix = void 0;
@@ -17630,9 +18191,9 @@ var require_object_identifiers = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/authority_information_access.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/authority_information_access.js
 var require_authority_information_access = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/authority_information_access.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/authority_information_access.js"(exports) {
     "use strict";
     var AuthorityInfoAccessSyntax_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -17672,9 +18233,9 @@ var require_authority_information_access = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/authority_key_identifier.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/authority_key_identifier.js
 var require_authority_key_identifier = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/authority_key_identifier.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/authority_key_identifier.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AuthorityKeyIdentifier = exports.KeyIdentifier = exports.id_ce_authorityKeyIdentifier = void 0;
@@ -17726,9 +18287,9 @@ var require_authority_key_identifier = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/basic_constraints.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/basic_constraints.js
 var require_basic_constraints = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/basic_constraints.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/basic_constraints.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.BasicConstraints = exports.id_ce_basicConstraints = void 0;
@@ -17759,9 +18320,9 @@ var require_basic_constraints = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/general_names.js
+// node_modules/@peculiar/asn1-x509/build/cjs/general_names.js
 var require_general_names = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/general_names.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/general_names.js"(exports) {
     "use strict";
     var GeneralNames_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -17785,9 +18346,9 @@ var require_general_names = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/certificate_issuer.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/certificate_issuer.js
 var require_certificate_issuer = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/certificate_issuer.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/certificate_issuer.js"(exports) {
     "use strict";
     var CertificateIssuer_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -17810,9 +18371,9 @@ var require_certificate_issuer = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/certificate_policies.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/certificate_policies.js
 var require_certificate_policies = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/certificate_policies.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/certificate_policies.js"(exports) {
     "use strict";
     var CertificatePolicies_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -17952,9 +18513,9 @@ var require_certificate_policies = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_number.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_number.js
 var require_crl_number = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_number.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_number.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.CRLNumber = exports.id_ce_cRLNumber = void 0;
@@ -17978,9 +18539,9 @@ var require_crl_number = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_delta_indicator.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_delta_indicator.js
 var require_crl_delta_indicator = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_delta_indicator.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_delta_indicator.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.BaseCRLNumber = exports.id_ce_deltaCRLIndicator = void 0;
@@ -17998,9 +18559,9 @@ var require_crl_delta_indicator = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_distribution_points.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_distribution_points.js
 var require_crl_distribution_points = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_distribution_points.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_distribution_points.js"(exports) {
     "use strict";
     var CRLDistributionPoints_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -18136,9 +18697,9 @@ var require_crl_distribution_points = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_freshest.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_freshest.js
 var require_crl_freshest = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_freshest.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_freshest.js"(exports) {
     "use strict";
     var FreshestCRL_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -18164,9 +18725,9 @@ var require_crl_freshest = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_issuing_distribution_point.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_issuing_distribution_point.js
 var require_crl_issuing_distribution_point = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_issuing_distribution_point.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_issuing_distribution_point.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.IssuingDistributionPoint = exports.id_ce_issuingDistributionPoint = void 0;
@@ -18238,9 +18799,9 @@ var require_crl_issuing_distribution_point = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_reason.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_reason.js
 var require_crl_reason = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_reason.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/crl_reason.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.CRLReason = exports.CRLReasons = exports.id_ce_cRLReasons = void 0;
@@ -18283,9 +18844,9 @@ var require_crl_reason = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/extended_key_usage.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/extended_key_usage.js
 var require_extended_key_usage = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/extended_key_usage.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/extended_key_usage.js"(exports) {
     "use strict";
     var ExtendedKeyUsage_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -18317,9 +18878,9 @@ var require_extended_key_usage = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/inhibit_any_policy.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/inhibit_any_policy.js
 var require_inhibit_any_policy = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/inhibit_any_policy.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/inhibit_any_policy.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.InhibitAnyPolicy = exports.id_ce_inhibitAnyPolicy = void 0;
@@ -18346,9 +18907,9 @@ var require_inhibit_any_policy = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/invalidity_date.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/invalidity_date.js
 var require_invalidity_date = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/invalidity_date.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/invalidity_date.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.InvalidityDate = exports.id_ce_invalidityDate = void 0;
@@ -18374,9 +18935,9 @@ var require_invalidity_date = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/issuer_alternative_name.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/issuer_alternative_name.js
 var require_issuer_alternative_name = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/issuer_alternative_name.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/issuer_alternative_name.js"(exports) {
     "use strict";
     var IssueAlternativeName_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -18399,9 +18960,9 @@ var require_issuer_alternative_name = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/key_usage.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/key_usage.js
 var require_key_usage = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/key_usage.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/key_usage.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.KeyUsage = exports.KeyUsageFlags = exports.id_ce_keyUsage = void 0;
@@ -18461,9 +19022,9 @@ var require_key_usage = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/name_constraints.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/name_constraints.js
 var require_name_constraints = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/name_constraints.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/name_constraints.js"(exports) {
     "use strict";
     var GeneralSubtrees_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -18541,9 +19102,9 @@ var require_name_constraints = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/policy_constraints.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/policy_constraints.js
 var require_policy_constraints = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/policy_constraints.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/policy_constraints.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.PolicyConstraints = exports.id_ce_policyConstraints = void 0;
@@ -18580,9 +19141,9 @@ var require_policy_constraints = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/policy_mappings.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/policy_mappings.js
 var require_policy_mappings = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/policy_mappings.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/policy_mappings.js"(exports) {
     "use strict";
     var PolicyMappings_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -18621,9 +19182,9 @@ var require_policy_mappings = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_alternative_name.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_alternative_name.js
 var require_subject_alternative_name = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_alternative_name.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_alternative_name.js"(exports) {
     "use strict";
     var SubjectAlternativeName_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -18646,9 +19207,9 @@ var require_subject_alternative_name = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/attribute.js
+// node_modules/@peculiar/asn1-x509/build/cjs/attribute.js
 var require_attribute = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/attribute.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/attribute.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.Attribute = void 0;
@@ -18674,9 +19235,9 @@ var require_attribute = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_directory_attributes.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_directory_attributes.js
 var require_subject_directory_attributes = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_directory_attributes.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_directory_attributes.js"(exports) {
     "use strict";
     var SubjectDirectoryAttributes_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -18702,9 +19263,9 @@ var require_subject_directory_attributes = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_key_identifier.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_key_identifier.js
 var require_subject_key_identifier = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_key_identifier.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_key_identifier.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.SubjectKeyIdentifier = exports.id_ce_subjectKeyIdentifier = void 0;
@@ -18717,9 +19278,9 @@ var require_subject_key_identifier = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/private_key_usage_period.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/private_key_usage_period.js
 var require_private_key_usage_period = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/private_key_usage_period.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/private_key_usage_period.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.PrivateKeyUsagePeriod = exports.id_ce_privateKeyUsagePeriod = void 0;
@@ -18754,9 +19315,9 @@ var require_private_key_usage_period = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/entrust_version_info.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/entrust_version_info.js
 var require_entrust_version_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/entrust_version_info.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/entrust_version_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.EntrustVersionInfo = exports.EntrustInfo = exports.EntrustInfoFlags = exports.id_entrust_entrustVersInfo = void 0;
@@ -18806,9 +19367,9 @@ var require_entrust_version_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_info_access.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_info_access.js
 var require_subject_info_access = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_info_access.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/subject_info_access.js"(exports) {
     "use strict";
     var SubjectInfoAccessSyntax_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -18834,9 +19395,9 @@ var require_subject_info_access = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/index.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extensions/index.js
 var require_extensions = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extensions/index.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extensions/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -18868,9 +19429,9 @@ var require_extensions = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/algorithm_identifier.js
+// node_modules/@peculiar/asn1-x509/build/cjs/algorithm_identifier.js
 var require_algorithm_identifier = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/algorithm_identifier.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/algorithm_identifier.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AlgorithmIdentifier = void 0;
@@ -18900,9 +19461,9 @@ var require_algorithm_identifier = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/subject_public_key_info.js
+// node_modules/@peculiar/asn1-x509/build/cjs/subject_public_key_info.js
 var require_subject_public_key_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/subject_public_key_info.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/subject_public_key_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.SubjectPublicKeyInfo = void 0;
@@ -18926,9 +19487,9 @@ var require_subject_public_key_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/time.js
+// node_modules/@peculiar/asn1-x509/build/cjs/time.js
 var require_time = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/time.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/time.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.Time = void 0;
@@ -18973,9 +19534,9 @@ var require_time = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/validity.js
+// node_modules/@peculiar/asn1-x509/build/cjs/validity.js
 var require_validity = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/validity.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/validity.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.Validity = void 0;
@@ -19002,9 +19563,9 @@ var require_validity = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extension.js
+// node_modules/@peculiar/asn1-x509/build/cjs/extension.js
 var require_extension = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/extension.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/extension.js"(exports) {
     "use strict";
     var Extensions_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -19049,9 +19610,9 @@ var require_extension = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/types.js
+// node_modules/@peculiar/asn1-x509/build/cjs/types.js
 var require_types2 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/types.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/types.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.Version = void 0;
@@ -19064,9 +19625,9 @@ var require_types2 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/tbs_certificate.js
+// node_modules/@peculiar/asn1-x509/build/cjs/tbs_certificate.js
 var require_tbs_certificate = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/tbs_certificate.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/tbs_certificate.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.TBSCertificate = void 0;
@@ -19148,9 +19709,9 @@ var require_tbs_certificate = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/certificate.js
+// node_modules/@peculiar/asn1-x509/build/cjs/certificate.js
 var require_certificate = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/certificate.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/certificate.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.Certificate = void 0;
@@ -19183,9 +19744,9 @@ var require_certificate = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/tbs_cert_list.js
+// node_modules/@peculiar/asn1-x509/build/cjs/tbs_cert_list.js
 var require_tbs_cert_list = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/tbs_cert_list.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/tbs_cert_list.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.TBSCertList = exports.RevokedCertificate = void 0;
@@ -19272,9 +19833,9 @@ var require_tbs_cert_list = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/certificate_list.js
+// node_modules/@peculiar/asn1-x509/build/cjs/certificate_list.js
 var require_certificate_list = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/certificate_list.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/certificate_list.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.CertificateList = void 0;
@@ -19307,9 +19868,9 @@ var require_certificate_list = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/index.js
+// node_modules/@peculiar/asn1-x509/build/cjs/index.js
 var require_cjs2 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509/build/cjs/index.js"(exports) {
+  "node_modules/@peculiar/asn1-x509/build/cjs/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -19332,9 +19893,9 @@ var require_cjs2 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/issuer_and_serial_number.js
+// node_modules/@peculiar/asn1-cms/build/cjs/issuer_and_serial_number.js
 var require_issuer_and_serial_number = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/issuer_and_serial_number.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/issuer_and_serial_number.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.IssuerAndSerialNumber = void 0;
@@ -19361,9 +19922,9 @@ var require_issuer_and_serial_number = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/signer_identifier.js
+// node_modules/@peculiar/asn1-cms/build/cjs/signer_identifier.js
 var require_signer_identifier = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/signer_identifier.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/signer_identifier.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.SignerIdentifier = void 0;
@@ -19395,9 +19956,9 @@ var require_signer_identifier = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/types.js
+// node_modules/@peculiar/asn1-cms/build/cjs/types.js
 var require_types3 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/types.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/types.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.KeyDerivationAlgorithmIdentifier = exports.MessageAuthenticationCodeAlgorithm = exports.ContentEncryptionAlgorithmIdentifier = exports.KeyEncryptionAlgorithmIdentifier = exports.SignatureAlgorithmIdentifier = exports.DigestAlgorithmIdentifier = exports.CMSVersion = void 0;
@@ -19452,9 +20013,9 @@ var require_types3 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/attribute.js
+// node_modules/@peculiar/asn1-cms/build/cjs/attribute.js
 var require_attribute2 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/attribute.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/attribute.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.Attribute = void 0;
@@ -19480,9 +20041,9 @@ var require_attribute2 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/signer_info.js
+// node_modules/@peculiar/asn1-cms/build/cjs/signer_info.js
 var require_signer_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/signer_info.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/signer_info.js"(exports) {
     "use strict";
     var SignerInfos_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -19556,9 +20117,9 @@ var require_signer_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/attributes/counter_signature.js
+// node_modules/@peculiar/asn1-cms/build/cjs/attributes/counter_signature.js
 var require_counter_signature = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/attributes/counter_signature.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/attributes/counter_signature.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.CounterSignature = exports.id_counterSignature = void 0;
@@ -19575,9 +20136,9 @@ var require_counter_signature = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/attributes/message_digest.js
+// node_modules/@peculiar/asn1-cms/build/cjs/attributes/message_digest.js
 var require_message_digest = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/attributes/message_digest.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/attributes/message_digest.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.MessageDigest = exports.id_messageDigest = void 0;
@@ -19589,9 +20150,9 @@ var require_message_digest = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/attributes/signing_time.js
+// node_modules/@peculiar/asn1-cms/build/cjs/attributes/signing_time.js
 var require_signing_time = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/attributes/signing_time.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/attributes/signing_time.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.SigningTime = exports.id_signingTime = void 0;
@@ -19608,9 +20169,9 @@ var require_signing_time = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/attributes/index.js
+// node_modules/@peculiar/asn1-cms/build/cjs/attributes/index.js
 var require_attributes = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/attributes/index.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/attributes/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.id_contentType = void 0;
@@ -19622,9 +20183,9 @@ var require_attributes = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/aa_clear_attrs.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/aa_clear_attrs.js
 var require_aa_clear_attrs = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/aa_clear_attrs.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/aa_clear_attrs.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.ACClearAttrs = void 0;
@@ -19655,9 +20216,9 @@ var require_aa_clear_attrs = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/attr_spec.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/attr_spec.js
 var require_attr_spec = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/attr_spec.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/attr_spec.js"(exports) {
     "use strict";
     var AttrSpec_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -19680,9 +20241,9 @@ var require_attr_spec = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/aa_controls.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/aa_controls.js
 var require_aa_controls = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/aa_controls.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/aa_controls.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AAControls = void 0;
@@ -19730,9 +20291,9 @@ var require_aa_controls = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/issuer_serial.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/issuer_serial.js
 var require_issuer_serial = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/issuer_serial.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/issuer_serial.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.IssuerSerial = void 0;
@@ -19766,9 +20327,9 @@ var require_issuer_serial = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/object_digest_info.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/object_digest_info.js
 var require_object_digest_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/object_digest_info.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/object_digest_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.ObjectDigestInfo = exports.DigestedObjectType = void 0;
@@ -19809,9 +20370,9 @@ var require_object_digest_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/v2_form.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/v2_form.js
 var require_v2_form = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/v2_form.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/v2_form.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.V2Form = void 0;
@@ -19854,9 +20415,9 @@ var require_v2_form = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/attr_cert_issuer.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/attr_cert_issuer.js
 var require_attr_cert_issuer = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/attr_cert_issuer.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/attr_cert_issuer.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AttCertIssuer = void 0;
@@ -19891,9 +20452,9 @@ var require_attr_cert_issuer = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/attr_cert_validity_period.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/attr_cert_validity_period.js
 var require_attr_cert_validity_period = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/attr_cert_validity_period.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/attr_cert_validity_period.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AttCertValidityPeriod = void 0;
@@ -19916,9 +20477,9 @@ var require_attr_cert_validity_period = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/holder.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/holder.js
 var require_holder = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/holder.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/holder.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.Holder = void 0;
@@ -19963,9 +20524,9 @@ var require_holder = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/attribute_certificate_info.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/attribute_certificate_info.js
 var require_attribute_certificate_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/attribute_certificate_info.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/attribute_certificate_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AttributeCertificateInfo = exports.AttCertVersion = void 0;
@@ -20036,9 +20597,9 @@ var require_attribute_certificate_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/attribute_certificate.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/attribute_certificate.js
 var require_attribute_certificate = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/attribute_certificate.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/attribute_certificate.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.AttributeCertificate = void 0;
@@ -20067,9 +20628,9 @@ var require_attribute_certificate = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/class_list.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/class_list.js
 var require_class_list = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/class_list.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/class_list.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.ClassList = exports.ClassListFlags = void 0;
@@ -20089,9 +20650,9 @@ var require_class_list = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/security_category.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/security_category.js
 var require_security_category = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/security_category.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/security_category.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.SecurityCategory = void 0;
@@ -20122,9 +20683,9 @@ var require_security_category = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/clearance.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/clearance.js
 var require_clearance = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/clearance.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/clearance.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.Clearance = void 0;
@@ -20159,9 +20720,9 @@ var require_clearance = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/ietf_attr_syntax.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/ietf_attr_syntax.js
 var require_ietf_attr_syntax = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/ietf_attr_syntax.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/ietf_attr_syntax.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.IetfAttrSyntax = exports.IetfAttrSyntaxValueChoices = void 0;
@@ -20211,9 +20772,9 @@ var require_ietf_attr_syntax = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/object_identifiers.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/object_identifiers.js
 var require_object_identifiers2 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/object_identifiers.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/object_identifiers.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.id_at_clearance = exports.id_at_role = exports.id_at = exports.id_aca_encAttrs = exports.id_aca_group = exports.id_aca_chargingIdentity = exports.id_aca_accessIdentity = exports.id_aca_authenticationInfo = exports.id_aca = exports.id_ce_targetInformation = exports.id_pe_ac_proxying = exports.id_pe_aaControls = exports.id_pe_ac_auditIdentity = void 0;
@@ -20234,9 +20795,9 @@ var require_object_identifiers2 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/target.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/target.js
 var require_target = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/target.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/target.js"(exports) {
     "use strict";
     var Targets_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -20319,9 +20880,9 @@ var require_target = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/proxy_info.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/proxy_info.js
 var require_proxy_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/proxy_info.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/proxy_info.js"(exports) {
     "use strict";
     var ProxyInfo_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -20345,9 +20906,9 @@ var require_proxy_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/role_syntax.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/role_syntax.js
 var require_role_syntax = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/role_syntax.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/role_syntax.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.RoleSyntax = void 0;
@@ -20380,9 +20941,9 @@ var require_role_syntax = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/svce_auth_info.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/svce_auth_info.js
 var require_svce_auth_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/svce_auth_info.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/svce_auth_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.SvceAuthInfo = void 0;
@@ -20413,9 +20974,9 @@ var require_svce_auth_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/index.js
+// node_modules/@peculiar/asn1-x509-attr/build/cjs/index.js
 var require_cjs3 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-x509-attr/build/cjs/index.js"(exports) {
+  "node_modules/@peculiar/asn1-x509-attr/build/cjs/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -20442,9 +21003,9 @@ var require_cjs3 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/certificate_choices.js
+// node_modules/@peculiar/asn1-cms/build/cjs/certificate_choices.js
 var require_certificate_choices = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/certificate_choices.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/certificate_choices.js"(exports) {
     "use strict";
     var CertificateSet_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -20512,9 +21073,9 @@ var require_certificate_choices = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/content_info.js
+// node_modules/@peculiar/asn1-cms/build/cjs/content_info.js
 var require_content_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/content_info.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/content_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.ContentInfo = void 0;
@@ -20540,9 +21101,9 @@ var require_content_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/encapsulated_content_info.js
+// node_modules/@peculiar/asn1-cms/build/cjs/encapsulated_content_info.js
 var require_encapsulated_content_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/encapsulated_content_info.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/encapsulated_content_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.EncapsulatedContentInfo = exports.EncapsulatedContent = void 0;
@@ -20586,9 +21147,9 @@ var require_encapsulated_content_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/encrypted_content_info.js
+// node_modules/@peculiar/asn1-cms/build/cjs/encrypted_content_info.js
 var require_encrypted_content_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/encrypted_content_info.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/encrypted_content_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.EncryptedContentInfo = exports.EncryptedContent = void 0;
@@ -20648,9 +21209,9 @@ var require_encrypted_content_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/other_key_attribute.js
+// node_modules/@peculiar/asn1-cms/build/cjs/other_key_attribute.js
 var require_other_key_attribute = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/other_key_attribute.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/other_key_attribute.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.OtherKeyAttribute = void 0;
@@ -20676,9 +21237,9 @@ var require_other_key_attribute = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/key_agree_recipient_info.js
+// node_modules/@peculiar/asn1-cms/build/cjs/key_agree_recipient_info.js
 var require_key_agree_recipient_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/key_agree_recipient_info.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/key_agree_recipient_info.js"(exports) {
     "use strict";
     var RecipientEncryptedKeys_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -20849,9 +21410,9 @@ var require_key_agree_recipient_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/key_trans_recipient_info.js
+// node_modules/@peculiar/asn1-cms/build/cjs/key_trans_recipient_info.js
 var require_key_trans_recipient_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/key_trans_recipient_info.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/key_trans_recipient_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.KeyTransRecipientInfo = exports.RecipientIdentifier = void 0;
@@ -20906,9 +21467,9 @@ var require_key_trans_recipient_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/kek_recipient_info.js
+// node_modules/@peculiar/asn1-cms/build/cjs/kek_recipient_info.js
 var require_kek_recipient_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/kek_recipient_info.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/kek_recipient_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.KEKRecipientInfo = exports.KEKIdentifier = void 0;
@@ -20965,9 +21526,9 @@ var require_kek_recipient_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/password_recipient_info.js
+// node_modules/@peculiar/asn1-cms/build/cjs/password_recipient_info.js
 var require_password_recipient_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/password_recipient_info.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/password_recipient_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.PasswordRecipientInfo = void 0;
@@ -21003,9 +21564,9 @@ var require_password_recipient_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/recipient_info.js
+// node_modules/@peculiar/asn1-cms/build/cjs/recipient_info.js
 var require_recipient_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/recipient_info.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/recipient_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.RecipientInfo = exports.OtherRecipientInfo = void 0;
@@ -21084,9 +21645,9 @@ var require_recipient_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/recipient_infos.js
+// node_modules/@peculiar/asn1-cms/build/cjs/recipient_infos.js
 var require_recipient_infos = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/recipient_infos.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/recipient_infos.js"(exports) {
     "use strict";
     var RecipientInfos_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -21110,9 +21671,9 @@ var require_recipient_infos = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/revocation_info_choice.js
+// node_modules/@peculiar/asn1-cms/build/cjs/revocation_info_choice.js
 var require_revocation_info_choice = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/revocation_info_choice.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/revocation_info_choice.js"(exports) {
     "use strict";
     var RevocationInfoChoices_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -21170,9 +21731,9 @@ var require_revocation_info_choice = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/originator_info.js
+// node_modules/@peculiar/asn1-cms/build/cjs/originator_info.js
 var require_originator_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/originator_info.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/originator_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.OriginatorInfo = void 0;
@@ -21207,9 +21768,9 @@ var require_originator_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/enveloped_data.js
+// node_modules/@peculiar/asn1-cms/build/cjs/enveloped_data.js
 var require_enveloped_data = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/enveloped_data.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/enveloped_data.js"(exports) {
     "use strict";
     var UnprotectedAttributes_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -21273,9 +21834,9 @@ var require_enveloped_data = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/object_identifiers.js
+// node_modules/@peculiar/asn1-cms/build/cjs/object_identifiers.js
 var require_object_identifiers3 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/object_identifiers.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/object_identifiers.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.id_authData = exports.id_encryptedData = exports.id_digestedData = exports.id_envelopedData = exports.id_signedData = exports.id_data = exports.id_ct_contentInfo = void 0;
@@ -21289,9 +21850,9 @@ var require_object_identifiers3 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/signed_data.js
+// node_modules/@peculiar/asn1-cms/build/cjs/signed_data.js
 var require_signed_data = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/signed_data.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/signed_data.js"(exports) {
     "use strict";
     var DigestAlgorithmIdentifiers_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -21359,9 +21920,9 @@ var require_signed_data = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/index.js
+// node_modules/@peculiar/asn1-cms/build/cjs/index.js
 var require_cjs4 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-cms/build/cjs/index.js"(exports) {
+  "node_modules/@peculiar/asn1-cms/build/cjs/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -21389,9 +21950,9 @@ var require_cjs4 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/object_identifiers.js
+// node_modules/@peculiar/asn1-ecc/build/cjs/object_identifiers.js
 var require_object_identifiers4 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/object_identifiers.js"(exports) {
+  "node_modules/@peculiar/asn1-ecc/build/cjs/object_identifiers.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.id_sect571r1 = exports.id_sect571k1 = exports.id_secp521r1 = exports.id_sect409r1 = exports.id_sect409k1 = exports.id_secp384r1 = exports.id_sect283r1 = exports.id_sect283k1 = exports.id_secp256r1 = exports.id_sect233r1 = exports.id_sect233k1 = exports.id_secp224r1 = exports.id_sect163r2 = exports.id_sect163k1 = exports.id_secp192r1 = exports.id_ecdsaWithSHA512 = exports.id_ecdsaWithSHA384 = exports.id_ecdsaWithSHA256 = exports.id_ecdsaWithSHA224 = exports.id_ecdsaWithSHA1 = exports.id_ecMQV = exports.id_ecDH = exports.id_ecPublicKey = void 0;
@@ -21421,9 +21982,9 @@ var require_object_identifiers4 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/algorithms.js
+// node_modules/@peculiar/asn1-ecc/build/cjs/algorithms.js
 var require_algorithms = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/algorithms.js"(exports) {
+  "node_modules/@peculiar/asn1-ecc/build/cjs/algorithms.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.ecdsaWithSHA512 = exports.ecdsaWithSHA384 = exports.ecdsaWithSHA256 = exports.ecdsaWithSHA224 = exports.ecdsaWithSHA1 = void 0;
@@ -21441,9 +22002,9 @@ var require_algorithms = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/rfc3279.js
+// node_modules/@peculiar/asn1-ecc/build/cjs/rfc3279.js
 var require_rfc3279 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/rfc3279.js"(exports) {
+  "node_modules/@peculiar/asn1-ecc/build/cjs/rfc3279.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.SpecifiedECDomain = exports.ECPVer = exports.Curve = exports.FieldElement = exports.ECPoint = exports.FieldID = void 0;
@@ -21542,9 +22103,9 @@ var require_rfc3279 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/ec_parameters.js
+// node_modules/@peculiar/asn1-ecc/build/cjs/ec_parameters.js
 var require_ec_parameters = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/ec_parameters.js"(exports) {
+  "node_modules/@peculiar/asn1-ecc/build/cjs/ec_parameters.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.ECParameters = void 0;
@@ -21575,9 +22136,9 @@ var require_ec_parameters = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/ec_private_key.js
+// node_modules/@peculiar/asn1-ecc/build/cjs/ec_private_key.js
 var require_ec_private_key = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/ec_private_key.js"(exports) {
+  "node_modules/@peculiar/asn1-ecc/build/cjs/ec_private_key.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.ECPrivateKey = void 0;
@@ -21617,9 +22178,9 @@ var require_ec_private_key = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/ec_signature_value.js
+// node_modules/@peculiar/asn1-ecc/build/cjs/ec_signature_value.js
 var require_ec_signature_value = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/ec_signature_value.js"(exports) {
+  "node_modules/@peculiar/asn1-ecc/build/cjs/ec_signature_value.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.ECDSASigValue = void 0;
@@ -21648,9 +22209,9 @@ var require_ec_signature_value = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/index.js
+// node_modules/@peculiar/asn1-ecc/build/cjs/index.js
 var require_cjs5 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-ecc/build/cjs/index.js"(exports) {
+  "node_modules/@peculiar/asn1-ecc/build/cjs/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -21663,9 +22224,9 @@ var require_cjs5 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/object_identifiers.js
+// node_modules/@peculiar/asn1-rsa/build/cjs/object_identifiers.js
 var require_object_identifiers5 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/object_identifiers.js"(exports) {
+  "node_modules/@peculiar/asn1-rsa/build/cjs/object_identifiers.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.id_mgf1 = exports.id_md5 = exports.id_md2 = exports.id_sha512_256 = exports.id_sha512_224 = exports.id_sha512 = exports.id_sha384 = exports.id_sha256 = exports.id_sha224 = exports.id_sha1 = exports.id_sha512_256WithRSAEncryption = exports.id_sha512_224WithRSAEncryption = exports.id_sha512WithRSAEncryption = exports.id_sha384WithRSAEncryption = exports.id_sha256WithRSAEncryption = exports.id_ssha224WithRSAEncryption = exports.id_sha224WithRSAEncryption = exports.id_sha1WithRSAEncryption = exports.id_md5WithRSAEncryption = exports.id_md2WithRSAEncryption = exports.id_RSASSA_PSS = exports.id_pSpecified = exports.id_RSAES_OAEP = exports.id_rsaEncryption = exports.id_pkcs_1 = void 0;
@@ -21697,9 +22258,9 @@ var require_object_identifiers5 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/algorithms.js
+// node_modules/@peculiar/asn1-rsa/build/cjs/algorithms.js
 var require_algorithms2 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/algorithms.js"(exports) {
+  "node_modules/@peculiar/asn1-rsa/build/cjs/algorithms.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.sha512_256WithRSAEncryption = exports.sha512_224WithRSAEncryption = exports.sha512WithRSAEncryption = exports.sha384WithRSAEncryption = exports.sha256WithRSAEncryption = exports.sha224WithRSAEncryption = exports.sha1WithRSAEncryption = exports.md5WithRSAEncryption = exports.md2WithRSAEncryption = exports.rsaEncryption = exports.pSpecifiedEmpty = exports.mgf1SHA1 = exports.sha512_256 = exports.sha512_224 = exports.sha512 = exports.sha384 = exports.sha256 = exports.sha224 = exports.sha1 = exports.md4 = exports.md2 = void 0;
@@ -21764,9 +22325,9 @@ var require_algorithms2 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/parameters/rsaes_oaep.js
+// node_modules/@peculiar/asn1-rsa/build/cjs/parameters/rsaes_oaep.js
 var require_rsaes_oaep = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/parameters/rsaes_oaep.js"(exports) {
+  "node_modules/@peculiar/asn1-rsa/build/cjs/parameters/rsaes_oaep.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.RSAES_OAEP = exports.RsaEsOaepParams = void 0;
@@ -21815,9 +22376,9 @@ var require_rsaes_oaep = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/parameters/rsassa_pss.js
+// node_modules/@peculiar/asn1-rsa/build/cjs/parameters/rsassa_pss.js
 var require_rsassa_pss = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/parameters/rsassa_pss.js"(exports) {
+  "node_modules/@peculiar/asn1-rsa/build/cjs/parameters/rsassa_pss.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.RSASSA_PSS = exports.RsaSaPssParams = void 0;
@@ -21874,9 +22435,9 @@ var require_rsassa_pss = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/parameters/rsassa_pkcs1_v1_5.js
+// node_modules/@peculiar/asn1-rsa/build/cjs/parameters/rsassa_pkcs1_v1_5.js
 var require_rsassa_pkcs1_v1_5 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/parameters/rsassa_pkcs1_v1_5.js"(exports) {
+  "node_modules/@peculiar/asn1-rsa/build/cjs/parameters/rsassa_pkcs1_v1_5.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.DigestInfo = void 0;
@@ -21900,9 +22461,9 @@ var require_rsassa_pkcs1_v1_5 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/parameters/index.js
+// node_modules/@peculiar/asn1-rsa/build/cjs/parameters/index.js
 var require_parameters = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/parameters/index.js"(exports) {
+  "node_modules/@peculiar/asn1-rsa/build/cjs/parameters/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -21912,9 +22473,9 @@ var require_parameters = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/other_prime_info.js
+// node_modules/@peculiar/asn1-rsa/build/cjs/other_prime_info.js
 var require_other_prime_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/other_prime_info.js"(exports) {
+  "node_modules/@peculiar/asn1-rsa/build/cjs/other_prime_info.js"(exports) {
     "use strict";
     var OtherPrimeInfos_12;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -21964,9 +22525,9 @@ var require_other_prime_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/rsa_private_key.js
+// node_modules/@peculiar/asn1-rsa/build/cjs/rsa_private_key.js
 var require_rsa_private_key = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/rsa_private_key.js"(exports) {
+  "node_modules/@peculiar/asn1-rsa/build/cjs/rsa_private_key.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.RSAPrivateKey = void 0;
@@ -22049,9 +22610,9 @@ var require_rsa_private_key = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/rsa_public_key.js
+// node_modules/@peculiar/asn1-rsa/build/cjs/rsa_public_key.js
 var require_rsa_public_key = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/rsa_public_key.js"(exports) {
+  "node_modules/@peculiar/asn1-rsa/build/cjs/rsa_public_key.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.RSAPublicKey = void 0;
@@ -22080,9 +22641,9 @@ var require_rsa_public_key = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/index.js
+// node_modules/@peculiar/asn1-rsa/build/cjs/index.js
 var require_cjs6 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-rsa/build/cjs/index.js"(exports) {
+  "node_modules/@peculiar/asn1-rsa/build/cjs/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -22095,7 +22656,7 @@ var require_cjs6 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/node_modules/tslib/tslib.es6.js
+// node_modules/tsyringe/node_modules/tslib/tslib.es6.js
 var tslib_es6_exports2 = {};
 __export(tslib_es6_exports2, {
   __assign: () => __assign2,
@@ -22400,7 +22961,7 @@ function __classPrivateFieldSet2(receiver, privateMap, value) {
 }
 var extendStatics2, __assign2;
 var init_tslib_es62 = __esm({
-  "nodewarden-git/node_modules/tsyringe/node_modules/tslib/tslib.es6.js"() {
+  "node_modules/tsyringe/node_modules/tslib/tslib.es6.js"() {
     extendStatics2 = function(d, b) {
       extendStatics2 = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b3) {
         d2.__proto__ = b3;
@@ -22422,9 +22983,9 @@ var init_tslib_es62 = __esm({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/types/lifecycle.js
+// node_modules/tsyringe/dist/cjs/types/lifecycle.js
 var require_lifecycle = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/types/lifecycle.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/types/lifecycle.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var Lifecycle;
@@ -22438,9 +22999,9 @@ var require_lifecycle = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/types/index.js
+// node_modules/tsyringe/dist/cjs/types/index.js
 var require_types4 = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/types/index.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/types/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var lifecycle_1 = require_lifecycle();
@@ -22450,9 +23011,9 @@ var require_types4 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/reflection-helpers.js
+// node_modules/tsyringe/dist/cjs/reflection-helpers.js
 var require_reflection_helpers = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/reflection-helpers.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/reflection-helpers.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.defineInjectionTokenMetadata = exports.getParamInfo = exports.INJECTION_TOKEN_METADATA_KEY = void 0;
@@ -22481,9 +23042,9 @@ var require_reflection_helpers = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/providers/class-provider.js
+// node_modules/tsyringe/dist/cjs/providers/class-provider.js
 var require_class_provider = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/providers/class-provider.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/providers/class-provider.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.isClassProvider = void 0;
@@ -22494,9 +23055,9 @@ var require_class_provider = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/providers/factory-provider.js
+// node_modules/tsyringe/dist/cjs/providers/factory-provider.js
 var require_factory_provider = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/providers/factory-provider.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/providers/factory-provider.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.isFactoryProvider = void 0;
@@ -22507,9 +23068,9 @@ var require_factory_provider = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/lazy-helpers.js
+// node_modules/tsyringe/dist/cjs/lazy-helpers.js
 var require_lazy_helpers = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/lazy-helpers.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/lazy-helpers.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.delay = exports.DelayedConstructor = void 0;
@@ -22567,9 +23128,9 @@ var require_lazy_helpers = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/providers/injection-token.js
+// node_modules/tsyringe/dist/cjs/providers/injection-token.js
 var require_injection_token = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/providers/injection-token.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/providers/injection-token.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.isConstructorToken = exports.isTransformDescriptor = exports.isTokenDescriptor = exports.isNormalToken = void 0;
@@ -22593,9 +23154,9 @@ var require_injection_token = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/providers/token-provider.js
+// node_modules/tsyringe/dist/cjs/providers/token-provider.js
 var require_token_provider = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/providers/token-provider.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/providers/token-provider.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.isTokenProvider = void 0;
@@ -22606,9 +23167,9 @@ var require_token_provider = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/providers/value-provider.js
+// node_modules/tsyringe/dist/cjs/providers/value-provider.js
 var require_value_provider = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/providers/value-provider.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/providers/value-provider.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.isValueProvider = void 0;
@@ -22619,9 +23180,9 @@ var require_value_provider = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/providers/index.js
+// node_modules/tsyringe/dist/cjs/providers/index.js
 var require_providers = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/providers/index.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/providers/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var class_provider_1 = require_class_provider();
@@ -22647,9 +23208,9 @@ var require_providers = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/providers/provider.js
+// node_modules/tsyringe/dist/cjs/providers/provider.js
 var require_provider = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/providers/provider.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/providers/provider.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.isProvider = void 0;
@@ -22664,9 +23225,9 @@ var require_provider = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/registry-base.js
+// node_modules/tsyringe/dist/cjs/registry-base.js
 var require_registry_base = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/registry-base.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/registry-base.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var RegistryBase = class {
@@ -22709,9 +23270,9 @@ var require_registry_base = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/registry.js
+// node_modules/tsyringe/dist/cjs/registry.js
 var require_registry = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/registry.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/registry.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var registry_base_1 = require_registry_base();
@@ -22721,9 +23282,9 @@ var require_registry = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/resolution-context.js
+// node_modules/tsyringe/dist/cjs/resolution-context.js
 var require_resolution_context = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/resolution-context.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/resolution-context.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var ResolutionContext = class {
@@ -22735,9 +23296,9 @@ var require_resolution_context = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/error-helpers.js
+// node_modules/tsyringe/dist/cjs/error-helpers.js
 var require_error_helpers = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/error-helpers.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/error-helpers.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.formatErrorCtor = void 0;
@@ -22760,9 +23321,9 @@ var require_error_helpers = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/types/disposable.js
+// node_modules/tsyringe/dist/cjs/types/disposable.js
 var require_disposable = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/types/disposable.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/types/disposable.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.isDisposable = void 0;
@@ -22779,9 +23340,9 @@ var require_disposable = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/interceptors.js
+// node_modules/tsyringe/dist/cjs/interceptors.js
 var require_interceptors = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/interceptors.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/interceptors.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.PostResolutionInterceptors = exports.PreResolutionInterceptors = void 0;
@@ -22802,9 +23363,9 @@ var require_interceptors = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/dependency-container.js
+// node_modules/tsyringe/dist/cjs/dependency-container.js
 var require_dependency_container = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/dependency-container.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/dependency-container.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.instance = exports.typeInfo = void 0;
@@ -23120,9 +23681,9 @@ var require_dependency_container = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/auto-injectable.js
+// node_modules/tsyringe/dist/cjs/decorators/auto-injectable.js
 var require_auto_injectable = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/auto-injectable.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/decorators/auto-injectable.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var reflection_helpers_1 = require_reflection_helpers();
@@ -23159,9 +23720,9 @@ var require_auto_injectable = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/inject.js
+// node_modules/tsyringe/dist/cjs/decorators/inject.js
 var require_inject = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/inject.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/decorators/inject.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var reflection_helpers_1 = require_reflection_helpers();
@@ -23177,9 +23738,9 @@ var require_inject = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/injectable.js
+// node_modules/tsyringe/dist/cjs/decorators/injectable.js
 var require_injectable = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/injectable.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/decorators/injectable.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var reflection_helpers_1 = require_reflection_helpers();
@@ -23203,9 +23764,9 @@ var require_injectable = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/registry.js
+// node_modules/tsyringe/dist/cjs/decorators/registry.js
 var require_registry2 = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/registry.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/decorators/registry.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es62(), __toCommonJS(tslib_es6_exports2));
@@ -23223,9 +23784,9 @@ var require_registry2 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/singleton.js
+// node_modules/tsyringe/dist/cjs/decorators/singleton.js
 var require_singleton = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/singleton.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/decorators/singleton.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var injectable_1 = require_injectable();
@@ -23240,9 +23801,9 @@ var require_singleton = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/inject-all.js
+// node_modules/tsyringe/dist/cjs/decorators/inject-all.js
 var require_inject_all = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/inject-all.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/decorators/inject-all.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var reflection_helpers_1 = require_reflection_helpers();
@@ -23258,9 +23819,9 @@ var require_inject_all = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/inject-all-with-transform.js
+// node_modules/tsyringe/dist/cjs/decorators/inject-all-with-transform.js
 var require_inject_all_with_transform = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/inject-all-with-transform.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/decorators/inject-all-with-transform.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var reflection_helpers_1 = require_reflection_helpers();
@@ -23277,9 +23838,9 @@ var require_inject_all_with_transform = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/inject-with-transform.js
+// node_modules/tsyringe/dist/cjs/decorators/inject-with-transform.js
 var require_inject_with_transform = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/inject-with-transform.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/decorators/inject-with-transform.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var reflection_helpers_1 = require_reflection_helpers();
@@ -23293,9 +23854,9 @@ var require_inject_with_transform = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/scoped.js
+// node_modules/tsyringe/dist/cjs/decorators/scoped.js
 var require_scoped = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/scoped.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/decorators/scoped.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var injectable_1 = require_injectable();
@@ -23312,9 +23873,9 @@ var require_scoped = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/index.js
+// node_modules/tsyringe/dist/cjs/decorators/index.js
 var require_decorators2 = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/decorators/index.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/decorators/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var auto_injectable_1 = require_auto_injectable();
@@ -23356,9 +23917,9 @@ var require_decorators2 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/factories/instance-caching-factory.js
+// node_modules/tsyringe/dist/cjs/factories/instance-caching-factory.js
 var require_instance_caching_factory = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/factories/instance-caching-factory.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/factories/instance-caching-factory.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     function instanceCachingFactory(factoryFunc) {
@@ -23374,9 +23935,9 @@ var require_instance_caching_factory = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/factories/instance-per-container-caching-factory.js
+// node_modules/tsyringe/dist/cjs/factories/instance-per-container-caching-factory.js
 var require_instance_per_container_caching_factory = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/factories/instance-per-container-caching-factory.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/factories/instance-per-container-caching-factory.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     function instancePerContainerCachingFactory(factoryFunc) {
@@ -23394,9 +23955,9 @@ var require_instance_per_container_caching_factory = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/factories/predicate-aware-class-factory.js
+// node_modules/tsyringe/dist/cjs/factories/predicate-aware-class-factory.js
 var require_predicate_aware_class_factory = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/factories/predicate-aware-class-factory.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/factories/predicate-aware-class-factory.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     function predicateAwareClassFactory(predicate, trueConstructor, falseConstructor, useCaching = true) {
@@ -23418,9 +23979,9 @@ var require_predicate_aware_class_factory = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/factories/index.js
+// node_modules/tsyringe/dist/cjs/factories/index.js
 var require_factories = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/factories/index.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/factories/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var instance_caching_factory_1 = require_instance_caching_factory();
@@ -23438,9 +23999,9 @@ var require_factories = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/tsyringe/dist/cjs/index.js
+// node_modules/tsyringe/dist/cjs/index.js
 var require_cjs7 = __commonJS({
-  "nodewarden-git/node_modules/tsyringe/dist/cjs/index.js"(exports) {
+  "node_modules/tsyringe/dist/cjs/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es62(), __toCommonJS(tslib_es6_exports2));
@@ -23465,9 +24026,9 @@ var require_cjs7 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/attribute.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/attribute.js
 var require_attribute3 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/attribute.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/attribute.js"(exports) {
     "use strict";
     var PKCS12AttrSet_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -23507,9 +24068,9 @@ var require_attribute3 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/authenticated_safe.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/authenticated_safe.js
 var require_authenticated_safe = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/authenticated_safe.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/authenticated_safe.js"(exports) {
     "use strict";
     var AuthenticatedSafe_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -23533,9 +24094,9 @@ var require_authenticated_safe = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/object_identifiers.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/object_identifiers.js
 var require_object_identifiers6 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/object_identifiers.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/object_identifiers.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.id_bagtypes = exports.id_pbewithSHAAnd40BitRC2_CBC = exports.id_pbeWithSHAAnd128BitRC2_CBC = exports.id_pbeWithSHAAnd2_KeyTripleDES_CBC = exports.id_pbeWithSHAAnd3_KeyTripleDES_CBC = exports.id_pbeWithSHAAnd40BitRC4 = exports.id_pbeWithSHAAnd128BitRC4 = exports.id_pkcs_12PbeIds = exports.id_pkcs_12 = exports.id_pkcs = exports.id_rsadsi = void 0;
@@ -23553,9 +24114,9 @@ var require_object_identifiers6 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/types.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/bags/types.js
 var require_types5 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/types.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/bags/types.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.id_pkcs_9 = exports.id_SafeContents = exports.id_SecretBag = exports.id_CRLBag = exports.id_certBag = exports.id_pkcs8ShroudedKeyBag = exports.id_keyBag = void 0;
@@ -23570,9 +24131,9 @@ var require_types5 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/cert_bag.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/bags/cert_bag.js
 var require_cert_bag = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/cert_bag.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/bags/cert_bag.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.id_sdsiCertificate = exports.id_x509Certificate = exports.id_certTypes = exports.CertBag = void 0;
@@ -23602,9 +24163,9 @@ var require_cert_bag = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/crl_bag.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/bags/crl_bag.js
 var require_crl_bag = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/crl_bag.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/bags/crl_bag.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.id_x509CRL = exports.id_crlTypes = exports.CRLBag = void 0;
@@ -23633,9 +24194,9 @@ var require_crl_bag = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pkcs8/build/cjs/encrypted_private_key_info.js
+// node_modules/@peculiar/asn1-pkcs8/build/cjs/encrypted_private_key_info.js
 var require_encrypted_private_key_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pkcs8/build/cjs/encrypted_private_key_info.js"(exports) {
+  "node_modules/@peculiar/asn1-pkcs8/build/cjs/encrypted_private_key_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.EncryptedPrivateKeyInfo = exports.EncryptedData = void 0;
@@ -23662,9 +24223,9 @@ var require_encrypted_private_key_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pkcs8/build/cjs/private_key_info.js
+// node_modules/@peculiar/asn1-pkcs8/build/cjs/private_key_info.js
 var require_private_key_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pkcs8/build/cjs/private_key_info.js"(exports) {
+  "node_modules/@peculiar/asn1-pkcs8/build/cjs/private_key_info.js"(exports) {
     "use strict";
     var Attributes_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -23722,9 +24283,9 @@ var require_private_key_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pkcs8/build/cjs/index.js
+// node_modules/@peculiar/asn1-pkcs8/build/cjs/index.js
 var require_cjs8 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pkcs8/build/cjs/index.js"(exports) {
+  "node_modules/@peculiar/asn1-pkcs8/build/cjs/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -23733,9 +24294,9 @@ var require_cjs8 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/key_bag.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/bags/key_bag.js
 var require_key_bag = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/key_bag.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/bags/key_bag.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.KeyBag = void 0;
@@ -23751,9 +24312,9 @@ var require_key_bag = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/pkcs8_shrouded_key_bag.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/bags/pkcs8_shrouded_key_bag.js
 var require_pkcs8_shrouded_key_bag = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/pkcs8_shrouded_key_bag.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/bags/pkcs8_shrouded_key_bag.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.PKCS8ShroudedKeyBag = void 0;
@@ -23769,9 +24330,9 @@ var require_pkcs8_shrouded_key_bag = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/secret_bag.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/bags/secret_bag.js
 var require_secret_bag = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/secret_bag.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/bags/secret_bag.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.SecretBag = void 0;
@@ -23797,9 +24358,9 @@ var require_secret_bag = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/index.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/bags/index.js
 var require_bags = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/bags/index.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/bags/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -23812,9 +24373,9 @@ var require_bags = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/mac_data.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/mac_data.js
 var require_mac_data = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/mac_data.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/mac_data.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.MacData = void 0;
@@ -23845,9 +24406,9 @@ var require_mac_data = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/pfx.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/pfx.js
 var require_pfx = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/pfx.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/pfx.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.PFX = void 0;
@@ -23879,9 +24440,9 @@ var require_pfx = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/safe_bag.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/safe_bag.js
 var require_safe_bag = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/safe_bag.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/safe_bag.js"(exports) {
     "use strict";
     var SafeContents_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -23930,9 +24491,9 @@ var require_safe_bag = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/index.js
+// node_modules/@peculiar/asn1-pfx/build/cjs/index.js
 var require_cjs9 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pfx/build/cjs/index.js"(exports) {
+  "node_modules/@peculiar/asn1-pfx/build/cjs/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -23946,9 +24507,9 @@ var require_cjs9 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-pkcs9/build/cjs/index.js
+// node_modules/@peculiar/asn1-pkcs9/build/cjs/index.js
 var require_cjs10 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-pkcs9/build/cjs/index.js"(exports) {
+  "node_modules/@peculiar/asn1-pkcs9/build/cjs/index.js"(exports) {
     "use strict";
     var ExtensionRequest_1;
     var ExtendedCertificateAttributes_1;
@@ -24255,9 +24816,9 @@ var require_cjs10 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-csr/build/cjs/attributes.js
+// node_modules/@peculiar/asn1-csr/build/cjs/attributes.js
 var require_attributes2 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-csr/build/cjs/attributes.js"(exports) {
+  "node_modules/@peculiar/asn1-csr/build/cjs/attributes.js"(exports) {
     "use strict";
     var Attributes_1;
     Object.defineProperty(exports, "__esModule", { value: true });
@@ -24281,9 +24842,9 @@ var require_attributes2 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-csr/build/cjs/certification_request_info.js
+// node_modules/@peculiar/asn1-csr/build/cjs/certification_request_info.js
 var require_certification_request_info = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-csr/build/cjs/certification_request_info.js"(exports) {
+  "node_modules/@peculiar/asn1-csr/build/cjs/certification_request_info.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.CertificationRequestInfo = void 0;
@@ -24321,9 +24882,9 @@ var require_certification_request_info = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-csr/build/cjs/certification_request.js
+// node_modules/@peculiar/asn1-csr/build/cjs/certification_request.js
 var require_certification_request = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-csr/build/cjs/certification_request.js"(exports) {
+  "node_modules/@peculiar/asn1-csr/build/cjs/certification_request.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.CertificationRequest = void 0;
@@ -24356,9 +24917,9 @@ var require_certification_request = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-csr/build/cjs/index.js
+// node_modules/@peculiar/asn1-csr/build/cjs/index.js
 var require_cjs11 = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/asn1-csr/build/cjs/index.js"(exports) {
+  "node_modules/@peculiar/asn1-csr/build/cjs/index.js"(exports) {
     "use strict";
     Object.defineProperty(exports, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -24368,9 +24929,9 @@ var require_cjs11 = __commonJS({
   }
 });
 
-// nodewarden-git/node_modules/@peculiar/x509/build/x509.cjs.js
+// node_modules/@peculiar/x509/build/x509.cjs.js
 var require_x509_cjs = __commonJS({
-  "nodewarden-git/node_modules/@peculiar/x509/build/x509.cjs.js"(exports) {
+  "node_modules/@peculiar/x509/build/x509.cjs.js"(exports) {
     "use strict";
     require_Reflect();
     var asn1Schema = require_cjs();
@@ -27647,17 +28208,17 @@ var require_x509_cjs = __commonJS({
   }
 });
 
-// nodewarden-git/server/index.ts
+// server/index.ts
 import http from "node:http";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// nodewarden-git/src/router.ts
+// src/router.ts
 init_auth();
 
-// nodewarden-git/src/services/ratelimit.ts
+// src/services/ratelimit.ts
 init_limits();
 var CONFIG = {
   LOGIN_MAX_ATTEMPTS: LIMITS.rateLimit.loginMaxAttempts,
@@ -27936,14 +28497,14 @@ function getClientIdentifier(request) {
   return null;
 }
 
-// nodewarden-git/src/router.ts
+// src/router.ts
 init_response();
 init_limits();
 
-// nodewarden-git/src/router-authenticated.ts
+// src/router-authenticated.ts
 init_response();
 
-// nodewarden-git/src/handlers/accounts.ts
+// src/handlers/accounts.ts
 init_storage();
 init_auth();
 init_audit_events();
@@ -27952,7 +28513,7 @@ init_uuid();
 init_limits();
 init_api_key();
 
-// nodewarden-git/src/utils/totp.ts
+// src/utils/totp.ts
 var TOTP_STEP_SECONDS = 30;
 var TOTP_DIGITS = 6;
 var TOTP_WINDOW = 1;
@@ -28034,7 +28595,7 @@ function isTotpEnabled(secretRaw) {
   return Boolean(secretRaw && normalizeBase32(secretRaw).length > 0);
 }
 
-// nodewarden-git/src/utils/recovery-code.ts
+// src/utils/recovery-code.ts
 var RECOVERY_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 var RECOVERY_ALPHABET_LENGTH = RECOVERY_ALPHABET.length;
 var RECOVERY_MAX_UNBIASED_BYTE = Math.floor(256 / RECOVERY_ALPHABET_LENGTH) * RECOVERY_ALPHABET_LENGTH;
@@ -28068,7 +28629,7 @@ function recoveryCodeEquals(input, storedCode) {
   return diff === 0;
 }
 
-// nodewarden-git/src/utils/user-decryption.ts
+// src/utils/user-decryption.ts
 function normalizeOptionalPublicKey(value) {
   if (value == null) return "";
   return String(value);
@@ -28132,7 +28693,7 @@ function buildUserDecryptionCompat(user) {
   };
 }
 
-// nodewarden-git/src/utils/profile-response.ts
+// src/utils/profile-response.ts
 init_yubico_otp();
 function buildProfileResponse(user, env) {
   void env;
@@ -28170,7 +28731,7 @@ function buildProfileResponse(user, env) {
   };
 }
 
-// nodewarden-git/src/handlers/accounts.ts
+// src/handlers/accounts.ts
 init_yubico_otp();
 init_yubico_config();
 var TWO_FACTOR_PROVIDER_AUTHENTICATOR = 0;
@@ -29449,20 +30010,20 @@ function randomStringAlphanum(length) {
   return result;
 }
 
-// nodewarden-git/src/handlers/ciphers.ts
+// src/handlers/ciphers.ts
 init_storage();
 init_notifications_hub();
 init_response();
 init_uuid();
 
-// nodewarden-git/src/handlers/attachments.ts
+// src/handlers/attachments.ts
 init_notifications_hub();
 init_storage();
 init_response();
 init_direct_upload();
 init_uuid();
 
-// nodewarden-git/src/utils/content-type.ts
+// src/utils/content-type.ts
 var ACTIVE_DOWNLOAD_MEDIA_TYPES = /* @__PURE__ */ new Set([
   "application/xhtml+xml",
   "application/xml",
@@ -29495,11 +30056,11 @@ function sanitizeDownloadContentType(contentType) {
   return contentType || mediaType;
 }
 
-// nodewarden-git/src/handlers/attachments.ts
+// src/handlers/attachments.ts
 init_jwt();
 init_limits();
 
-// nodewarden-git/src/utils/device.ts
+// src/utils/device.ts
 var DEFAULT_DEVICE_NAME = "Unknown device";
 var DEFAULT_DEVICE_TYPE = 14;
 function decodeBase64UrlUtf8(value) {
@@ -29561,7 +30122,7 @@ function readActingDeviceIdentifier(request) {
   return normalizeDeviceIdentifier(request.headers.get("X-NodeWarden-Acting-Device-Id"));
 }
 
-// nodewarden-git/src/handlers/attachments.ts
+// src/handlers/attachments.ts
 init_blob_store();
 init_audit_events();
 function notifyVaultSyncForRequest(request, env, userId, revisionDate) {
@@ -29899,7 +30460,7 @@ async function deleteAllAttachmentsForCiphers(env, cipherIds) {
   await storage.bulkDeleteAttachmentsByIds(attachments.map(({ attachment }) => attachment.id));
 }
 
-// nodewarden-git/src/utils/pagination.ts
+// src/utils/pagination.ts
 init_limits();
 var MAX_PAGE_SIZE = LIMITS.pagination.maxPageSize;
 function parsePagination(url) {
@@ -29927,10 +30488,10 @@ function decodeContinuationToken(token) {
   }
 }
 
-// nodewarden-git/src/handlers/ciphers.ts
+// src/handlers/ciphers.ts
 init_audit_events();
 
-// nodewarden-git/src/handlers/cipher-full-update.ts
+// src/handlers/cipher-full-update.ts
 function readOwnAliasedValue(source, aliases) {
   if (!source || typeof source !== "object") {
     return { present: false, value: void 0 };
@@ -29948,7 +30509,7 @@ function readNullableFullUpdateField(source, aliases) {
   return incoming.present ? incoming.value ?? null : null;
 }
 
-// nodewarden-git/src/handlers/ciphers.ts
+// src/handlers/ciphers.ts
 function shouldPreserveRepairableCipherUris(request) {
   return request.headers.get("X-NodeWarden-Web") === "1";
 }
@@ -31105,7 +31666,7 @@ async function handleBulkPermanentDeleteCiphers(request, env, userId) {
   return new Response(null, { status: 204 });
 }
 
-// nodewarden-git/src/handlers/folders.ts
+// src/handlers/folders.ts
 init_notifications_hub();
 init_storage();
 init_response();
@@ -31277,7 +31838,7 @@ async function handleBulkDeleteFolders(request, env, userId) {
   return new Response(null, { status: 204 });
 }
 
-// nodewarden-git/src/handlers/sends-shared.ts
+// src/handlers/sends-shared.ts
 init_notifications_hub();
 init_response();
 init_limits();
@@ -31692,7 +32253,7 @@ async function validatePublicSendAccess(send, body) {
   return { ok: true };
 }
 
-// nodewarden-git/src/handlers/sends-private.ts
+// src/handlers/sends-private.ts
 init_storage();
 init_response();
 init_direct_upload();
@@ -32303,7 +32864,7 @@ async function handleRemoveSendAuth(request, env, userId, sendId) {
   return jsonResponse(sendToResponse(send));
 }
 
-// nodewarden-git/src/handlers/sends-public.ts
+// src/handlers/sends-public.ts
 init_storage();
 init_response();
 init_jwt();
@@ -32632,13 +33193,13 @@ async function issueSendAccessToken(env, sendIdOrAccessId, passwordHashB64, pass
   return { token };
 }
 
-// nodewarden-git/src/handlers/sync.ts
+// src/handlers/sync.ts
 init_storage();
 init_response();
 init_limits();
 init_domain_rules();
 
-// nodewarden-git/src/utils/account-passkeys.ts
+// src/utils/account-passkeys.ts
 init_passkey();
 init_origins();
 var ACCOUNT_PASSKEY_TOKEN_TYPE = "nodewarden.account-passkey.challenge.v1";
@@ -32883,7 +33444,7 @@ function isSerializedEncString(value) {
   return false;
 }
 
-// nodewarden-git/src/handlers/sync.ts
+// src/handlers/sync.ts
 function buildSyncCacheRequest(request, userId, revisionDate, accountPasskeyCacheTag, excludeDomains, excludeSends, preserveRepairableUris) {
   const url = new URL(request.url);
   const cacheUrl = new URL(
@@ -32994,7 +33555,7 @@ async function handleSync(request, env, userId) {
   return response;
 }
 
-// nodewarden-git/src/handlers/import.ts
+// src/handlers/import.ts
 init_notifications_hub();
 init_storage();
 init_response();
@@ -33210,7 +33771,7 @@ async function handleCiphersImport(request, env, userId) {
   return new Response(null, { status: 200 });
 }
 
-// nodewarden-git/src/handlers/devices.ts
+// src/handlers/devices.ts
 init_notifications_hub();
 init_auth();
 init_audit_events();
@@ -33749,7 +34310,7 @@ async function handleClearDeviceToken(request, env, userId, deviceIdentifier) {
   return new Response(null, { status: 200 });
 }
 
-// nodewarden-git/src/router-devices.ts
+// src/router-devices.ts
 function devicesPath(pattern) {
   return new RegExp(`^/(?:api/)?devices${pattern}$`, "i");
 }
@@ -33836,7 +34397,7 @@ async function handleAuthenticatedDeviceRoute(request, env, userId, path2, metho
   return null;
 }
 
-// nodewarden-git/src/handlers/admin.ts
+// src/handlers/admin.ts
 init_auth();
 init_storage();
 init_response();
@@ -34163,7 +34724,7 @@ async function handleAdminDeleteUser(request, env, actorUser, targetUserId) {
   return new Response(null, { status: 204 });
 }
 
-// nodewarden-git/src/router-admin-backup.ts
+// src/router-admin-backup.ts
 init_backup();
 init_response();
 async function handleAdminBackupRoute(request, env, actorUser, path2, method) {
@@ -34216,10 +34777,10 @@ async function handleAdminBackupRoute(request, env, actorUser, path2, method) {
   return null;
 }
 
-// nodewarden-git/src/handlers/admin-db-config.ts
+// src/handlers/admin-db-config.ts
 init_response();
 
-// nodewarden-git/src/services/db-config.ts
+// src/services/db-config.ts
 var CONFIG_OBJECT_KEY = "__system__/db-config.json";
 var CONFIG_KV_KEY = "db-config:v1";
 function asKvLike(value) {
@@ -34418,516 +34979,8 @@ function hasConfigStore(env) {
   return getConfigStore(env) !== null;
 }
 
-// nodewarden-git/src/services/mysql-dialect.ts
-var STRING_INDEX_COLUMNS = /* @__PURE__ */ new Set([
-  "id",
-  "user_id",
-  "cipher_id",
-  "folder_id",
-  "device_identifier",
-  "request_device_identifier",
-  "response_device_identifier",
-  "token",
-  "code",
-  "ip",
-  "jti",
-  "challenge_hash",
-  "credential_id",
-  "bucket_key",
-  "email",
-  "status",
-  "scope",
-  "category",
-  "level",
-  "created_by",
-  "used_by",
-  "actor_user_id",
-  "security_stamp",
-  "device_session_stamp",
-  "client_type",
-  "role",
-  "purpose",
-  "revision_date",
-  "updated_at",
-  "created_at",
-  "deleted_at",
-  "archived_at",
-  "banned_at",
-  "last_seen_at",
-  "creation_date",
-  "response_date",
-  "authentication_date",
-  "deletion_date",
-  "expiration_date",
-  "expires_at"
-]);
-var tableColumnKinds = /* @__PURE__ */ new Map();
-function recordColumn(table, column, kind) {
-  let cols = tableColumnKinds.get(table);
-  if (!cols) {
-    cols = /* @__PURE__ */ new Map();
-    tableColumnKinds.set(table, cols);
-  }
-  cols.set(column, kind);
-}
-function columnIsText(table, column) {
-  const cols = tableColumnKinds.get(table);
-  const kind = cols?.get(column);
-  if (kind) return kind === "text";
-  return STRING_INDEX_COLUMNS.has(column);
-}
-function maskLiterals(sql) {
-  const literals = [];
-  const masked = sql.replace(/'(?:[^']|'')*'/g, (match) => {
-    literals.push(match);
-    return `\0${literals.length - 1}\0`;
-  });
-  return { masked, literals };
-}
-function unmaskLiterals(sql, literals) {
-  return sql.replace(/\u0000(\d+)\u0000/g, (_, idx) => literals[Number(idx)] ?? "");
-}
-function rewriteJsonExtract(sql) {
-  const callRe = /\bjson_extract\s*\(/gi;
-  let result = sql;
-  let match;
-  while ((match = callRe.exec(result)) !== null) {
-    const openParen = match.index + match[0].length - 1;
-    const closeParen = findMatchingParen(result, openParen);
-    if (closeParen < 0) break;
-    const inner = result.slice(openParen + 1, closeParen);
-    const replacement = `JSON_UNQUOTE(JSON_EXTRACT(${inner}))`;
-    result = result.slice(0, match.index) + replacement + result.slice(closeParen + 1);
-    callRe.lastIndex = match.index + replacement.length;
-  }
-  return result;
-}
-function findMatchingParen(text, openIndex) {
-  let depth = 0;
-  let inString = false;
-  for (let i2 = openIndex; i2 < text.length; i2 += 1) {
-    const ch = text[i2];
-    if (inString) {
-      if (ch === "'") inString = false;
-      continue;
-    }
-    if (ch === "'") {
-      inString = true;
-      continue;
-    }
-    if (ch === "(") depth += 1;
-    else if (ch === ")") {
-      depth -= 1;
-      if (depth === 0) return i2;
-    }
-  }
-  return -1;
-}
-function rewriteOnConflict(sql) {
-  const conflictRe = /\bON\s+CONFLICT\s*\(([^)]*)\)\s*DO\s+(NOTHING|UPDATE\s+SET\s+([\s\S]*))$/i;
-  const match = sql.match(conflictRe);
-  if (!match) return sql;
-  const head = sql.slice(0, match.index);
-  const action = (match[2] || "").toUpperCase();
-  if (action.startsWith("NOTHING")) {
-    const conflictCols = (match[1] || "").split(",").map((c) => c.trim()).filter(Boolean);
-    const firstCol = conflictCols[0] || "id";
-    return `${head}ON DUPLICATE KEY UPDATE ${quoteIdentifier(firstCol)}=${quoteIdentifier(firstCol)}`;
-  }
-  let setTail = match[3] || "";
-  let whereCond = "";
-  const whereMatch = setTail.match(/\s+WHERE\s+([\s\S]+)$/i);
-  if (whereMatch) {
-    whereCond = whereMatch[1].trim();
-    setTail = setTail.slice(0, whereMatch.index);
-  }
-  const items = setTail.split(",").map((s) => s.trim()).filter(Boolean);
-  const assignments = [];
-  for (const item of items) {
-    const itemMatch = item.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*excluded\.([A-Za-z_][A-Za-z0-9_]*)$/i);
-    if (!itemMatch) {
-      assignments.push(item.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, "VALUES($1)"));
-      continue;
-    }
-    const targetCol = quoteIdentifier(itemMatch[1]);
-    const valueExpr = `VALUES(${quoteIdentifier(itemMatch[2])})`;
-    if (whereCond) {
-      const cond = whereCond.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, "VALUES($1)");
-      assignments.push(`${targetCol}=IF(${cond}, ${valueExpr}, ${targetCol})`);
-    } else {
-      assignments.push(`${targetCol}=${valueExpr}`);
-    }
-  }
-  return `${head}ON DUPLICATE KEY UPDATE ${assignments.join(", ")}`;
-}
-function quoteIdentifier(name) {
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : name;
-}
-function quoteKeyIdentifier(sql) {
-  return sql.replace(/(?<!\w)(?<!PRIMARY\s)(?<!FOREIGN\s)(?<!DUPLICATE\s)(?<!`)key(?!\w)(?!`)/gi, (match, offset, whole) => {
-    const before = whole.slice(Math.max(0, offset - 12), offset).toUpperCase();
-    if (/(PRIMARY|FOREIGN|DUPLICATE)\s+$/.test(before)) return match;
-    return "`key`";
-  });
-}
-function translateColumnDef(def, table) {
-  let out = def;
-  const nameMatch = out.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
-  const columnName = nameMatch ? nameMatch[1] : "";
-  if (/\bTEXT\s+PRIMARY\s+KEY\b/i.test(out)) {
-    out = out.replace(/\bTEXT(\s+PRIMARY\s+KEY)/i, "VARCHAR(512)$1");
-    if (columnName) recordColumn(table, columnName, "text");
-    return out;
-  }
-  if (/\bTEXT\b[^,]*\bUNIQUE\b/i.test(out)) {
-    out = out.replace(/\bTEXT\b/i, "VARCHAR(512)");
-    if (columnName) recordColumn(table, columnName, "text");
-    return out;
-  }
-  if (/\bTEXT\b/i.test(out)) {
-    if (/\bDEFAULT\b/i.test(out)) {
-      out = out.replace(/\bTEXT\b/i, "VARCHAR(2048)");
-    } else {
-      out = out.replace(/\bTEXT\b/i, "LONGTEXT");
-    }
-    if (columnName) recordColumn(table, columnName, "text");
-    return out;
-  }
-  if (/\bINTEGER\b/i.test(out)) {
-    out = out.replace(/\bINTEGER\b/i, "BIGINT");
-    if (columnName) recordColumn(table, columnName, "int");
-    return out;
-  }
-  return out;
-}
-function translateCreateTable(sql) {
-  const headerMatch = sql.match(/^(\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)([A-Za-z_"][A-Za-z0-9_"]*)\s*\(/i);
-  if (!headerMatch) return sql;
-  const table = headerMatch[2].replace(/"/g, "");
-  const bodyStart = headerMatch[0].length;
-  const bodyEnd = sql.lastIndexOf(")");
-  if (bodyEnd < bodyStart) return sql;
-  const body = sql.slice(bodyStart, bodyEnd);
-  const tail2 = sql.slice(bodyEnd);
-  const pkMatch = body.match(/PRIMARY\s+KEY\s*\(([^)]*)\)/i);
-  const pkCols = pkMatch ? pkMatch[1].split(",").map((c) => c.trim().replace(/"/g, "")).filter(Boolean) : [];
-  const fkCols = /* @__PURE__ */ new Set();
-  for (const fk of body.matchAll(/FOREIGN\s+KEY\s*\(([^)]*)\)/gi)) {
-    for (const raw of fk[1].split(",")) {
-      const name = raw.trim().replace(/"/g, "");
-      if (name) fkCols.add(name);
-    }
-  }
-  const parts = [];
-  let depth = 0;
-  let current = "";
-  for (const ch of body) {
-    if (ch === "(") depth += 1;
-    if (ch === ")") depth -= 1;
-    if (ch === "," && depth === 0) {
-      parts.push(current);
-      current = "";
-      continue;
-    }
-    current += ch;
-  }
-  if (current.trim()) parts.push(current);
-  const translatedParts = parts.map((rawPart) => {
-    const part = rawPart.trim();
-    if (!part) return part;
-    if (/^(PRIMARY|FOREIGN|UNIQUE|CONSTRAINT|CHECK)\b/i.test(part)) {
-      if (/^PRIMARY\s+KEY\s*\(/i.test(part)) {
-        for (const col of pkCols) recordColumn(table, col, "text");
-      }
-      return part.replace(/PRIMARY\s+KEY\s*\(/i, "PRIMARY KEY (");
-    }
-    const colDef = translateColumnDef(part, table);
-    const nameMatch = colDef.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
-    const colName = nameMatch ? nameMatch[1] : "";
-    if (colName && (/LONGTEXT/i.test(colDef) || /VARCHAR\(2048\)/i.test(colDef))) {
-      if (pkCols.includes(colName)) {
-        const size = pkCols.length === 1 || fkCols.has(colName) ? 512 : 255;
-        recordColumn(table, colName, "text");
-        return colDef.replace(/\bLONGTEXT\b/i, `VARCHAR(${size})`).replace(/\bVARCHAR\(2048\)/i, `VARCHAR(${size})`);
-      }
-      if (fkCols.has(colName)) {
-        recordColumn(table, colName, "text");
-        return colDef.replace(/\bLONGTEXT\b/i, "VARCHAR(512)").replace(/\bVARCHAR\(2048\)/i, "VARCHAR(512)");
-      }
-    }
-    return colDef;
-  });
-  let translated = `${headerMatch[1]}${table} (${translatedParts.join(", ")}`;
-  const engineClause = " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci";
-  const closing = tail2.replace(/^\)/, `)${engineClause}`);
-  translated = translated + closing;
-  return translated;
-}
-function translateCreateIndex(sql) {
-  let out = sql.replace(/\bIF\s+NOT\s+EXISTS\b/gi, "");
-  out = out.replace(/(\bON\s+[A-Za-z_"][A-Za-z0-9_"]*\s*)\(([^)]*)\)/i, (full, head, cols) => {
-    const tableMatch = head.match(/ON\s+([A-Za-z_"][A-Za-z0-9_"]*)/i);
-    const table = (tableMatch ? tableMatch[1] : "").replace(/"/g, "");
-    const translatedCols = cols.split(",").map((rawCol) => {
-      const col = rawCol.trim();
-      const plain = col.replace(/\s*\(\d+\)\s*$/, "");
-      if (/\(\d+\)\s*$/.test(col)) return col;
-      if (columnIsText(table, plain)) return `${plain}(191)`;
-      return col;
-    });
-    return `${head}(${translatedCols.join(", ")})`;
-  });
-  return out;
-}
-function translateAlterTable(sql) {
-  let out = sql;
-  const addMatch = out.match(/(\bADD\s+COLUMN\s+)([A-Za-z_"][A-Za-z0-9_"]*\s+[\s\S]+)$/i);
-  if (addMatch) {
-    const tableNameMatch = out.match(/ALTER\s+TABLE\s+([A-Za-z_"][A-Za-z0-9_"]*)/i);
-    const table = (tableNameMatch ? tableNameMatch[1] : "").replace(/"/g, "");
-    const colDef = translateColumnDef(addMatch[2], table);
-    out = out.slice(0, addMatch.index) + addMatch[1] + colDef;
-  }
-  return out;
-}
-function translatePragma(sql) {
-  const tableInfo = sql.match(/^\s*PRAGMA\s+table_info\s*\(\s*([A-Za-z_"][A-Za-z0-9_"]*)\s*\)/i);
-  if (tableInfo) {
-    const table = tableInfo[1].replace(/"/g, "");
-    return `SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '${table}'`;
-  }
-  return "SELECT 1";
-}
-function translateSql(input) {
-  let sql = input.trim();
-  if (!sql) return sql;
-  if (/^\s*PRAGMA\b/i.test(sql)) {
-    return translatePragma(sql);
-  }
-  sql = sql.replace(
-    /CAST\s*\(\s*strftime\s*\(\s*'%s'\s*,\s*'now'\s*\)\s+AS\s+INTEGER\s*\)\s*\*\s*1000/gi,
-    "(UNIX_TIMESTAMP() * 1000)"
-  );
-  sql = sql.replace(/strftime\s*\(\s*'%s'\s*,\s*'now'\s*\)/gi, "UNIX_TIMESTAMP()");
-  sql = rewriteJsonExtract(sql);
-  sql = sql.replace(/\bjson_valid\s*\(/gi, "JSON_VALID(");
-  const { masked, literals } = maskLiterals(sql);
-  let out = masked;
-  out = out.replace(/"([A-Za-z_][A-Za-z0-9_]*)"/g, "`$1`");
-  out = rewriteOnConflict(out);
-  out = out.replace(/\bINSERT\s+OR\s+IGNORE\b/gi, "INSERT IGNORE");
-  out = out.replace(/\bINSERT\s+OR\s+REPLACE\b/gi, "REPLACE");
-  if (/^\s*CREATE\s+TABLE\b/i.test(out)) {
-    out = translateCreateTable(out);
-  } else if (/^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\b/i.test(out)) {
-    out = translateCreateIndex(out);
-  } else if (/^\s*ALTER\s+TABLE\b/i.test(out)) {
-    out = translateAlterTable(out);
-  }
-  out = quoteKeyIdentifier(out);
-  return unmaskLiterals(out, literals);
-}
-
-// nodewarden-git/src/services/storage-mysql.ts
-function normalizeParams(params) {
-  return params.map((value) => {
-    if (typeof value === "boolean") return value ? 1 : 0;
-    if (value === void 0) return null;
-    return value;
-  });
-}
-function isDuplicateDdlError(error) {
-  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  return msg.includes("duplicate column name") || msg.includes("duplicate key name") || msg.includes("already exists") || msg.includes("duplicate entry");
-}
-function isDdlStatement(sql) {
-  return /^\s*(CREATE|ALTER|DROP)\b/i.test(sql);
-}
-function toResult(rows, affectedRows, insertId) {
-  const list = Array.isArray(rows) ? rows : [];
-  return {
-    results: list,
-    success: true,
-    meta: {
-      changes: Number(affectedRows ?? list.length ?? 0),
-      last_row_id: Number(insertId ?? 0)
-    }
-  };
-}
-var MySqlStatement = class {
-  constructor(db, translatedSql, originalSql) {
-    this.db = db;
-    this.translatedSql = translatedSql;
-    this.originalSql = originalSql;
-  }
-  db;
-  translatedSql;
-  originalSql;
-  params = [];
-  bind(...params) {
-    this.params = normalizeParams(params);
-    return this;
-  }
-  async run() {
-    try {
-      const [rawResult] = await this.db.query(this.translatedSql, this.params);
-      const result = rawResult;
-      return toResult([], result?.affectedRows ?? 0, result?.insertId ?? 0);
-    } catch (error) {
-      if (isDdlStatement(this.originalSql) && isDuplicateDdlError(error)) {
-        return toResult([], 0, 0);
-      }
-      throw error;
-    }
-  }
-  async first() {
-    const all = await this.all();
-    return all.results[0] ?? null;
-  }
-  async all() {
-    try {
-      const [rows, fields] = await this.db.query(this.translatedSql, this.params);
-      const list = Array.isArray(rows) ? rows : [];
-      const affected = Array.isArray(rows) ? void 0 : rows?.affectedRows;
-      void fields;
-      return toResult(list, affected ?? list.length);
-    } catch (error) {
-      if (isDdlStatement(this.originalSql) && isDuplicateDdlError(error)) {
-        return toResult([]);
-      }
-      throw error;
-    }
-  }
-  getSql() {
-    return this.translatedSql;
-  }
-  getParams() {
-    return this.params;
-  }
-};
-var MySqlDatabase = class {
-  constructor(config) {
-    this.config = config;
-  }
-  config;
-  dialect = "mysql";
-  pool = null;
-  poolPromise = null;
-  getConfig() {
-    return this.config;
-  }
-  async getPool() {
-    if (this.pool) return this.pool;
-    if (!this.poolPromise) {
-      this.poolPromise = (async () => {
-        const moduleName = "mysql2/promise";
-        const mysql = await import(
-          /* @vite-ignore */
-          moduleName
-        );
-        const pool = mysql.createPool({
-          host: this.config.host,
-          port: this.config.port,
-          user: this.config.user,
-          password: this.config.password,
-          database: this.config.database,
-          waitForConnections: true,
-          connectionLimit: this.config.connectionLimit,
-          connectTimeout: this.config.connectTimeoutMs,
-          charset: "utf8mb4",
-          timezone: "+08:00",
-          enableKeepAlive: true,
-          keepAliveInitialDelay: 1e4,
-          multipleStatements: false,
-          ssl: this.config.ssl ? { rejectUnauthorized: false } : void 0,
-          typeCast: (field, next) => {
-            if (field.type === "LONGLONG" || field.type === "NEWDECIMAL") {
-              const raw = field.string();
-              return raw === null ? null : Number(raw);
-            }
-            return next();
-          }
-        });
-        this.pool = pool;
-        return pool;
-      })();
-    }
-    return this.poolPromise;
-  }
-  /** Raw query used by the statement wrapper (and health checks). */
-  async query(sql, params) {
-    const pool = await this.getPool();
-    try {
-      return await pool.query(sql, params);
-    } catch (error) {
-      const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
-      if (msg.includes("connection") && (msg.includes("lost") || msg.includes("closed") || msg.includes("reset"))) {
-        await this.close();
-        const fresh = await this.getPool();
-        return await fresh.query(sql, params);
-      }
-      throw error;
-    }
-  }
-  prepare(sql) {
-    return new MySqlStatement(this, translateSql(sql), sql);
-  }
-  async batch(statements) {
-    const pool = await this.getPool();
-    const conn = await pool.getConnection();
-    const results = [];
-    try {
-      await conn.beginTransaction();
-      for (const statement of statements) {
-        const stmt = statement;
-        const sql = typeof stmt.getSql === "function" ? stmt.getSql() : translateSql("");
-        const params = typeof stmt.getParams === "function" ? stmt.getParams() : [];
-        try {
-          const [rawResult] = await conn.query(sql, params);
-          const result = rawResult;
-          if (Array.isArray(result)) {
-            results.push(toResult(result));
-          } else {
-            results.push(toResult([], result?.affectedRows ?? 0, result?.insertId ?? 0));
-          }
-        } catch (error) {
-          const original = statement.originalSql ?? "";
-          if (isDdlStatement(original) && isDuplicateDdlError(error)) {
-            results.push(toResult([], 0, 0));
-            continue;
-          }
-          throw error;
-        }
-      }
-      await conn.commit();
-      return results;
-    } catch (error) {
-      try {
-        await conn.rollback();
-      } catch {
-      }
-      throw error;
-    } finally {
-      conn.release();
-    }
-  }
-  async close() {
-    const pool = this.pool;
-    this.pool = null;
-    this.poolPromise = null;
-    if (pool) {
-      try {
-        await pool.end();
-      } catch {
-      }
-    }
-  }
-};
-function isMySqlDatabase(db) {
-  return !!db && typeof db === "object" && db.dialect === "mysql";
-}
-
-// nodewarden-git/src/services/storage-factory.ts
+// src/services/storage-factory.ts
+init_storage_mysql();
 var cached = null;
 function cacheKeyFor(config) {
   return [config.mode, config.host, config.port, config.user, config.database, config.ssl].join("|");
@@ -34991,7 +35044,8 @@ async function getDatabaseStatus(env) {
   }
 }
 
-// nodewarden-git/src/handlers/admin-db-config.ts
+// src/handlers/admin-db-config.ts
+init_storage_mysql();
 init_storage();
 async function readJsonBody3(request) {
   try {
@@ -35139,7 +35193,7 @@ async function handleAdminClearDbConfig(request, env, actorUser) {
   return jsonResponse({ ok: true, mode: "d1" });
 }
 
-// nodewarden-git/src/router-admin.ts
+// src/router-admin.ts
 init_response();
 function isKnownAdminPath(path2) {
   return path2 === "/api/admin/users" || path2 === "/api/admin/logs" || path2 === "/api/admin/logs/settings" || path2 === "/api/admin/invites" || path2 === "/api/admin/db-config" || path2 === "/api/admin/db-config/test" || path2.startsWith("/api/admin/backup") || /^\/api\/admin\/invites\/[^/]+$/i.test(path2) || /^\/api\/admin\/users\/[a-f0-9-]+(?:\/status)?$/i.test(path2);
@@ -35201,7 +35255,7 @@ async function handleAdminRoute(request, env, actorUser, path2, method) {
   return null;
 }
 
-// nodewarden-git/src/handlers/domains.ts
+// src/handlers/domains.ts
 init_storage();
 init_domain_rules();
 init_response();
@@ -35262,7 +35316,7 @@ async function handleUpdateDomains(request, env, userId) {
   ));
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoBase64URL.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoBase64URL.js
 var isoBase64URL_exports = {};
 __export(isoBase64URL_exports, {
   fromBuffer: () => fromBuffer,
@@ -35275,7 +35329,7 @@ __export(isoBase64URL_exports, {
   trimPadding: () => trimPadding
 });
 
-// nodewarden-git/node_modules/@hexagon/base64/src/base64.js
+// node_modules/@hexagon/base64/src/base64.js
 var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 var charsUrl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 var genLookup = (target) => {
@@ -35349,7 +35403,7 @@ base64.validate = (encoded, urlMode) => {
 base64.base64 = base64;
 var base64_default = base64;
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoBase64URL.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoBase64URL.js
 function toBuffer(base64urlString, from = "base64url") {
   const _buffer = base64_default.toArrayBuffer(base64urlString, from === "base64url");
   return new Uint8Array(_buffer);
@@ -35380,14 +35434,14 @@ function trimPadding(input) {
   return input.replace(/=/g, "");
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCBOR.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCBOR.js
 var isoCBOR_exports = {};
 __export(isoCBOR_exports, {
   decodeFirst: () => decodeFirst,
   encode: () => encode
 });
 
-// nodewarden-git/node_modules/@levischuck/tiny-cbor/esm/cbor/cbor_internal.js
+// node_modules/@levischuck/tiny-cbor/esm/cbor/cbor_internal.js
 function decodeLength(data, argument, index) {
   if (argument < 24) {
     return [argument, 1];
@@ -35486,7 +35540,7 @@ function encodeLength(major, argument) {
   }
 }
 
-// nodewarden-git/node_modules/@levischuck/tiny-cbor/esm/cbor/cbor.js
+// node_modules/@levischuck/tiny-cbor/esm/cbor/cbor.js
 var CBORTag = class {
   /**
    * Wrap a value with a tag number.
@@ -35813,7 +35867,7 @@ function encodeCBOR(data) {
   return output;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCBOR.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCBOR.js
 function decodeFirst(input) {
   const _input = new Uint8Array(input);
   const decoded = decodePartialCBOR(_input, 0);
@@ -35824,7 +35878,7 @@ function encode(input) {
   return encodeCBOR(input);
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/index.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/index.js
 var isoCrypto_exports = {};
 __export(isoCrypto_exports, {
   digest: () => digest,
@@ -35832,7 +35886,7 @@ __export(isoCrypto_exports, {
   verify: () => verify
 });
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/cose.js
+// node_modules/@simplewebauthn/server/esm/helpers/cose.js
 function isCOSEPublicKeyOKP(cosePublicKey) {
   const kty = cosePublicKey.get(COSEKEYS.kty);
   return isCOSEKty(kty) && kty === COSEKTY.OKP;
@@ -35894,7 +35948,7 @@ function isCOSEAlg(alg) {
   return Object.values(COSEALG).indexOf(alg) >= 0;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/mapCoseAlgToWebCryptoAlg.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/mapCoseAlgToWebCryptoAlg.js
 function mapCoseAlgToWebCryptoAlg(alg) {
   if ([COSEALG.RS1].indexOf(alg) >= 0) {
     return "SHA-1";
@@ -35908,7 +35962,7 @@ function mapCoseAlgToWebCryptoAlg(alg) {
   throw new Error(`Could not map COSE alg value of ${alg} to a WebCrypto alg`);
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/getWebCrypto.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/getWebCrypto.js
 var webCrypto = void 0;
 function getWebCrypto() {
   const toResolve = new Promise((resolve, reject) => {
@@ -35939,7 +35993,7 @@ var _getWebCryptoInternals = {
   }
 };
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/digest.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/digest.js
 async function digest(data, algorithm) {
   const WebCrypto = await getWebCrypto();
   const subtleAlgorithm = mapCoseAlgToWebCryptoAlg(algorithm);
@@ -35947,14 +36001,14 @@ async function digest(data, algorithm) {
   return new Uint8Array(hashed);
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/getRandomValues.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/getRandomValues.js
 async function getRandomValues(array) {
   const WebCrypto = await getWebCrypto();
   WebCrypto.getRandomValues(array);
   return array;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/importKey.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/importKey.js
 async function importKey(opts) {
   const WebCrypto = await getWebCrypto();
   const { keyData, algorithm } = opts;
@@ -35963,7 +36017,7 @@ async function importKey(opts) {
   ]);
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/verifyEC2.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/verifyEC2.js
 async function verifyEC2(opts) {
   const { cosePublicKey, signature, data, shaHashOverride } = opts;
   const WebCrypto = await getWebCrypto();
@@ -36025,7 +36079,7 @@ async function verifyEC2(opts) {
   return WebCrypto.subtle.verify(verifyAlgorithm, key, signature, data);
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/mapCoseAlgToWebCryptoKeyAlgName.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/mapCoseAlgToWebCryptoKeyAlgName.js
 function mapCoseAlgToWebCryptoKeyAlgName(alg) {
   if ([COSEALG.EdDSA].indexOf(alg) >= 0) {
     return "Ed25519";
@@ -36039,7 +36093,7 @@ function mapCoseAlgToWebCryptoKeyAlgName(alg) {
   throw new Error(`Could not map COSE alg value of ${alg} to a WebCrypto key alg name`);
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/verifyRSA.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/verifyRSA.js
 async function verifyRSA(opts) {
   const { cosePublicKey, signature, data, shaHashOverride } = opts;
   const WebCrypto = await getWebCrypto();
@@ -36108,7 +36162,7 @@ async function verifyRSA(opts) {
   return WebCrypto.subtle.verify(verifyAlgorithm, key, signature, data);
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/convertAAGUIDToString.js
+// node_modules/@simplewebauthn/server/esm/helpers/convertAAGUIDToString.js
 function convertAAGUIDToString(aaguid) {
   const hex2 = isoUint8Array_exports.toHex(aaguid);
   const segments = [
@@ -36126,7 +36180,7 @@ function convertAAGUIDToString(aaguid) {
   return segments.join("-");
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/convertCertBufferToPEM.js
+// node_modules/@simplewebauthn/server/esm/helpers/convertCertBufferToPEM.js
 function convertCertBufferToPEM(certBuffer) {
   let b64cert;
   if (typeof certBuffer === "string") {
@@ -36152,7 +36206,7 @@ ${PEMKey}-----END CERTIFICATE-----
   return PEMKey;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/convertCOSEtoPKCS.js
+// node_modules/@simplewebauthn/server/esm/helpers/convertCOSEtoPKCS.js
 function convertCOSEtoPKCS(cosePublicKey) {
   const struct = isoCBOR_exports.decodeFirst(cosePublicKey);
   const tag = Uint8Array.from([4]);
@@ -36167,7 +36221,7 @@ function convertCOSEtoPKCS(cosePublicKey) {
   return isoUint8Array_exports.concat([tag, x2]);
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/decodeAttestationObject.js
+// node_modules/@simplewebauthn/server/esm/helpers/decodeAttestationObject.js
 function decodeAttestationObject(attestationObject) {
   return _decodeAttestationObjectInternals.stubThis(isoCBOR_exports.decodeFirst(attestationObject));
 }
@@ -36175,7 +36229,7 @@ var _decodeAttestationObjectInternals = {
   stubThis: (value) => value
 };
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/decodeClientDataJSON.js
+// node_modules/@simplewebauthn/server/esm/helpers/decodeClientDataJSON.js
 function decodeClientDataJSON(data) {
   const toString = isoBase64URL_exports.toUTF8String(data);
   const clientData = JSON.parse(toString);
@@ -36185,7 +36239,7 @@ var _decodeClientDataJSONInternals = {
   stubThis: (value) => value
 };
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/decodeCredentialPublicKey.js
+// node_modules/@simplewebauthn/server/esm/helpers/decodeCredentialPublicKey.js
 function decodeCredentialPublicKey(publicKey) {
   return _decodeCredentialPublicKeyInternals.stubThis(isoCBOR_exports.decodeFirst(publicKey));
 }
@@ -36193,7 +36247,7 @@ var _decodeCredentialPublicKeyInternals = {
   stubThis: (value) => value
 };
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/generateUserID.js
+// node_modules/@simplewebauthn/server/esm/helpers/generateUserID.js
 async function generateUserID() {
   const newUserID = new Uint8Array(32);
   await isoCrypto_exports.getRandomValues(newUserID);
@@ -36203,10 +36257,10 @@ var _generateUserIDInternals = {
   stubThis: (value) => value
 };
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/converters.js
+// node_modules/@peculiar/asn1-schema/build/es2015/converters.js
 var asn1js3 = __toESM(require_build2(), 1);
 
-// nodewarden-git/node_modules/@peculiar/utils/build/esm/bytes/buffer-source.js
+// node_modules/@peculiar/utils/build/esm/bytes/buffer-source.js
 var ARRAY_BUFFER_TAG = "[object ArrayBuffer]";
 var SHARED_ARRAY_BUFFER_TAG = "[object SharedArrayBuffer]";
 function tagOf(value) {
@@ -36259,7 +36313,7 @@ function toArrayBuffer(data) {
   return buffer;
 }
 
-// nodewarden-git/node_modules/@peculiar/utils/build/esm/bytes/equal.js
+// node_modules/@peculiar/utils/build/esm/bytes/equal.js
 function equal(a, b, options = {}) {
   const left = toUint8Array(a);
   const right = toUint8Array(b);
@@ -36274,7 +36328,7 @@ function equal(a, b, options = {}) {
   return diff === 0;
 }
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/enums.js
+// node_modules/@peculiar/asn1-schema/build/es2015/enums.js
 var AsnTypeTypes;
 (function(AsnTypeTypes2) {
   AsnTypeTypes2[AsnTypeTypes2["Sequence"] = 0] = "Sequence";
@@ -36312,7 +36366,7 @@ var AsnPropTypes;
   AsnPropTypes2[AsnPropTypes2["Null"] = 27] = "Null";
 })(AsnPropTypes || (AsnPropTypes = {}));
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/types/bit_string.js
+// node_modules/@peculiar/asn1-schema/build/es2015/types/bit_string.js
 var asn1js = __toESM(require_build2(), 1);
 var BitString2 = class {
   unusedBits = 0;
@@ -36373,7 +36427,7 @@ var BitString2 = class {
   }
 };
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/types/octet_string.js
+// node_modules/@peculiar/asn1-schema/build/es2015/types/octet_string.js
 var asn1js2 = __toESM(require_build2(), 1);
 var OctetString2 = class {
   buffer;
@@ -36411,7 +36465,7 @@ var OctetString2 = class {
   }
 };
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/converters.js
+// node_modules/@peculiar/asn1-schema/build/es2015/converters.js
 var AsnAnyConverter = {
   fromASN: (value) => value instanceof asn1js3.Null ? null : toArrayBuffer(value.valueBeforeDecodeView),
   toASN: (value) => {
@@ -36536,10 +36590,10 @@ function defaultConverter(type) {
   }
 }
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/schema.js
+// node_modules/@peculiar/asn1-schema/build/es2015/schema.js
 var asn1js4 = __toESM(require_build2(), 1);
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/helper.js
+// node_modules/@peculiar/asn1-schema/build/es2015/helper.js
 function isConvertible(target) {
   if (typeof target === "function" && target.prototype) {
     if (target.prototype.toASN && target.prototype.fromASN) {
@@ -36578,7 +36632,7 @@ function isArrayEqual(bytes1, bytes2) {
   return true;
 }
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/schema.js
+// node_modules/@peculiar/asn1-schema/build/es2015/schema.js
 var AsnSchemaStorage = class {
   items = /* @__PURE__ */ new WeakMap();
   has(target) {
@@ -36728,10 +36782,10 @@ var AsnSchemaStorage = class {
   }
 };
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/storage.js
+// node_modules/@peculiar/asn1-schema/build/es2015/storage.js
 var schemaStorage = new AsnSchemaStorage();
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/decorators.js
+// node_modules/@peculiar/asn1-schema/build/es2015/decorators.js
 var AsnType = (options) => (target) => {
   let schema;
   if (!schemaStorage.has(target)) {
@@ -36762,15 +36816,15 @@ var AsnProp = (options) => (target, propertyKey) => {
   schema.items[propertyKey] = copyOptions;
 };
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/parser.js
+// node_modules/@peculiar/asn1-schema/build/es2015/parser.js
 var asn1js5 = __toESM(require_build2(), 1);
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/errors/schema_validation.js
+// node_modules/@peculiar/asn1-schema/build/es2015/errors/schema_validation.js
 var AsnSchemaValidationError = class extends Error {
   schemas = [];
 };
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/parser.js
+// node_modules/@peculiar/asn1-schema/build/es2015/parser.js
 var AsnParser = class {
   static parse(data, target) {
     const asn1Parsed = asn1js5.fromBER(toArrayBuffer(data));
@@ -37047,7 +37101,7 @@ var AsnParser = class {
   }
 };
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/serializer.js
+// node_modules/@peculiar/asn1-schema/build/es2015/serializer.js
 var asn1js6 = __toESM(require_build2(), 1);
 var AsnSerializer = class _AsnSerializer {
   static serialize(obj) {
@@ -37178,7 +37232,7 @@ var AsnSerializer = class _AsnSerializer {
   }
 };
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/objects.js
+// node_modules/@peculiar/asn1-schema/build/es2015/objects.js
 var AsnArray = class extends Array {
   constructor(items = []) {
     if (typeof items === "number") {
@@ -37192,7 +37246,7 @@ var AsnArray = class extends Array {
   }
 };
 
-// nodewarden-git/node_modules/@peculiar/asn1-schema/build/es2015/convert.js
+// node_modules/@peculiar/asn1-schema/build/es2015/convert.js
 var asn1js7 = __toESM(require_build2(), 1);
 var AsnConvert = class _AsnConvert {
   static serialize(obj) {
@@ -37211,13 +37265,13 @@ var AsnConvert = class _AsnConvert {
   }
 };
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/authority_information_access.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/authority_information_access.js
 init_tslib_es6();
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/general_name.js
+// node_modules/@peculiar/asn1-x509/build/es2015/general_name.js
 init_tslib_es6();
 
-// nodewarden-git/node_modules/@peculiar/utils/build/esm/encoding/hex.js
+// node_modules/@peculiar/utils/build/esm/encoding/hex.js
 var hex_exports = {};
 __export(hex_exports, {
   decode: () => decode,
@@ -37447,7 +37501,7 @@ var formats = {
 };
 var hex = { encode: encode2, decode, format, formats, is, normalize, parse };
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/ip_converter.js
+// node_modules/@peculiar/asn1-x509/build/es2015/ip_converter.js
 var IpConverter = class {
   static isIPv4(ip) {
     return /^(\d{1,3}\.){3}\d{1,3}$/.test(ip);
@@ -37614,7 +37668,7 @@ var IpConverter = class {
   }
 };
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/name.js
+// node_modules/@peculiar/asn1-x509/build/es2015/name.js
 init_tslib_es6();
 var RelativeDistinguishedName_1;
 var RDNSequence_1;
@@ -37717,7 +37771,7 @@ Name = Name_1 = __decorate([
   AsnType({ type: AsnTypeTypes.Sequence })
 ], Name);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/general_name.js
+// node_modules/@peculiar/asn1-x509/build/es2015/general_name.js
 var AsnIpConverter = {
   fromASN: (value) => IpConverter.toString(AsnOctetStringConverter.fromASN(value)),
   toASN: (value) => AsnOctetStringConverter.toASN(IpConverter.fromString(value))
@@ -37841,7 +37895,7 @@ GeneralName = __decorate([
   AsnType({ type: AsnTypeTypes.Choice })
 ], GeneralName);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/object_identifiers.js
+// node_modules/@peculiar/asn1-x509/build/es2015/object_identifiers.js
 var id_pkix = "1.3.6.1.5.5.7";
 var id_pe = `${id_pkix}.1`;
 var id_qt = `${id_pkix}.2`;
@@ -37855,7 +37909,7 @@ var id_ad_timeStamping = `${id_ad}.3`;
 var id_ad_caRepository = `${id_ad}.5`;
 var id_ce = "2.5.29";
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/authority_information_access.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/authority_information_access.js
 var AuthorityInfoAccessSyntax_1;
 var id_pe_authorityInfoAccess = `${id_pe}.1`;
 var AccessDescription = class {
@@ -37884,7 +37938,7 @@ AuthorityInfoAccessSyntax = AuthorityInfoAccessSyntax_1 = __decorate([
   })
 ], AuthorityInfoAccessSyntax);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/authority_key_identifier.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/authority_key_identifier.js
 init_tslib_es6();
 var id_ce_authorityKeyIdentifier = `${id_ce}.35`;
 var KeyIdentifier = class extends OctetString2 {
@@ -37926,7 +37980,7 @@ __decorate([
   })
 ], AuthorityKeyIdentifier.prototype, "authorityCertSerialNumber", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/basic_constraints.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/basic_constraints.js
 init_tslib_es6();
 var id_ce_basicConstraints = `${id_ce}.19`;
 var BasicConstraints = class {
@@ -37949,10 +38003,10 @@ __decorate([
   })
 ], BasicConstraints.prototype, "pathLenConstraint", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/certificate_issuer.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/certificate_issuer.js
 init_tslib_es6();
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/general_names.js
+// node_modules/@peculiar/asn1-x509/build/es2015/general_names.js
 init_tslib_es6();
 var GeneralNames_1;
 var GeneralNames = GeneralNames_1 = class GeneralNames2 extends AsnArray {
@@ -37968,7 +38022,7 @@ GeneralNames = GeneralNames_1 = __decorate([
   })
 ], GeneralNames);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/certificate_issuer.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/certificate_issuer.js
 var CertificateIssuer_1;
 var id_ce_certificateIssuer = `${id_ce}.29`;
 var CertificateIssuer = CertificateIssuer_1 = class CertificateIssuer2 extends GeneralNames {
@@ -37981,7 +38035,7 @@ CertificateIssuer = CertificateIssuer_1 = __decorate([
   AsnType({ type: AsnTypeTypes.Sequence })
 ], CertificateIssuer);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/certificate_policies.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/certificate_policies.js
 init_tslib_es6();
 var CertificatePolicies_1;
 var id_ce_certificatePolicies = `${id_ce}.32`;
@@ -38107,10 +38161,10 @@ CertificatePolicies = CertificatePolicies_1 = __decorate([
   })
 ], CertificatePolicies);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_delta_indicator.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_delta_indicator.js
 init_tslib_es6();
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_number.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_number.js
 init_tslib_es6();
 var id_ce_cRLNumber = `${id_ce}.20`;
 var CRLNumber = class CRLNumber2 {
@@ -38126,7 +38180,7 @@ CRLNumber = __decorate([
   AsnType({ type: AsnTypeTypes.Choice })
 ], CRLNumber);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_delta_indicator.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_delta_indicator.js
 var id_ce_deltaCRLIndicator = `${id_ce}.27`;
 var BaseCRLNumber = class BaseCRLNumber2 extends CRLNumber {
 };
@@ -38134,7 +38188,7 @@ BaseCRLNumber = __decorate([
   AsnType({ type: AsnTypeTypes.Choice })
 ], BaseCRLNumber);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_distribution_points.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_distribution_points.js
 init_tslib_es6();
 var CRLDistributionPoints_1;
 var id_ce_cRLDistributionPoints = `${id_ce}.31`;
@@ -38257,7 +38311,7 @@ CRLDistributionPoints = CRLDistributionPoints_1 = __decorate([
   })
 ], CRLDistributionPoints);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_freshest.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_freshest.js
 init_tslib_es6();
 var FreshestCRL_1;
 var id_ce_freshestCRL = `${id_ce}.46`;
@@ -38274,7 +38328,7 @@ FreshestCRL = FreshestCRL_1 = __decorate([
   })
 ], FreshestCRL);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_issuing_distribution_point.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_issuing_distribution_point.js
 init_tslib_es6();
 var id_ce_issuingDistributionPoint = `${id_ce}.28`;
 var IssuingDistributionPoint = class _IssuingDistributionPoint {
@@ -38337,7 +38391,7 @@ __decorate([
   })
 ], IssuingDistributionPoint.prototype, "onlyContainsAttributeCerts", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_reason.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/crl_reason.js
 init_tslib_es6();
 var id_ce_cRLReasons = `${id_ce}.21`;
 var CRLReasons;
@@ -38372,7 +38426,7 @@ CRLReason = __decorate([
   AsnType({ type: AsnTypeTypes.Choice })
 ], CRLReason);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/extended_key_usage.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/extended_key_usage.js
 init_tslib_es6();
 var ExtendedKeyUsage_1;
 var id_ce_extKeyUsage = `${id_ce}.37`;
@@ -38396,7 +38450,7 @@ var id_kp_emailProtection = `${id_kp}.4`;
 var id_kp_timeStamping = `${id_kp}.8`;
 var id_kp_OCSPSigning = `${id_kp}.9`;
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/inhibit_any_policy.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/inhibit_any_policy.js
 init_tslib_es6();
 var id_ce_inhibitAnyPolicy = `${id_ce}.54`;
 var InhibitAnyPolicy = class InhibitAnyPolicy2 {
@@ -38415,7 +38469,7 @@ InhibitAnyPolicy = __decorate([
   AsnType({ type: AsnTypeTypes.Choice })
 ], InhibitAnyPolicy);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/invalidity_date.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/invalidity_date.js
 init_tslib_es6();
 var id_ce_invalidityDate = `${id_ce}.24`;
 var InvalidityDate = class InvalidityDate2 {
@@ -38433,7 +38487,7 @@ InvalidityDate = __decorate([
   AsnType({ type: AsnTypeTypes.Choice })
 ], InvalidityDate);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/issuer_alternative_name.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/issuer_alternative_name.js
 init_tslib_es6();
 var IssueAlternativeName_1;
 var id_ce_issuerAltName = `${id_ce}.18`;
@@ -38447,7 +38501,7 @@ IssueAlternativeName = IssueAlternativeName_1 = __decorate([
   AsnType({ type: AsnTypeTypes.Sequence })
 ], IssueAlternativeName);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/key_usage.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/key_usage.js
 var id_ce_keyUsage = `${id_ce}.15`;
 var KeyUsageFlags;
 (function(KeyUsageFlags2) {
@@ -38462,7 +38516,7 @@ var KeyUsageFlags;
   KeyUsageFlags2[KeyUsageFlags2["decipherOnly"] = 256] = "decipherOnly";
 })(KeyUsageFlags || (KeyUsageFlags = {}));
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/name_constraints.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/name_constraints.js
 init_tslib_es6();
 var GeneralSubtrees_1;
 var id_ce_nameConstraints = `${id_ce}.30`;
@@ -38529,7 +38583,7 @@ __decorate([
   })
 ], NameConstraints.prototype, "excludedSubtrees", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/policy_constraints.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/policy_constraints.js
 init_tslib_es6();
 var id_ce_policyConstraints = `${id_ce}.36`;
 var PolicyConstraints = class {
@@ -38558,7 +38612,7 @@ __decorate([
   })
 ], PolicyConstraints.prototype, "inhibitPolicyMapping", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/policy_mappings.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/policy_mappings.js
 init_tslib_es6();
 var PolicyMappings_1;
 var id_ce_policyMappings = `${id_ce}.33`;
@@ -38588,7 +38642,7 @@ PolicyMappings = PolicyMappings_1 = __decorate([
   })
 ], PolicyMappings);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/subject_alternative_name.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/subject_alternative_name.js
 init_tslib_es6();
 var SubjectAlternativeName_1;
 var id_ce_subjectAltName = `${id_ce}.17`;
@@ -38602,10 +38656,10 @@ SubjectAlternativeName = SubjectAlternativeName_1 = __decorate([
   AsnType({ type: AsnTypeTypes.Sequence })
 ], SubjectAlternativeName);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/subject_directory_attributes.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/subject_directory_attributes.js
 init_tslib_es6();
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/attribute.js
+// node_modules/@peculiar/asn1-x509/build/es2015/attribute.js
 init_tslib_es6();
 var Attribute = class {
   type = "";
@@ -38624,7 +38678,7 @@ __decorate([
   })
 ], Attribute.prototype, "values", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/subject_directory_attributes.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/subject_directory_attributes.js
 var SubjectDirectoryAttributes_1;
 var id_ce_subjectDirectoryAttributes = `${id_ce}.9`;
 var SubjectDirectoryAttributes = SubjectDirectoryAttributes_1 = class SubjectDirectoryAttributes2 extends AsnArray {
@@ -38640,10 +38694,10 @@ SubjectDirectoryAttributes = SubjectDirectoryAttributes_1 = __decorate([
   })
 ], SubjectDirectoryAttributes);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/subject_key_identifier.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/subject_key_identifier.js
 var id_ce_subjectKeyIdentifier = `${id_ce}.14`;
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/private_key_usage_period.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/private_key_usage_period.js
 init_tslib_es6();
 var id_ce_privateKeyUsagePeriod = `${id_ce}.16`;
 var PrivateKeyUsagePeriod = class {
@@ -38670,7 +38724,7 @@ __decorate([
   })
 ], PrivateKeyUsagePeriod.prototype, "notAfter", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/entrust_version_info.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/entrust_version_info.js
 init_tslib_es6();
 var EntrustInfoFlags;
 (function(EntrustInfoFlags2) {
@@ -38711,7 +38765,7 @@ __decorate([
   AsnProp({ type: EntrustInfo })
 ], EntrustVersionInfo.prototype, "entrustInfoFlags", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extensions/subject_info_access.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extensions/subject_info_access.js
 init_tslib_es6();
 var SubjectInfoAccessSyntax_1;
 var id_pe_subjectInfoAccess = `${id_pe}.11`;
@@ -38728,7 +38782,7 @@ SubjectInfoAccessSyntax = SubjectInfoAccessSyntax_1 = __decorate([
   })
 ], SubjectInfoAccessSyntax);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/algorithm_identifier.js
+// node_modules/@peculiar/asn1-x509/build/es2015/algorithm_identifier.js
 init_tslib_es6();
 var AlgorithmIdentifier = class _AlgorithmIdentifier {
   algorithm = "";
@@ -38750,13 +38804,13 @@ __decorate([
   })
 ], AlgorithmIdentifier.prototype, "parameters", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/certificate.js
+// node_modules/@peculiar/asn1-x509/build/es2015/certificate.js
 init_tslib_es6();
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/tbs_certificate.js
+// node_modules/@peculiar/asn1-x509/build/es2015/tbs_certificate.js
 init_tslib_es6();
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/subject_public_key_info.js
+// node_modules/@peculiar/asn1-x509/build/es2015/subject_public_key_info.js
 init_tslib_es6();
 var SubjectPublicKeyInfo = class {
   algorithm = new AlgorithmIdentifier();
@@ -38772,10 +38826,10 @@ __decorate([
   AsnProp({ type: AsnPropTypes.BitString })
 ], SubjectPublicKeyInfo.prototype, "subjectPublicKey", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/validity.js
+// node_modules/@peculiar/asn1-x509/build/es2015/validity.js
 init_tslib_es6();
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/time.js
+// node_modules/@peculiar/asn1-x509/build/es2015/time.js
 init_tslib_es6();
 var Time = class Time2 {
   utcTime;
@@ -38813,7 +38867,7 @@ Time = __decorate([
   AsnType({ type: AsnTypeTypes.Choice })
 ], Time);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/validity.js
+// node_modules/@peculiar/asn1-x509/build/es2015/validity.js
 var Validity = class {
   notBefore = new Time(/* @__PURE__ */ new Date());
   notAfter = new Time(/* @__PURE__ */ new Date());
@@ -38831,7 +38885,7 @@ __decorate([
   AsnProp({ type: Time })
 ], Validity.prototype, "notAfter", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/extension.js
+// node_modules/@peculiar/asn1-x509/build/es2015/extension.js
 init_tslib_es6();
 var Extensions_1;
 var Extension = class _Extension {
@@ -38868,7 +38922,7 @@ Extensions = Extensions_1 = __decorate([
   })
 ], Extensions);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/types.js
+// node_modules/@peculiar/asn1-x509/build/es2015/types.js
 var Version;
 (function(Version3) {
   Version3[Version3["v1"] = 0] = "v1";
@@ -38876,7 +38930,7 @@ var Version;
   Version3[Version3["v3"] = 2] = "v3";
 })(Version || (Version = {}));
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/tbs_certificate.js
+// node_modules/@peculiar/asn1-x509/build/es2015/tbs_certificate.js
 var TBSCertificate = class {
   version = Version.v1;
   serialNumber = new ArrayBuffer(0);
@@ -38944,7 +38998,7 @@ __decorate([
   })
 ], TBSCertificate.prototype, "extensions", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/certificate.js
+// node_modules/@peculiar/asn1-x509/build/es2015/certificate.js
 var Certificate = class {
   tbsCertificate = new TBSCertificate();
   tbsCertificateRaw;
@@ -38967,10 +39021,10 @@ __decorate([
   AsnProp({ type: AsnPropTypes.BitString })
 ], Certificate.prototype, "signatureValue", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/certificate_list.js
+// node_modules/@peculiar/asn1-x509/build/es2015/certificate_list.js
 init_tslib_es6();
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/tbs_cert_list.js
+// node_modules/@peculiar/asn1-x509/build/es2015/tbs_cert_list.js
 init_tslib_es6();
 var RevokedCertificate = class {
   userCertificate = new ArrayBuffer(0);
@@ -39045,7 +39099,7 @@ __decorate([
   })
 ], TBSCertList.prototype, "crlExtensions", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-x509/build/es2015/certificate_list.js
+// node_modules/@peculiar/asn1-x509/build/es2015/certificate_list.js
 var CertificateList = class {
   tbsCertList = new TBSCertList();
   tbsCertListRaw;
@@ -39068,7 +39122,7 @@ __decorate([
   AsnProp({ type: AsnPropTypes.BitString })
 ], CertificateList.prototype, "signature", void 0);
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/getCertificateInfo.js
+// node_modules/@simplewebauthn/server/esm/helpers/getCertificateInfo.js
 var issuerSubjectIDKey = {
   "2.5.4.6": "C",
   "2.5.4.10": "O",
@@ -39130,10 +39184,10 @@ function issuerSubjectToString(input) {
   return parts.join(" : ");
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/isCertRevoked.js
+// node_modules/@simplewebauthn/server/esm/helpers/isCertRevoked.js
 var import_x509 = __toESM(require_x509_cjs(), 1);
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/fetch.js
+// node_modules/@simplewebauthn/server/esm/helpers/fetch.js
 function fetch2(url) {
   return _fetchInternals.stubThis(url);
 }
@@ -39141,7 +39195,7 @@ var _fetchInternals = {
   stubThis: (url) => globalThis.fetch(url)
 };
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/isCertRevoked.js
+// node_modules/@simplewebauthn/server/esm/helpers/isCertRevoked.js
 var cacheRevokedCerts = {};
 async function isCertRevoked(cert) {
   const { extensions } = cert;
@@ -39213,7 +39267,7 @@ async function isCertRevoked(cert) {
   return false;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/decodeAuthenticatorExtensions.js
+// node_modules/@simplewebauthn/server/esm/helpers/decodeAuthenticatorExtensions.js
 function decodeAuthenticatorExtensions(extensionData) {
   let toCBOR;
   try {
@@ -39236,7 +39290,7 @@ function convertMapToObjectDeep(input) {
   return mapped;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/parseAuthenticatorData.js
+// node_modules/@simplewebauthn/server/esm/helpers/parseAuthenticatorData.js
 function parseAuthenticatorData(authData) {
   if (authData.byteLength < 37) {
     throw new Error(`Authenticator data was ${authData.byteLength} bytes, expected at least 37 bytes`);
@@ -39325,7 +39379,7 @@ var _parseAuthenticatorDataInternals = {
   stubThis: (value) => value
 };
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/toHash.js
+// node_modules/@simplewebauthn/server/esm/helpers/toHash.js
 function toHash(data, algorithm = -7) {
   if (typeof data === "string") {
     data = isoUint8Array_exports.fromUTF8String(data);
@@ -39334,7 +39388,7 @@ function toHash(data, algorithm = -7) {
   return digest2;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/validateCertificatePath.js
+// node_modules/@simplewebauthn/server/esm/helpers/validateCertificatePath.js
 var import_x5092 = __toESM(require_x509_cjs(), 1);
 async function validateCertificatePath(x5cCertsPEM, trustAnchorsPEM = []) {
   if (trustAnchorsPEM.length === 0) {
@@ -39436,7 +39490,7 @@ var InvalidCertificatePath = class extends Error {
   }
 };
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/es2015/object_identifiers.js
+// node_modules/@peculiar/asn1-ecc/build/es2015/object_identifiers.js
 var id_ecPublicKey = "1.2.840.10045.2.1";
 var id_ecdsaWithSHA1 = "1.2.840.10045.4.1";
 var id_ecdsaWithSHA224 = "1.2.840.10045.4.3.1";
@@ -39446,7 +39500,7 @@ var id_ecdsaWithSHA512 = "1.2.840.10045.4.3.4";
 var id_secp256r1 = "1.2.840.10045.3.1.7";
 var id_secp384r1 = "1.3.132.0.34";
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/es2015/algorithms.js
+// node_modules/@peculiar/asn1-ecc/build/es2015/algorithms.js
 function create(algorithm) {
   return new AlgorithmIdentifier({ algorithm });
 }
@@ -39456,10 +39510,10 @@ var ecdsaWithSHA256 = create(id_ecdsaWithSHA256);
 var ecdsaWithSHA384 = create(id_ecdsaWithSHA384);
 var ecdsaWithSHA512 = create(id_ecdsaWithSHA512);
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/es2015/ec_parameters.js
+// node_modules/@peculiar/asn1-ecc/build/es2015/ec_parameters.js
 init_tslib_es6();
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/es2015/rfc3279.js
+// node_modules/@peculiar/asn1-ecc/build/es2015/rfc3279.js
 init_tslib_es6();
 var FieldID = class FieldID2 {
   fieldType;
@@ -39545,7 +39599,7 @@ SpecifiedECDomain = __decorate([
   AsnType({ type: AsnTypeTypes.Sequence })
 ], SpecifiedECDomain);
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/es2015/ec_parameters.js
+// node_modules/@peculiar/asn1-ecc/build/es2015/ec_parameters.js
 var ECParameters = class ECParameters2 {
   namedCurve;
   implicitCurve;
@@ -39567,7 +39621,7 @@ ECParameters = __decorate([
   AsnType({ type: AsnTypeTypes.Choice })
 ], ECParameters);
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/es2015/ec_private_key.js
+// node_modules/@peculiar/asn1-ecc/build/es2015/ec_private_key.js
 init_tslib_es6();
 var ECPrivateKey = class {
   version = 1;
@@ -39599,7 +39653,7 @@ __decorate([
   })
 ], ECPrivateKey.prototype, "publicKey", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-ecc/build/es2015/ec_signature_value.js
+// node_modules/@peculiar/asn1-ecc/build/es2015/ec_signature_value.js
 init_tslib_es6();
 var ECDSASigValue = class {
   r = new ArrayBuffer(0);
@@ -39621,10 +39675,10 @@ __decorate([
   })
 ], ECDSASigValue.prototype, "s", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/es2015/parameters/rsaes_oaep.js
+// node_modules/@peculiar/asn1-rsa/build/es2015/parameters/rsaes_oaep.js
 init_tslib_es6();
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/es2015/object_identifiers.js
+// node_modules/@peculiar/asn1-rsa/build/es2015/object_identifiers.js
 var id_pkcs_1 = "1.2.840.113549.1.1";
 var id_rsaEncryption = `${id_pkcs_1}.1`;
 var id_RSAES_OAEP = `${id_pkcs_1}.7`;
@@ -39650,7 +39704,7 @@ var id_md2 = "1.2.840.113549.2.2";
 var id_md5 = "1.2.840.113549.2.5";
 var id_mgf1 = `${id_pkcs_1}.8`;
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/es2015/algorithms.js
+// node_modules/@peculiar/asn1-rsa/build/es2015/algorithms.js
 function create2(algorithm) {
   return new AlgorithmIdentifier({
     algorithm,
@@ -39706,7 +39760,7 @@ var sha512WithRSAEncryption = create2(id_sha512WithRSAEncryption);
 var sha512_224WithRSAEncryption = create2(id_sha512_224WithRSAEncryption);
 var sha512_256WithRSAEncryption = create2(id_sha512_256WithRSAEncryption);
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/es2015/parameters/rsaes_oaep.js
+// node_modules/@peculiar/asn1-rsa/build/es2015/parameters/rsaes_oaep.js
 var RsaEsOaepParams = class {
   hashAlgorithm = new AlgorithmIdentifier(sha1);
   maskGenAlgorithm = new AlgorithmIdentifier({
@@ -39744,7 +39798,7 @@ var RSAES_OAEP = new AlgorithmIdentifier({
   parameters: AsnConvert.serialize(new RsaEsOaepParams())
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/es2015/parameters/rsassa_pss.js
+// node_modules/@peculiar/asn1-rsa/build/es2015/parameters/rsassa_pss.js
 init_tslib_es6();
 var RsaSaPssParams = class {
   hashAlgorithm = new AlgorithmIdentifier(sha1);
@@ -39791,7 +39845,7 @@ var RSASSA_PSS = new AlgorithmIdentifier({
   parameters: AsnConvert.serialize(new RsaSaPssParams())
 });
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/es2015/parameters/rsassa_pkcs1_v1_5.js
+// node_modules/@peculiar/asn1-rsa/build/es2015/parameters/rsassa_pkcs1_v1_5.js
 init_tslib_es6();
 var DigestInfo = class {
   digestAlgorithm = new AlgorithmIdentifier();
@@ -39807,7 +39861,7 @@ __decorate([
   AsnProp({ type: OctetString2 })
 ], DigestInfo.prototype, "digest", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/es2015/other_prime_info.js
+// node_modules/@peculiar/asn1-rsa/build/es2015/other_prime_info.js
 init_tslib_es6();
 var OtherPrimeInfos_1;
 var OtherPrimeInfo = class {
@@ -39849,7 +39903,7 @@ OtherPrimeInfos = OtherPrimeInfos_1 = __decorate([
   })
 ], OtherPrimeInfos);
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/es2015/rsa_private_key.js
+// node_modules/@peculiar/asn1-rsa/build/es2015/rsa_private_key.js
 init_tslib_es6();
 var RSAPrivateKey = class {
   version = 0;
@@ -39924,7 +39978,7 @@ __decorate([
   })
 ], RSAPrivateKey.prototype, "otherPrimeInfos", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-rsa/build/es2015/rsa_public_key.js
+// node_modules/@peculiar/asn1-rsa/build/es2015/rsa_public_key.js
 init_tslib_es6();
 var RSAPublicKey = class {
   modulus = new ArrayBuffer(0);
@@ -39946,7 +40000,7 @@ __decorate([
   })
 ], RSAPublicKey.prototype, "publicExponent", void 0);
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/mapX509SignatureAlgToCOSEAlg.js
+// node_modules/@simplewebauthn/server/esm/helpers/mapX509SignatureAlgToCOSEAlg.js
 function mapX509SignatureAlgToCOSEAlg(signatureAlgorithm) {
   let alg;
   if (signatureAlgorithm === "1.2.840.10045.4.3.2") {
@@ -39969,7 +40023,7 @@ function mapX509SignatureAlgToCOSEAlg(signatureAlgorithm) {
   return alg;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/convertX509PublicKeyToCOSE.js
+// node_modules/@simplewebauthn/server/esm/helpers/convertX509PublicKeyToCOSE.js
 function convertX509PublicKeyToCOSE(x509Certificate) {
   let cosePublicKey = /* @__PURE__ */ new Map();
   const x509 = AsnParser.parse(x509Certificate, Certificate);
@@ -40023,7 +40077,7 @@ function convertX509PublicKeyToCOSE(x509Certificate) {
   return cosePublicKey;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/verifySignature.js
+// node_modules/@simplewebauthn/server/esm/helpers/verifySignature.js
 function verifySignature(opts) {
   const { signature, data, credentialPublicKey, x509Certificate, hashAlgorithm } = opts;
   if (!x509Certificate && !credentialPublicKey) {
@@ -40049,7 +40103,7 @@ var _verifySignatureInternals = {
   stubThis: (value) => value
 };
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/metadata/parseJWT.js
+// node_modules/@simplewebauthn/server/esm/metadata/parseJWT.js
 function parseJWT(jwt) {
   const parts = jwt.split(".");
   return [
@@ -40059,7 +40113,7 @@ function parseJWT(jwt) {
   ];
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/metadata/verifyJWT.js
+// node_modules/@simplewebauthn/server/esm/metadata/verifyJWT.js
 function verifyJWT2(jwt, leafCert) {
   const [header, payload, signature] = jwt.split(".");
   const certCOSE = convertX509PublicKeyToCOSE(leafCert);
@@ -40083,13 +40137,13 @@ function verifyJWT2(jwt, leafCert) {
   throw new Error(`JWT verification with public key of kty ${kty} is not supported by this method`);
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/convertPEMToBytes.js
+// node_modules/@simplewebauthn/server/esm/helpers/convertPEMToBytes.js
 function convertPEMToBytes(pem) {
   const certBase64 = pem.replace("-----BEGIN CERTIFICATE-----", "").replace("-----END CERTIFICATE-----", "").replace(/[\n ]/g, "");
   return isoBase64URL_exports.toBuffer(certBase64, "base64");
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/services/defaultRootCerts/android-safetynet.js
+// node_modules/@simplewebauthn/server/esm/services/defaultRootCerts/android-safetynet.js
 var GlobalSign_Root_CA = `-----BEGIN CERTIFICATE-----
 MIIDdTCCAl2gAwIBAgILBAAAAAABFUtaw5QwDQYJKoZIhvcNAQEFBQAwVzELMAkG
 A1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24gbnYtc2ExEDAOBgNVBAsTB1Jv
@@ -40113,7 +40167,7 @@ HMUfpIBvFSDJ3gyICh3WZlXi/EjJKSZp4A==
 -----END CERTIFICATE-----
 `;
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/services/defaultRootCerts/android-key.js
+// node_modules/@simplewebauthn/server/esm/services/defaultRootCerts/android-key.js
 var Google_Hardware_Attestation_Root_1 = `-----BEGIN CERTIFICATE-----
 MIIFYDCCA0igAwIBAgIJAOj6GWMU0voYMA0GCSqGSIb3DQEBCwUAMBsxGTAXBgNV
 BAUTEGY5MjAwOWU4NTNiNmIwNDUwHhcNMTYwNTI2MTYyODUyWhcNMjYwNTI0MTYy
@@ -40242,7 +40296,7 @@ w1IdYIg2Wxg7yHcQZemFQg==
 -----END CERTIFICATE-----
 `;
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/services/defaultRootCerts/apple.js
+// node_modules/@simplewebauthn/server/esm/services/defaultRootCerts/apple.js
 var Apple_WebAuthn_Root_CA = `-----BEGIN CERTIFICATE-----
 MIICEjCCAZmgAwIBAgIQaB0BbHo84wIlpQGUKEdXcTAKBggqhkjOPQQDAzBLMR8w
 HQYDVQQDDBZBcHBsZSBXZWJBdXRobiBSb290IENBMRMwEQYDVQQKDApBcHBsZSBJ
@@ -40259,7 +40313,7 @@ jAGGiQIwHFj+dJZYUJR786osByBelJYsVZd2GbHQu209b5RCmGQ21gpSAk9QZW4B
 -----END CERTIFICATE-----
 `;
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/services/defaultRootCerts/mds.js
+// node_modules/@simplewebauthn/server/esm/services/defaultRootCerts/mds.js
 var GlobalSign_Root_CA_R3 = `-----BEGIN CERTIFICATE-----
 MIIDXzCCAkegAwIBAgILBAAAAAABIVhTCKIwDQYJKoZIhvcNAQELBQAwTDEgMB4G
 A1UECxMXR2xvYmFsU2lnbiBSb290IENBIC0gUjMxEzARBgNVBAoTCkdsb2JhbFNp
@@ -40283,7 +40337,7 @@ WD9f
 -----END CERTIFICATE-----
  `;
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/services/settingsService.js
+// node_modules/@simplewebauthn/server/esm/services/settingsService.js
 var BaseSettingsService = class {
   constructor() {
     Object.defineProperty(this, "pemCertificates", {
@@ -40334,7 +40388,7 @@ SettingsService.setRootCertificates({
   certificates: [GlobalSign_Root_CA_R3]
 });
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/metadata/verifyMDSBlob.js
+// node_modules/@simplewebauthn/server/esm/metadata/verifyMDSBlob.js
 async function verifyMDSBlob(blob) {
   const parsedJWT = parseJWT(blob);
   const header = parsedJWT[0];
@@ -40374,7 +40428,7 @@ async function verifyMDSBlob(blob) {
   };
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/verifyOKP.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/verifyOKP.js
 async function verifyOKP(opts) {
   const { cosePublicKey, signature, data } = opts;
   const WebCrypto = await getWebCrypto();
@@ -40420,7 +40474,7 @@ async function verifyOKP(opts) {
   return WebCrypto.subtle.verify(verifyAlgorithm, key, signature, data);
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/unwrapEC2Signature.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/unwrapEC2Signature.js
 function unwrapEC2Signature(signature, crv) {
   const parsedSignature = AsnParser.parse(signature, ECDSASigValue);
   const rBytes = new Uint8Array(parsedSignature.r);
@@ -40461,7 +40515,7 @@ function toNormalizedBytes(bytes, componentLength) {
   return normalizedBytes;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/verify.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoCrypto/verify.js
 function verify(opts) {
   const { cosePublicKey, signature, data, shaHashOverride } = opts;
   if (isCOSEPublicKeyEC2(cosePublicKey)) {
@@ -40485,7 +40539,7 @@ function verify(opts) {
   throw new Error(`Signature verification with public key of kty ${kty} is not supported by this method`);
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/iso/isoUint8Array.js
+// node_modules/@simplewebauthn/server/esm/helpers/iso/isoUint8Array.js
 var isoUint8Array_exports = {};
 __export(isoUint8Array_exports, {
   areEqual: () => areEqual,
@@ -40543,7 +40597,7 @@ function toDataView(array) {
   return new DataView(array.buffer, array.byteOffset, array.length);
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/generateChallenge.js
+// node_modules/@simplewebauthn/server/esm/helpers/generateChallenge.js
 async function generateChallenge() {
   const challenge = new Uint8Array(32);
   await isoCrypto_exports.getRandomValues(challenge);
@@ -40553,7 +40607,7 @@ var _generateChallengeInternals = {
   stubThis: (value) => value
 };
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/registration/generateRegistrationOptions.js
+// node_modules/@simplewebauthn/server/esm/registration/generateRegistrationOptions.js
 var supportedCOSEAlgorithmIdentifiers = [
   // EdDSA (In first position to encourage authenticators to use this over ES256)
   -8,
@@ -40652,7 +40706,7 @@ async function generateRegistrationOptions(options) {
   };
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/parseBackupFlags.js
+// node_modules/@simplewebauthn/server/esm/helpers/parseBackupFlags.js
 function parseBackupFlags({ be, bs }) {
   const credentialBackedUp = bs;
   let credentialDeviceType = "singleDevice";
@@ -40671,7 +40725,7 @@ var InvalidBackupFlags = class extends Error {
   }
 };
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/matchExpectedRPID.js
+// node_modules/@simplewebauthn/server/esm/helpers/matchExpectedRPID.js
 async function matchExpectedRPID(rpIDHash, expectedRPIDs) {
   try {
     const matchedRPID = await Promise.any(expectedRPIDs.map((expected) => {
@@ -40702,7 +40756,7 @@ var UnexpectedRPIDHash = class extends Error {
   }
 };
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/registration/verifications/verifyAttestationFIDOU2F.js
+// node_modules/@simplewebauthn/server/esm/registration/verifications/verifyAttestationFIDOU2F.js
 async function verifyAttestationFIDOU2F(options) {
   const { attStmt, clientDataHash, rpIdHash, credentialID, credentialPublicKey, aaguid, rootCertificates } = options;
   const reservedByte = Uint8Array.from([0]);
@@ -40740,7 +40794,7 @@ async function verifyAttestationFIDOU2F(options) {
   });
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/validateExtFIDOGenCEAAGUID.js
+// node_modules/@simplewebauthn/server/esm/helpers/validateExtFIDOGenCEAAGUID.js
 var id_fido_gen_ce_aaguid = "1.3.6.1.4.1.45724.1.1.4";
 function validateExtFIDOGenCEAAGUID(certExtensions, aaguid) {
   if (!certExtensions) {
@@ -40761,13 +40815,13 @@ function validateExtFIDOGenCEAAGUID(certExtensions, aaguid) {
   return true;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/helpers/logging.js
+// node_modules/@simplewebauthn/server/esm/helpers/logging.js
 function getLogger(_name) {
   return (_message, ..._rest) => {
   };
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/services/metadataService.js
+// node_modules/@simplewebauthn/server/esm/services/metadataService.js
 var NonRefreshingMDS = {
   url: "",
   no: 0,
@@ -40974,7 +41028,7 @@ var BaseMetadataService = class {
 };
 var MetadataService = new BaseMetadataService();
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/metadata/verifyAttestationWithMetadata.js
+// node_modules/@simplewebauthn/server/esm/metadata/verifyAttestationWithMetadata.js
 async function verifyAttestationWithMetadata({ statement, credentialPublicKey, x5c, attestationStatementAlg }) {
   const { authenticationAlgorithms, authenticatorGetInfo, attestationRootCertificates } = statement;
   const keypairCOSEAlgs = /* @__PURE__ */ new Set();
@@ -41070,7 +41124,7 @@ function stringifyCOSEInfo(info) {
   return toReturn;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/registration/verifications/verifyAttestationPacked.js
+// node_modules/@simplewebauthn/server/esm/registration/verifications/verifyAttestationPacked.js
 async function verifyAttestationPacked(options) {
   const { attStmt, clientDataHash, authData, credentialPublicKey, aaguid, rootCertificates } = options;
   const sig = attStmt.get("sig");
@@ -41163,7 +41217,7 @@ async function verifyAttestationPacked(options) {
   return verified;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/registration/verifications/verifyAttestationAndroidSafetyNet.js
+// node_modules/@simplewebauthn/server/esm/registration/verifications/verifyAttestationAndroidSafetyNet.js
 async function verifyAttestationAndroidSafetyNet(options) {
   const { attStmt, clientDataHash, authData, aaguid, rootCertificates, verifyTimestampMS = true, credentialPublicKey, attestationSafetyNetEnforceCTSCheck } = options;
   const alg = attStmt.get("alg");
@@ -41239,7 +41293,7 @@ async function verifyAttestationAndroidSafetyNet(options) {
   return verified;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/registration/verifications/tpm/constants.js
+// node_modules/@simplewebauthn/server/esm/registration/verifications/tpm/constants.js
 var TPM_ST = {
   196: "TPM_ST_RSP_COMMAND",
   32768: "TPM_ST_NULL",
@@ -41357,7 +41411,7 @@ var TPM_ECC_CURVE_COSE_CRV_MAP = {
   // p256
 };
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/registration/verifications/tpm/parseCertInfo.js
+// node_modules/@simplewebauthn/server/esm/registration/verifications/tpm/parseCertInfo.js
 function parseCertInfo(certInfo) {
   let pointer = 0;
   const dataView = isoUint8Array_exports.toDataView(certInfo);
@@ -41404,7 +41458,7 @@ function parseCertInfo(certInfo) {
   };
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/registration/verifications/tpm/parsePubArea.js
+// node_modules/@simplewebauthn/server/esm/registration/verifications/tpm/parsePubArea.js
 function parsePubArea(pubArea) {
   let pointer = 0;
   const dataView = isoUint8Array_exports.toDataView(pubArea);
@@ -41475,7 +41529,7 @@ function parsePubArea(pubArea) {
   };
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/registration/verifications/tpm/verifyAttestationTPM.js
+// node_modules/@simplewebauthn/server/esm/registration/verifications/tpm/verifyAttestationTPM.js
 async function verifyAttestationTPM(options) {
   const { aaguid, attStmt, authData, credentialPublicKey, clientDataHash, rootCertificates } = options;
   const ver = attStmt.get("ver");
@@ -41706,7 +41760,7 @@ function attestedNameAlgToCOSEAlg(alg) {
   throw new Error(`Unexpected TPM attested name alg ${alg}`);
 }
 
-// nodewarden-git/node_modules/@peculiar/asn1-android/build/es2015/key_description.js
+// node_modules/@peculiar/asn1-android/build/es2015/key_description.js
 init_tslib_es6();
 var IntegerSet_1;
 var id_ce_keyDescription = "1.3.6.1.4.1.11129.2.1.17";
@@ -42218,7 +42272,7 @@ __decorate([
   AsnProp({ type: AuthorizationList })
 ], KeyMintKeyDescription.prototype, "hardwareEnforced", void 0);
 
-// nodewarden-git/node_modules/@peculiar/asn1-android/build/es2015/nonstandard.js
+// node_modules/@peculiar/asn1-android/build/es2015/nonstandard.js
 init_tslib_es6();
 var NonStandardAuthorizationList_1;
 var NonStandardAuthorization = class NonStandardAuthorization2 extends AuthorizationList {
@@ -42318,7 +42372,7 @@ NonStandardKeyMintKeyDescription = __decorate([
   AsnType({ type: AsnTypeTypes.Sequence })
 ], NonStandardKeyMintKeyDescription);
 
-// nodewarden-git/node_modules/@peculiar/asn1-android/build/es2015/attestation.js
+// node_modules/@peculiar/asn1-android/build/es2015/attestation.js
 init_tslib_es6();
 var AttestationPackageInfo = class {
   packageName;
@@ -42353,7 +42407,7 @@ __decorate([
   })
 ], AttestationApplicationId.prototype, "signatureDigests", void 0);
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/registration/verifications/verifyAttestationAndroidKey.js
+// node_modules/@simplewebauthn/server/esm/registration/verifications/verifyAttestationAndroidKey.js
 async function verifyAttestationAndroidKey(options) {
   const { authData, clientDataHash, attStmt, credentialPublicKey, aaguid, rootCertificates } = options;
   const x5c = attStmt.get("x5c");
@@ -42427,7 +42481,7 @@ async function verifyAttestationAndroidKey(options) {
   });
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/registration/verifications/verifyAttestationApple.js
+// node_modules/@simplewebauthn/server/esm/registration/verifications/verifyAttestationApple.js
 async function verifyAttestationApple(options) {
   const { attStmt, authData, clientDataHash, credentialPublicKey, rootCertificates } = options;
   const x5c = attStmt.get("x5c");
@@ -42463,7 +42517,7 @@ async function verifyAttestationApple(options) {
   return true;
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/registration/verifyRegistrationResponse.js
+// node_modules/@simplewebauthn/server/esm/registration/verifyRegistrationResponse.js
 async function verifyRegistrationResponse(options) {
   const { response, expectedChallenge, expectedOrigin, expectedRPID, expectedType, requireUserPresence = true, requireUserVerification = true, supportedAlgorithmIDs = supportedCOSEAlgorithmIdentifiers, attestationSafetyNetEnforceCTSCheck = true } = options;
   const { id, rawId, type: credentialType, response: attestationResponse } = response;
@@ -42618,7 +42672,7 @@ async function verifyRegistrationResponse(options) {
   };
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/authentication/generateAuthenticationOptions.js
+// node_modules/@simplewebauthn/server/esm/authentication/generateAuthenticationOptions.js
 async function generateAuthenticationOptions(options) {
   const { allowCredentials, challenge = await generateChallenge(), timeout = 6e4, userVerification = "preferred", extensions, rpID } = options;
   let _challenge = challenge;
@@ -42644,7 +42698,7 @@ async function generateAuthenticationOptions(options) {
   };
 }
 
-// nodewarden-git/node_modules/@simplewebauthn/server/esm/authentication/verifyAuthenticationResponse.js
+// node_modules/@simplewebauthn/server/esm/authentication/verifyAuthenticationResponse.js
 async function verifyAuthenticationResponse(options) {
   const { response, expectedChallenge, expectedOrigin, expectedRPID, expectedType, credential, requireUserVerification = true, advancedFIDOConfig } = options;
   const { id, rawId, type: credentialType, response: assertionResponse } = response;
@@ -42764,7 +42818,7 @@ async function verifyAuthenticationResponse(options) {
   return toReturn;
 }
 
-// nodewarden-git/src/handlers/account-passkeys.ts
+// src/handlers/account-passkeys.ts
 init_storage();
 init_auth();
 init_response();
@@ -43423,7 +43477,7 @@ function buildAccountPasskeyTokenUserDecryptionOption(credential) {
   return buildWebAuthnPrfOption(credential);
 }
 
-// nodewarden-git/src/handlers/auth-requests.ts
+// src/handlers/auth-requests.ts
 init_storage();
 init_uuid();
 init_response();
@@ -43746,7 +43800,7 @@ async function handleUpdateAuthRequest(request, env, userId, id) {
   return jsonResponse(toAuthRequestResponse(request, updatedRequest || authRequest));
 }
 
-// nodewarden-git/src/router-authenticated.ts
+// src/router-authenticated.ts
 async function handleAuthenticatedRoute(request, env, userId, currentUser, path2, method) {
   if (method === "POST" || method === "PUT" || method === "DELETE") {
     const blockedAccountPaths = /* @__PURE__ */ new Set([
@@ -44053,10 +44107,10 @@ async function handleAuthenticatedRoute(request, env, userId, currentUser, path2
   return null;
 }
 
-// nodewarden-git/src/router-public.ts
+// src/router-public.ts
 init_limits();
 
-// nodewarden-git/src/handlers/fill-assist.ts
+// src/handlers/fill-assist.ts
 var EMPTY_FORMS_FILENAME = "forms.v1.json";
 var EMPTY_FORMS_SCHEMA_FILENAME = "forms.v1.schema.json";
 var EMPTY_FORMS_CID = "sha256:189fa7c9bcf8951e65c18b5d9feacf74a5223c75e01667c4235388cbc67091fe";
@@ -44129,7 +44183,7 @@ function handleDigitalAssetLinkCheck() {
   return fillAssistJsonResponse(DIGITAL_ASSET_LINK_CHECK_BODY);
 }
 
-// nodewarden-git/src/handlers/identity.ts
+// src/handlers/identity.ts
 init_storage();
 init_auth();
 init_response();
@@ -45050,14 +45104,14 @@ function checkClientCredentialsParam(clientId, clientSecret, scope) {
   return true;
 }
 
-// nodewarden-git/src/handlers/notifications.ts
+// src/handlers/notifications.ts
 init_auth();
 init_storage();
 init_storage_auth_request_repo();
 init_response();
 init_uuid();
 
-// nodewarden-git/src/utils/websocket-connection-token.ts
+// src/utils/websocket-connection-token.ts
 init_uuid();
 var WEBSOCKET_NOTIFICATION_SCOPE = "notifications.websocket";
 function base64UrlEncode3(data) {
@@ -45116,7 +45170,7 @@ async function verifyWebSocketConnectionToken(token, secret) {
   }
 }
 
-// nodewarden-git/src/handlers/notifications.ts
+// src/handlers/notifications.ts
 var WEBSOCKET_CONNECTION_TOKEN_TTL_MS2 = 60 * 1e3;
 function extractAccessToken(request) {
   const authHeader = String(request.headers.get("Authorization") || "").trim();
@@ -45227,12 +45281,12 @@ async function handleAnonymousNotificationsHub(request, env) {
   return stub.fetch(new Request(forwardedUrl.toString(), request));
 }
 
-// nodewarden-git/src/router-public.ts
+// src/router-public.ts
 init_response();
 init_storage();
 init_origins();
 
-// nodewarden-git/src/config-response.ts
+// src/config-response.ts
 init_limits();
 function buildIconServiceTemplate(origin) {
   return `${origin}/icons/{}/icon.png`;
@@ -45284,7 +45338,7 @@ function buildConfigResponse(origin) {
   };
 }
 
-// nodewarden-git/src/router-public.ts
+// src/router-public.ts
 function isWebsiteIconProxyEnabled(env) {
   return true;
 }
@@ -45667,7 +45721,7 @@ async function handlePublicRoute(request, env, path2, method, enforcePublicRateL
   return null;
 }
 
-// nodewarden-git/src/router.ts
+// src/router.ts
 function jwtSecretUnsafeReason2(env) {
   const secret = (env.JWT_SECRET || "").trim();
   if (!secret) return "missing";
@@ -45840,7 +45894,7 @@ async function handleRequest(request, env) {
   }
 }
 
-// nodewarden-git/src/services/db-lifecycle.ts
+// src/services/db-lifecycle.ts
 init_storage();
 var dbInitialized = false;
 var dbInitError = null;
@@ -45878,10 +45932,10 @@ async function ensureDatabaseInitialized(env, resolve = getDatabase) {
   }
 }
 
-// nodewarden-git/server/index.ts
+// server/index.ts
 init_response();
 
-// nodewarden-git/src/web-vault-visibility.ts
+// src/web-vault-visibility.ts
 var BACKEND_PATH_PREFIXES = [
   "/api",
   "/identity",
@@ -45921,7 +45975,7 @@ function webVaultNotFoundResponse(request) {
   });
 }
 
-// nodewarden-git/server/index.ts
+// server/index.ts
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
 var ROOT_DIR = path.resolve(__dirname, "..");
 var DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT_DIR, "data"));
