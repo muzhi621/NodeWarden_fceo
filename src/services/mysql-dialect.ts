@@ -17,7 +17,9 @@
 // - CREATE INDEX IF NOT EXISTS                  -> CREATE INDEX (duplicate errors swallowed by adapter)
 // - identifier "name" (double quotes)           -> `name`
 // - reserved word `key` as column               -> `key`
-// - composite PRIMARY KEY columns               -> VARCHAR(512)
+// - TEXT column in FOREIGN KEY (col)            -> VARCHAR(512) (FK requires exact type/length match)
+// - composite PRIMARY KEY text columns          -> VARCHAR(512) for FK members, VARCHAR(255) for others
+//   (InnoDB index key budget is 3072 bytes: 512+255 utf8mb4 chars = 3068 bytes)
 
 const STRING_INDEX_COLUMNS = new Set([
   'id', 'user_id', 'cipher_id', 'folder_id', 'device_identifier', 'request_device_identifier',
@@ -218,6 +220,16 @@ function translateCreateTable(sql: string): string {
     ? pkMatch[1].split(',').map((c) => c.trim().replace(/"/g, '')).filter(Boolean)
     : [];
 
+  // Collect FOREIGN KEY referencing columns: MySQL requires them to have the
+  // exact type/length of the referenced key column (error 3780 otherwise).
+  const fkCols = new Set<string>();
+  for (const fk of body.matchAll(/FOREIGN\s+KEY\s*\(([^)]*)\)/gi)) {
+    for (const raw of fk[1].split(',')) {
+      const name = raw.trim().replace(/"/g, '');
+      if (name) fkCols.add(name);
+    }
+  }
+
   // Split body on top-level commas.
   const parts: string[] = [];
   let depth = 0;
@@ -245,12 +257,22 @@ function translateCreateTable(sql: string): string {
       return part.replace(/PRIMARY\s+KEY\s*\(/i, 'PRIMARY KEY (');
     }
     const colDef = translateColumnDef(part, table);
-    if (pkCols.length) {
-      const nameMatch = colDef.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
-      const colName = nameMatch ? nameMatch[1] : '';
-      if (colName && pkCols.includes(colName) && /LONGTEXT/i.test(colDef)) {
+    const nameMatch = colDef.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
+    const colName = nameMatch ? nameMatch[1] : '';
+    if (colName && (/LONGTEXT/i.test(colDef) || /VARCHAR\(2048\)/i.test(colDef))) {
+      if (pkCols.includes(colName)) {
+        // Key columns must be bounded VARCHAR to be indexable. FK members keep
+        // VARCHAR(512) to match the referenced key; other composite PK members
+        // shrink to VARCHAR(255) so 512+255 chars fit InnoDB's 3072-byte key
+        // budget. A single-column PK keeps the full VARCHAR(512).
+        const size = pkCols.length === 1 || fkCols.has(colName) ? 512 : 255;
         recordColumn(table, colName, 'text');
-        return colDef.replace(/\bLONGTEXT\b/i, 'VARCHAR(512)');
+        return colDef.replace(/\bLONGTEXT\b/i, `VARCHAR(${size})`).replace(/\bVARCHAR\(2048\)/i, `VARCHAR(${size})`);
+      }
+      if (fkCols.has(colName)) {
+        // FK columns must have the exact type/length of the referenced key.
+        recordColumn(table, colName, 'text');
+        return colDef.replace(/\bLONGTEXT\b/i, 'VARCHAR(512)').replace(/\bVARCHAR\(2048\)/i, 'VARCHAR(512)');
       }
     }
     return colDef;

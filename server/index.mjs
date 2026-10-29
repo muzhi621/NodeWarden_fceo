@@ -34611,6 +34611,13 @@ function translateCreateTable(sql) {
   const tail2 = sql.slice(bodyEnd);
   const pkMatch = body.match(/PRIMARY\s+KEY\s*\(([^)]*)\)/i);
   const pkCols = pkMatch ? pkMatch[1].split(",").map((c) => c.trim().replace(/"/g, "")).filter(Boolean) : [];
+  const fkCols = /* @__PURE__ */ new Set();
+  for (const fk of body.matchAll(/FOREIGN\s+KEY\s*\(([^)]*)\)/gi)) {
+    for (const raw of fk[1].split(",")) {
+      const name = raw.trim().replace(/"/g, "");
+      if (name) fkCols.add(name);
+    }
+  }
   const parts = [];
   let depth = 0;
   let current = "";
@@ -34635,12 +34642,17 @@ function translateCreateTable(sql) {
       return part.replace(/PRIMARY\s+KEY\s*\(/i, "PRIMARY KEY (");
     }
     const colDef = translateColumnDef(part, table);
-    if (pkCols.length) {
-      const nameMatch = colDef.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
-      const colName = nameMatch ? nameMatch[1] : "";
-      if (colName && pkCols.includes(colName) && /LONGTEXT/i.test(colDef)) {
+    const nameMatch = colDef.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
+    const colName = nameMatch ? nameMatch[1] : "";
+    if (colName && (/LONGTEXT/i.test(colDef) || /VARCHAR\(2048\)/i.test(colDef))) {
+      if (pkCols.includes(colName)) {
+        const size = pkCols.length === 1 || fkCols.has(colName) ? 512 : 255;
         recordColumn(table, colName, "text");
-        return colDef.replace(/\bLONGTEXT\b/i, "VARCHAR(512)");
+        return colDef.replace(/\bLONGTEXT\b/i, `VARCHAR(${size})`).replace(/\bVARCHAR\(2048\)/i, `VARCHAR(${size})`);
+      }
+      if (fkCols.has(colName)) {
+        recordColumn(table, colName, "text");
+        return colDef.replace(/\bLONGTEXT\b/i, "VARCHAR(512)").replace(/\bVARCHAR\(2048\)/i, "VARCHAR(512)");
       }
     }
     return colDef;

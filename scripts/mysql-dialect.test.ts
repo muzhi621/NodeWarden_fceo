@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { translateSql, resetDialectTableCache } from '../src/services/mysql-dialect';
+import { SCHEMA_STATEMENTS } from '../src/services/storage-schema';
 
 test('upsert: ON CONFLICT DO UPDATE SET with excluded values', () => {
   const out = translateSql(
@@ -81,16 +82,45 @@ test('CREATE TABLE: TEXT PRIMARY KEY / INTEGER / defaults / engine', () => {
   assert.match(out, /utf8mb4/);
 });
 
-test('CREATE TABLE: composite PRIMARY KEY columns become VARCHAR(512)', () => {
+test('CREATE TABLE: composite PRIMARY KEY fits the 3072-byte key budget', () => {
   resetDialectTableCache();
+  // Real devices shape: user_id is an FK column and must stay VARCHAR(512) to
+  // match users.id; device_identifier shrinks to VARCHAR(255) so 512+255 chars
+  // (3068 bytes utf8mb4) fit InnoDB's 3072-byte index key limit.
   const out = translateSql(
     'CREATE TABLE IF NOT EXISTS devices (user_id TEXT NOT NULL, device_identifier TEXT NOT NULL, ' +
-    'banned INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, device_identifier))'
+    'banned INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, device_identifier), ' +
+    'FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)'
   );
   assert.match(out, /user_id VARCHAR\(512\) NOT NULL/);
-  assert.match(out, /device_identifier VARCHAR\(512\) NOT NULL/);
+  assert.match(out, /device_identifier VARCHAR\(255\) NOT NULL/);
   assert.match(out, /banned BIGINT NOT NULL DEFAULT 0/);
   assert.match(out, /PRIMARY KEY \(user_id, device_identifier\)/);
+  assert.match(out, /FOREIGN KEY \(user_id\) REFERENCES users\(id\)/);
+
+  // Without FK members both composite PK columns shrink and the budget holds.
+  resetDialectTableCache();
+  const bare = translateSql(
+    'CREATE TABLE IF NOT EXISTS pair (a TEXT NOT NULL, b TEXT NOT NULL, PRIMARY KEY (a, b))'
+  );
+  assert.match(bare, /a VARCHAR\(255\) NOT NULL/);
+  assert.match(bare, /b VARCHAR\(255\) NOT NULL/);
+});
+
+test('CREATE TABLE: FK TEXT columns match the referenced key type', () => {
+  resetDialectTableCache();
+  const out = translateSql(
+    'CREATE TABLE IF NOT EXISTS ciphers (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, data TEXT NOT NULL, ' +
+    'folder_id TEXT, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)'
+  );
+  assert.match(out, /id VARCHAR\(512\) PRIMARY KEY/);
+  // FK column must be VARCHAR(512) (same type/length as users.id) — LONGTEXT
+  // here makes MySQL reject the constraint with error 3780.
+  assert.match(out, /user_id VARCHAR\(512\) NOT NULL/);
+  assert.doesNotMatch(out, /user_id LONGTEXT/);
+  // Non-key text stays LONGTEXT (row-size friendly).
+  assert.match(out, /data LONGTEXT NOT NULL/);
+  assert.match(out, /FOREIGN KEY \(user_id\) REFERENCES users\(id\)/);
 });
 
 test('CREATE TABLE: TEXT DEFAULT becomes VARCHAR with default kept', () => {
@@ -198,4 +228,58 @@ test('real repository statement: insert or ignore rate bucket', () => {
     'INSERT OR IGNORE INTO rate_limit_buckets(bucket_key, count, expires_at, updated_at) VALUES(?, 0, ?, ?)'
   );
   assert.match(out, /^INSERT IGNORE INTO rate_limit_buckets\(bucket_key/);
+});
+
+test('schema-wide: every CREATE TABLE fits MySQL key/type constraints', () => {
+  // config is created outside SCHEMA_STATEMENTS (ensureStorageSchema prologue).
+  const creates = [
+    'CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ...SCHEMA_STATEMENTS.filter((s) => /^\s*CREATE\s+TABLE/i.test(s)),
+  ];
+  for (const stmt of creates) {
+    resetDialectTableCache();
+    const out = translateSql(stmt);
+    const body = out.slice(out.indexOf('(') + 1, out.lastIndexOf(')'));
+
+    // 1) FK columns must be VARCHAR(512) — same type/length as the referenced
+    //    TEXT PRIMARY KEY, or InnoDB rejects the constraint (error 3780).
+    for (const fk of body.matchAll(/FOREIGN\s+KEY\s*\(([^)]*)\)/gi)) {
+      for (const raw of fk[1].split(',')) {
+        const col = raw.trim().replace(/[`"]/g, '');
+        const def = body.match(new RegExp('(?:^|[\\s(,`"])' + col + '[`"]?\\s+([A-Za-z]+(?:\\(\\d+\\))?)', 'i'));
+        assert.ok(def, `FK column ${col} not found in: ${out}`);
+        assert.equal(def![1].toUpperCase(), 'VARCHAR(512)', `FK column ${col} must be VARCHAR(512): ${out}`);
+      }
+    }
+
+    // 2) PRIMARY KEY must fit InnoDB's 3072-byte index key budget
+    //    (utf8mb4 VARCHAR(n) costs 4n bytes, BIGINT 8 bytes).
+    const pkMatch = body.match(/PRIMARY\s+KEY\s*\(([^)]*)\)/i);
+    const pkCols = pkMatch ? pkMatch[1].split(',').map((c) => c.trim().replace(/[`"]/g, '')) : [];
+    const inlinePk = body.match(/([A-Za-z_][A-Za-z0-9_]*)\s+VARCHAR\((\d+)\)\s+PRIMARY\s+KEY/i);
+    const members: Array<{ col: string; size?: string }> = pkCols.length
+      ? pkCols.map((col) => ({ col }))
+      : inlinePk
+        ? [{ col: inlinePk[1], size: `VARCHAR(${inlinePk[2]})` }]
+        : [];
+    if (members.length) {
+      let pkBytes = 0;
+      for (const member of members) {
+        const def = member.size
+          ? [null, member.size, member.size.match(/\((\d+)\)/)![1]]
+          : body.match(new RegExp('(?:^|[\\s(,`"])' + member.col + '[`"]?\\s+(VARCHAR\\((\\d+)\\)|BIGINT|LONGTEXT)', 'i'));
+        assert.ok(def, `PK column ${member.col} not found in: ${out}`);
+        const type = (def![1] || '').toUpperCase();
+        if (type.startsWith('VARCHAR')) pkBytes += Number(def![2]) * 4;
+        else if (type === 'BIGINT') pkBytes += 8;
+        else pkBytes += 100000; // LONGTEXT in a PK is always a failure
+      }
+      assert.ok(pkBytes <= 3072, `PK key budget ${pkBytes} bytes exceeds 3072: ${out}`);
+    }
+
+    // 3) Inline UNIQUE columns must be bounded VARCHAR (indexable).
+    for (const bad of body.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s+LONGTEXT\b[^,]*\bUNIQUE\b/gi)) {
+      assert.fail(`UNIQUE on LONGTEXT column ${bad[1]} is not indexable: ${out}`);
+    }
+  }
 });
