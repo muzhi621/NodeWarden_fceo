@@ -244,9 +244,13 @@ npm run deploy:kv   # KV 模式
 
 ### 6. 功能降级说明（Node 运行时）
 
-- **实时推送**：Durable Objects 在 Node 运行时不可用，`/notifications/hub` 返回 501，
-  Bitwarden 客户端自动降级为轮询同步（功能不缺，实时性略降）；
-- **备份中心远程备份/恢复**：依赖 Durable Objects 的后台执行体，Node 运行时暂不支持（导出/导入可用）；
+- **实时推送**：WebSocket 升级在 Node 运行时不可用（`/notifications/hub` 返回 501），
+  Bitwarden 客户端自动降级为轮询同步（功能不缺，实时性略降）；`negotiate` 正常返回令牌，
+  不会再报 `Failed to issue websocket connection token`；
+- **备份中心的远程备份/恢复**：Durable Objects 以**进程内实现**运行
+  （`server/local-durable-objects.ts`，内存版 `state.storage`），手动/定时备份、WebDAV/S3
+  远程还原、附件同步均可正常使用；代价是 DO 状态按进程保存、冷启动丢失（只影响 60 秒
+  WebSocket 令牌与 10 分钟备份任务租约，不影响数据）；
 - **限流/同步缓存**：`caches.*` 为进程内内存缓存，多实例部署时按实例独立（个人单实例无影响）。
 
 ### 7. 测试与验证

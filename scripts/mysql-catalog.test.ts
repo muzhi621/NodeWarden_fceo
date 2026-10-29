@@ -59,3 +59,36 @@ test('CREATE TABLE whose DDL already carries table options is not doubled', () =
   assert.equal((out.match(/CHARSET=/g) || []).length, 1, out);
   assert.match(out, /`id` varchar\(512\) NOT NULL/);
 });
+
+// `key` is both a column name (ciphers.key, attachments.key, config.key) and an
+// index keyword. Quoting the keyword breaks every restore: MySQL answered
+// "syntax error near '`key` `user_id` (`user_id`)'" and the import aborted.
+test('bare KEY index clauses keep the keyword unquoted', () => {
+  resetDialectTableCache();
+  const ddl =
+    'CREATE TABLE "folders" (\n' +
+    '  "id" varchar(512) NOT NULL,\n' +
+    '  "user_id" varchar(512) NOT NULL,\n' +
+    '  PRIMARY KEY ("id"),\n' +
+    '  KEY "user_id" ("user_id"),\n' +
+    '  UNIQUE KEY "idx_folders_name" ("user_id"(191))\n' +
+    ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4';
+  const out = translateSql(ddl);
+  assert.match(out, /KEY `user_id` \(`user_id`\)/);
+  assert.match(out, /UNIQUE KEY `idx_folders_name`/);
+  assert.doesNotMatch(out, /`key`/i);
+});
+
+test('a column literally named key is still quoted', () => {
+  resetDialectTableCache();
+  const ddl = 'CREATE TABLE "attachments" (\n  "id" TEXT PRIMARY KEY,\n  key TEXT\n)';
+  const out = translateSql(ddl);
+  assert.match(out, /`key` TEXT/);
+  assert.doesNotMatch(out, /\bKEY TEXT\b/);
+});
+
+test('a column named key with a sized type is still quoted', () => {
+  resetDialectTableCache();
+  const out = translateSql('CREATE TABLE "t" (id TEXT PRIMARY KEY, key VARCHAR(255))');
+  assert.match(out, /`key` VARCHAR\(255\)/);
+});

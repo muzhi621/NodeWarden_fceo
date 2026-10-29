@@ -160,8 +160,11 @@ Then open **Admin → Database settings** (`/admin/database`) to edit/test the c
 (AES-256-GCM encrypted, password never echoed). `/healthz` reports DB mode/version.
 Without `DB_HOST` the app falls back to D1 — `npm run deploy` works exactly like upstream.
 
-Notes on the Node runtime: realtime push (Durable Objects) degrades to client polling and
-the backup-center remote runner is unavailable; export/import and everything else works.
+Notes on the Node runtime: Durable Objects run in-process with in-memory state
+(`server/local-durable-objects.ts`), so the backup centre (manual/scheduled runs,
+remote restore, attachment sync) and notification tokens keep working; WebSocket
+upgrades still return 501, so realtime push degrades to client polling, and DO
+state is per-process (lost on cold start).
 See `README_ZH.md` (外接数据库部署教程) for the full tutorial: TiDB Serverless setup,
 D1→MySQL data migration, FC/SCF/EdgeOne deployment options, and Dockerfile.
 

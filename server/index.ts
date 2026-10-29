@@ -8,9 +8,10 @@
 // DB_* environment variables and/or the admin UI (encrypted runtime config).
 //
 // Degraded on Node (documented in the porting report):
-//   - Durable Objects (realtime push hub, backup transfer runner) are stubbed;
-//     Bitwarden clients fall back to polling. Backup-center remote runs need a
-//     future DO-less rewrite.
+//   - Durable Objects run in-process with in-memory state (see
+//     ./local-durable-objects.ts): the backup runner and the notification hub
+//     keep working, but state is per-process / lost on cold start and
+//     WebSocket upgrades are rejected (clients fall back to polling).
 //   - caches.default is an in-memory cache (per instance).
 
 import http from 'node:http';
@@ -25,6 +26,11 @@ import { getDatabaseStatus } from '../src/services/storage-factory';
 import { applyCors, jsonResponse } from '../src/utils/response';
 import { isBackendRequestPath, isWebVaultHidden, webVaultNotFoundResponse } from '../src/web-vault-visibility';
 import type { Env } from '../src/types';
+import {
+  createLocalBackupRunnerNamespace,
+  createLocalNotificationsHubNamespace,
+  installDurableObjectGlobals,
+} from './local-durable-objects';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -168,23 +174,10 @@ const cachesShim = {
 (globalThis as { caches?: unknown }).caches = cachesShim;
 
 // ---------------------------------------------------------------------------
-// Durable Object stubs (realtime push + backup runner degrade gracefully)
+// Durable Objects: real in-process implementations (see local-durable-objects)
 // ---------------------------------------------------------------------------
 
-function createDoStub() {
-  return {
-    idFromName(name: string) {
-      return { name };
-    },
-    get(_id: unknown) {
-      return {
-        async fetch(_request: Request): Promise<Response> {
-          return jsonResponse({ error: 'durable-objects-unavailable', ErrorModel: { Message: 'Realtime hub unavailable on Node runtime; clients fall back to polling.', Object: 'error' } }, 501);
-        },
-      };
-    },
-  };
-}
+installDurableObjectGlobals();
 
 // ---------------------------------------------------------------------------
 // ASSETS shim (serves the Vite build from ./dist)
@@ -231,11 +224,21 @@ async function serveAssets(request: Request): Promise<Response> {
 // Env assembly
 // ---------------------------------------------------------------------------
 
+// The env object is created once and shared: Durable Object instances are
+// constructed lazily from it, so they must see the same `DB` handle that the
+// request pipeline attaches (db-lifecycle re-attaches it on every request).
+let sharedEnv: Env | null = null;
+
 function buildEnv(): Env {
-  return {
+  if (sharedEnv) return sharedEnv;
+  const env = {
     DB: null as unknown as D1Database,
-    NOTIFICATIONS_HUB: createDoStub() as unknown as DurableObjectNamespace,
-    BACKUP_TRANSFER_RUNNER: createDoStub() as unknown as DurableObjectNamespace,
+    NOTIFICATIONS_HUB: createLocalNotificationsHubNamespace(() =>
+      buildEnv()
+    ) as unknown as DurableObjectNamespace,
+    BACKUP_TRANSFER_RUNNER: createLocalBackupRunnerNamespace(() =>
+      buildEnv()
+    ) as unknown as DurableObjectNamespace,
     ASSETS: { fetch: (input: RequestInfo | URL) => serveAssets(toRequest(input)) },
     ATTACHMENTS: fsR2 as unknown as R2Bucket,
     SETTINGS_KV: fileKv as unknown as KVNamespace,
@@ -254,6 +257,8 @@ function buildEnv(): Env {
     DB_CONN_LIMIT: process.env.DB_CONN_LIMIT,
     DB_CONFIG_KEY: process.env.DB_CONFIG_KEY,
   };
+  sharedEnv = env as unknown as Env;
+  return sharedEnv;
 }
 
 function toRequest(input: RequestInfo | URL): Request {

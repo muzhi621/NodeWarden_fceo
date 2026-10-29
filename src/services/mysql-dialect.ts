@@ -162,18 +162,49 @@ function quoteIdentifier(name: string): string {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : name;
 }
 
+// Column types that may follow a column literally named `key` (`key TEXT`).
+// Anything else followed by `(` is an index clause such as
+// `KEY `user_id` (`user_id`)` in DDL copied from SHOW CREATE TABLE.
+const KEY_COLUMN_TYPE_TOKENS = new Set([
+  'text', 'tinytext', 'mediumtext', 'longtext',
+  'char', 'varchar', 'nchar', 'nvarchar',
+  'blob', 'tinyblob', 'mediumblob', 'longblob', 'binary', 'varbinary',
+  'int', 'integer', 'tinyint', 'smallint', 'mediumint', 'bigint',
+  'real', 'double', 'float', 'decimal', 'numeric', 'number',
+  'boolean', 'bool', 'bit', 'serial', 'uuid', 'json', 'jsonb',
+  'date', 'datetime', 'timestamp', 'time', 'year',
+  'enum', 'set', 'clob',
+]);
+
 /** Quote the reserved word `key` when used as an identifier (not PRIMARY KEY / FOREIGN KEY / DUPLICATE KEY / string). */
 function quoteKeyIdentifier(sql: string): string {
   // `key` is a column name in several tables but a keyword in index clauses.
-  // UNIQUE KEY appears in MySQL-sourced DDL (SHOW CREATE TABLE, backup restore).
+  // Index clauses (`KEY name (cols)`, `UNIQUE KEY ...`, `FULLTEXT KEY ...`) only
+  // show up in MySQL-sourced DDL, e.g. SHOW CREATE TABLE during a backup
+  // restore; quoting the keyword there produces `` `key` `col` (...) `` and a
+  // 1064 error.
   return sql.replace(
-    /(?<!\w)(?<!PRIMARY\s)(?<!FOREIGN\s)(?<!UNIQUE\s)(?<!DUPLICATE\s)(?<!`)key(?!\w)(?!`)/gi,
+    /(?<!\w)(?<!PRIMARY\s)(?<!FOREIGN\s)(?<!UNIQUE\s)(?<!DUPLICATE\s)(?<!FULLTEXT\s)(?<!SPATIAL\s)(?<!`)key(?!\w)(?!`)/gi,
     (match, offset, whole: string) => {
-      const before = whole.slice(Math.max(0, offset - 14), offset).toUpperCase();
-      if (/(PRIMARY|FOREIGN|UNIQUE|DUPLICATE)\s+$/.test(before)) return match;
+      const before = whole.slice(Math.max(0, offset - 16), offset).toUpperCase();
+      if (/(PRIMARY|FOREIGN|UNIQUE|DUPLICATE|FULLTEXT|SPATIAL)\s+$/.test(before)) return match;
+      if (isKeyIndexClause(whole.slice(offset + match.length))) return match;
       return '`key`';
     }
   );
+}
+
+/** True when the text right after `key` starts an index column list. */
+function isKeyIndexClause(after: string): boolean {
+  // `KEY (col)` — unnamed index.
+  if (/^\s*\(/.test(after)) return true;
+  const tokenMatch = after.match(/^\s*("([^"]*)"|`([^`]*)`|([A-Za-z_][A-Za-z0-9_$]*))/);
+  if (!tokenMatch) return false;
+  if (!/^\s*\(/.test(after.slice(tokenMatch[0].length))) return false;
+  // A quoted name is always an index name; a bare word is only an index name if
+  // it is not a column type (which would mean this is the `key` column).
+  if (tokenMatch[1].startsWith('"') || tokenMatch[1].startsWith('`')) return true;
+  return !KEY_COLUMN_TYPE_TOKENS.has(String(tokenMatch[4] || '').toLowerCase());
 }
 
 function translateColumnDef(def: string, table: string): string {

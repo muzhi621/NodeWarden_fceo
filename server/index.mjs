@@ -4390,6 +4390,137 @@ var init_yubico_config = __esm({
 
 // src/durable/notifications-hub.ts
 import { DurableObject, waitUntil } from "cloudflare:workers";
+function concatBytes(chunks) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+function encodeUtf8(value) {
+  return new TextEncoder().encode(value);
+}
+function decodeIncomingMessage(data) {
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(data));
+  return new TextDecoder().decode(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+}
+function encodeMsgPackInteger(value) {
+  const normalized = Math.trunc(value);
+  if (normalized >= 0 && normalized <= 127) {
+    return new Uint8Array([normalized]);
+  }
+  if (normalized >= 0 && normalized <= 255) {
+    return new Uint8Array([204, normalized]);
+  }
+  if (normalized >= 0 && normalized <= 65535) {
+    return new Uint8Array([205, normalized >> 8, normalized & 255]);
+  }
+  const safe = normalized >>> 0;
+  return new Uint8Array([
+    206,
+    safe >>> 24 & 255,
+    safe >>> 16 & 255,
+    safe >>> 8 & 255,
+    safe & 255
+  ]);
+}
+function encodeMsgPackString(value) {
+  const bytes = encodeUtf8(value);
+  const len = bytes.length;
+  if (len < 32) {
+    return concatBytes([new Uint8Array([160 | len]), bytes]);
+  }
+  if (len <= 255) {
+    return concatBytes([new Uint8Array([217, len]), bytes]);
+  }
+  return concatBytes([new Uint8Array([218, len >> 8 & 255, len & 255]), bytes]);
+}
+function encodeMsgPackTimestamp(date) {
+  const seconds = BigInt(Math.floor(date.getTime() / 1e3));
+  const nanos = BigInt(date.getMilliseconds()) * 1000000n;
+  const timestamp = nanos << 34n | seconds;
+  const payload = new Uint8Array(8);
+  for (let i2 = 7; i2 >= 0; i2--) {
+    payload[i2] = Number(timestamp >> BigInt((7 - i2) * 8) & 0xffn);
+  }
+  return concatBytes([new Uint8Array([199, 8, 255]), payload]);
+}
+function encodeMsgPackArray(values) {
+  const items = values.map(encodeMsgPack);
+  const len = items.length;
+  const header = len < 16 ? new Uint8Array([144 | len]) : new Uint8Array([220, len >> 8 & 255, len & 255]);
+  return concatBytes([header, ...items]);
+}
+function encodeMsgPackMap(value) {
+  const entries = Object.entries(value);
+  const len = entries.length;
+  const header = len < 16 ? new Uint8Array([128 | len]) : new Uint8Array([222, len >> 8 & 255, len & 255]);
+  const chunks = [header];
+  for (const [key, entryValue] of entries) {
+    chunks.push(encodeMsgPackString(key), encodeMsgPack(entryValue));
+  }
+  return concatBytes(chunks);
+}
+function encodeMsgPack(value) {
+  if (value === null || value === void 0) return new Uint8Array([192]);
+  if (value instanceof Date) return encodeMsgPackTimestamp(value);
+  if (typeof value === "string") return encodeMsgPackString(value);
+  if (typeof value === "number") return encodeMsgPackInteger(value);
+  if (typeof value === "boolean") return new Uint8Array([value ? 195 : 194]);
+  if (Array.isArray(value)) return encodeMsgPackArray(value);
+  if (value instanceof Uint8Array) {
+    const len = value.length;
+    if (len <= 255) return concatBytes([new Uint8Array([196, len]), value]);
+    return concatBytes([new Uint8Array([197, len >> 8 & 255, len & 255]), value]);
+  }
+  return encodeMsgPackMap(value);
+}
+function frameSignalRBinary(payload) {
+  const len = payload.length;
+  const prefix = [];
+  let value = len;
+  do {
+    let current = value & 127;
+    value >>>= 7;
+    if (value > 0) current |= 128;
+    prefix.push(current);
+  } while (value > 0);
+  return concatBytes([new Uint8Array(prefix), payload]);
+}
+function buildSignalRJsonInvocation(updateType, payload, contextId, target = "ReceiveMessage") {
+  return JSON.stringify({
+    type: 1,
+    target,
+    arguments: [
+      {
+        ContextId: contextId,
+        Type: updateType,
+        Payload: payload
+      }
+    ]
+  }) + String.fromCharCode(SIGNALR_RECORD_SEPARATOR);
+}
+function buildSignalRMessagePackInvocation(updateType, messagePayload, contextId, target = "ReceiveMessage") {
+  const encodedPayload = encodeMsgPack([
+    1,
+    {},
+    null,
+    target,
+    [
+      {
+        ContextId: contextId,
+        Type: updateType,
+        Payload: messagePayload
+      }
+    ],
+    []
+  ]);
+  return frameSignalRBinary(encodedPayload);
+}
 function notifyUserVaultSync(env, userId, revisionDate, contextId) {
   waitUntil(notifyUserUpdate(env, userId, SIGNALR_UPDATE_TYPE_SYNC_VAULT, revisionDate, contextId ?? null, null));
 }
@@ -4650,7 +4781,7 @@ async function notifyUserBackupProgress(env, userId, progress, targetDeviceIdent
 async function notifyUserBackupRestoreProgress(env, userId, progress, targetDeviceIdentifier) {
   return notifyUserBackupProgress(env, userId, progress, targetDeviceIdentifier);
 }
-var SIGNALR_RECORD_SEPARATOR, SIGNALR_HANDSHAKE_ACK, SIGNALR_UPDATE_TYPE_SYNC_CIPHER_UPDATE, SIGNALR_UPDATE_TYPE_SYNC_CIPHER_CREATE, SIGNALR_UPDATE_TYPE_SYNC_FOLDER_DELETE, SIGNALR_UPDATE_TYPE_SYNC_CIPHERS, SIGNALR_UPDATE_TYPE_SYNC_VAULT, SIGNALR_UPDATE_TYPE_SYNC_FOLDER_CREATE, SIGNALR_UPDATE_TYPE_SYNC_FOLDER_UPDATE, SIGNALR_UPDATE_TYPE_SYNC_CIPHER_DELETE, SIGNALR_UPDATE_TYPE_LOG_OUT, SIGNALR_UPDATE_TYPE_SYNC_SEND_CREATE, SIGNALR_UPDATE_TYPE_SYNC_SEND_UPDATE, SIGNALR_UPDATE_TYPE_SYNC_SEND_DELETE, SIGNALR_UPDATE_TYPE_AUTH_REQUEST, SIGNALR_UPDATE_TYPE_BACKUP_RESTORE_PROGRESS, WEBSOCKET_CONNECTION_TOKEN_TTL_MS;
+var SIGNALR_RECORD_SEPARATOR, SIGNALR_HANDSHAKE_ACK, SIGNALR_UPDATE_TYPE_SYNC_CIPHER_UPDATE, SIGNALR_UPDATE_TYPE_SYNC_CIPHER_CREATE, SIGNALR_UPDATE_TYPE_SYNC_FOLDER_DELETE, SIGNALR_UPDATE_TYPE_SYNC_CIPHERS, SIGNALR_UPDATE_TYPE_SYNC_VAULT, SIGNALR_UPDATE_TYPE_SYNC_FOLDER_CREATE, SIGNALR_UPDATE_TYPE_SYNC_FOLDER_UPDATE, SIGNALR_UPDATE_TYPE_SYNC_CIPHER_DELETE, SIGNALR_UPDATE_TYPE_LOG_OUT, SIGNALR_UPDATE_TYPE_SYNC_SEND_CREATE, SIGNALR_UPDATE_TYPE_SYNC_SEND_UPDATE, SIGNALR_UPDATE_TYPE_SYNC_SEND_DELETE, SIGNALR_UPDATE_TYPE_AUTH_REQUEST, SIGNALR_UPDATE_TYPE_AUTH_REQUEST_RESPONSE, SIGNALR_UPDATE_TYPE_BACKUP_RESTORE_PROGRESS, WEBSOCKET_CONNECTION_TOKEN_PREFIX, WEBSOCKET_CONNECTION_TOKEN_TTL_MS, NotificationsHub;
 var init_notifications_hub = __esm({
   "src/durable/notifications-hub.ts"() {
     "use strict";
@@ -4670,8 +4801,245 @@ var init_notifications_hub = __esm({
     SIGNALR_UPDATE_TYPE_SYNC_SEND_UPDATE = 13;
     SIGNALR_UPDATE_TYPE_SYNC_SEND_DELETE = 14;
     SIGNALR_UPDATE_TYPE_AUTH_REQUEST = 15;
+    SIGNALR_UPDATE_TYPE_AUTH_REQUEST_RESPONSE = 16;
     SIGNALR_UPDATE_TYPE_BACKUP_RESTORE_PROGRESS = 102;
+    WEBSOCKET_CONNECTION_TOKEN_PREFIX = "ws-token:";
     WEBSOCKET_CONNECTION_TOKEN_TTL_MS = 60 * 1e3;
+    NotificationsHub = class extends DurableObject {
+      constructor(ctx, env) {
+        super(ctx, env);
+        this.ctx.setWebSocketAutoResponse(
+          new WebSocketRequestResponsePair(
+            JSON.stringify({ type: 6 }) + String.fromCharCode(SIGNALR_RECORD_SEPARATOR),
+            JSON.stringify({ type: 6 }) + String.fromCharCode(SIGNALR_RECORD_SEPARATOR)
+          )
+        );
+      }
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === "/internal/ws-token" && request.method === "POST") {
+          const body = await request.json().catch(() => null);
+          const token = String(body?.token || "").trim();
+          const userId = String(body?.userId || "").trim();
+          const expiresAt = Number(body?.expiresAt || 0);
+          if (!token || !userId || expiresAt <= Date.now() || expiresAt > Date.now() + WEBSOCKET_CONNECTION_TOKEN_TTL_MS) {
+            return new Response("Invalid websocket connection token", { status: 400 });
+          }
+          await this.ctx.storage.put(`${WEBSOCKET_CONNECTION_TOKEN_PREFIX}${token}`, {
+            userId,
+            deviceIdentifier: String(body?.deviceIdentifier || "").trim() || null,
+            expiresAt
+          });
+          const currentAlarm = await this.ctx.storage.getAlarm();
+          if (currentAlarm === null || expiresAt < currentAlarm) {
+            await this.ctx.storage.setAlarm(expiresAt);
+          }
+          return new Response(null, { status: 204 });
+        }
+        if (url.pathname === "/internal/ws-token/consume" && request.method === "POST") {
+          const body = await request.json().catch(() => null);
+          const token = String(body?.token || "").trim();
+          if (!token) return new Response("Invalid websocket connection token", { status: 400 });
+          const connection = await this.ctx.storage.transaction(async (txn) => {
+            const key = `${WEBSOCKET_CONNECTION_TOKEN_PREFIX}${token}`;
+            const stored = await txn.get(key);
+            if (stored) await txn.delete(key);
+            return stored || null;
+          });
+          if (!connection || connection.expiresAt <= Date.now()) {
+            return new Response("Unauthorized", { status: 401 });
+          }
+          return new Response(JSON.stringify(connection), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.pathname === "/internal/notify" && request.method === "POST") {
+          const body = await request.json().catch(() => null);
+          const revisionDate = String(body?.revisionDate || "").trim() || (/* @__PURE__ */ new Date()).toISOString();
+          const userId = String(request.headers.get("X-NodeWarden-UserId") || body?.userId || "").trim();
+          const contextId = String(body?.contextId || "").trim() || null;
+          const rawUpdateType = body?.updateType;
+          const parsedUpdateType = typeof rawUpdateType === "number" ? rawUpdateType : Number(rawUpdateType);
+          const updateType = Number.isFinite(parsedUpdateType) ? parsedUpdateType : SIGNALR_UPDATE_TYPE_SYNC_VAULT;
+          const targetDeviceIdentifier = String(body?.targetDeviceIdentifier || "").trim() || null;
+          const payload = body?.payload && typeof body.payload === "object" ? body.payload : {
+            UserId: userId,
+            Date: revisionDate
+          };
+          this.broadcastMessage(updateType, payload, contextId, targetDeviceIdentifier);
+          return new Response(null, { status: 204 });
+        }
+        if (url.pathname === "/internal/auth-request-response" && request.method === "POST") {
+          const body = await request.json().catch(() => null);
+          const userId = String(body?.userId || "").trim();
+          const authRequestId = String(body?.authRequestId || "").trim();
+          if (!userId || !authRequestId) return new Response("Invalid auth request notification", { status: 400 });
+          this.broadcastAuthRequestResponse(userId, authRequestId, String(body?.contextId || "").trim() || null);
+          return new Response(null, { status: 204 });
+        }
+        if (url.pathname === "/internal/online" && request.method === "GET") {
+          return new Response(JSON.stringify({ deviceIdentifiers: this.getOnlineDeviceIdentifiers() }), {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json"
+            }
+          });
+        }
+        if (url.pathname !== "/notifications/hub" && url.pathname !== "/notifications/anonymous-hub") {
+          return new Response("Not found", { status: 404 });
+        }
+        if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+          return new Response("Expected websocket", { status: 426 });
+        }
+        const requestUserId = String(url.searchParams.get("nw_uid") || "").trim();
+        const requestDeviceIdentifier = String(url.searchParams.get("nw_did") || "").trim() || null;
+        const requestAuthRequestId = String(url.searchParams.get("nw_auth_request_id") || "").trim() || null;
+        const isAnonymousAuthRequestHub = url.pathname === "/notifications/anonymous-hub";
+        if (!isAnonymousAuthRequestHub && !requestUserId) {
+          return new Response("Unauthorized", { status: 401 });
+        }
+        if (isAnonymousAuthRequestHub && !requestAuthRequestId) {
+          return new Response("Unauthorized", { status: 401 });
+        }
+        const pair = new WebSocketPair();
+        const client = pair[0];
+        const server2 = pair[1];
+        const tags = [];
+        if (requestDeviceIdentifier) {
+          tags.push(`device:${requestDeviceIdentifier}`);
+        }
+        this.ctx.acceptWebSocket(server2, tags);
+        server2.serializeAttachment({
+          kind: isAnonymousAuthRequestHub ? "anonymous-auth-request" : "user",
+          userId: isAnonymousAuthRequestHub ? null : requestUserId,
+          authRequestId: requestAuthRequestId,
+          handshakeComplete: false,
+          protocol: "messagepack",
+          deviceIdentifier: requestDeviceIdentifier
+        });
+        return new Response(null, {
+          status: 101,
+          webSocket: client
+        });
+      }
+      async alarm() {
+        const now = Date.now();
+        const tokens = await this.ctx.storage.list({
+          prefix: WEBSOCKET_CONNECTION_TOKEN_PREFIX
+        });
+        const expiredKeys = [];
+        let nextExpiration = null;
+        for (const [key, token] of tokens) {
+          if (token.expiresAt <= now) {
+            expiredKeys.push(key);
+          } else if (nextExpiration === null || token.expiresAt < nextExpiration) {
+            nextExpiration = token.expiresAt;
+          }
+        }
+        if (expiredKeys.length > 0) await this.ctx.storage.delete(expiredKeys);
+        if (nextExpiration !== null) await this.ctx.storage.setAlarm(nextExpiration);
+      }
+      async webSocketMessage(ws, message) {
+        const attachment = ws.deserializeAttachment();
+        if (!attachment) return;
+        if (!attachment.handshakeComplete) {
+          const text = decodeIncomingMessage(message);
+          const frames = text.split(String.fromCharCode(SIGNALR_RECORD_SEPARATOR)).filter(Boolean);
+          for (const frame of frames) {
+            try {
+              const handshake = JSON.parse(frame);
+              attachment.protocol = handshake.protocol === "json" ? "json" : "messagepack";
+              attachment.handshakeComplete = true;
+              ws.serializeAttachment(attachment);
+              ws.send(SIGNALR_HANDSHAKE_ACK);
+              return;
+            } catch {
+            }
+          }
+          return;
+        }
+        if (typeof message !== "string") {
+          try {
+            ws.send(message);
+          } catch {
+          }
+        }
+      }
+      async webSocketClose(ws, code, reason, wasClean) {
+        void ws;
+        void code;
+        void reason;
+        void wasClean;
+      }
+      async webSocketError(ws, error) {
+        void ws;
+        void error;
+      }
+      getOnlineDeviceIdentifiers() {
+        const out = /* @__PURE__ */ new Set();
+        for (const ws of this.ctx.getWebSockets()) {
+          const attachment = ws.deserializeAttachment();
+          if (!attachment?.handshakeComplete || attachment.kind !== "user" || !attachment.deviceIdentifier) continue;
+          out.add(attachment.deviceIdentifier);
+        }
+        return Array.from(out);
+      }
+      broadcastMessage(updateType, payload, contextId, targetDeviceIdentifier) {
+        const sockets = targetDeviceIdentifier ? this.ctx.getWebSockets(`device:${targetDeviceIdentifier}`) : this.ctx.getWebSockets();
+        if (sockets.length === 0) return;
+        for (const ws of sockets) {
+          const attachment = ws.deserializeAttachment();
+          if (!attachment?.handshakeComplete) continue;
+          try {
+            if (attachment.protocol === "json") {
+              ws.send(buildSignalRJsonInvocation(updateType, payload, contextId));
+            } else {
+              ws.send(buildSignalRMessagePackInvocation(updateType, payload, contextId));
+            }
+          } catch {
+            try {
+              ws.close(1011, "Notification send failed");
+            } catch {
+            }
+          }
+        }
+      }
+      broadcastAuthRequestResponse(userId, authRequestId, contextId) {
+        for (const ws of this.ctx.getWebSockets()) {
+          const attachment = ws.deserializeAttachment();
+          if (!attachment?.handshakeComplete || attachment.kind !== "anonymous-auth-request" || attachment.authRequestId !== authRequestId) {
+            continue;
+          }
+          const payload = {
+            UserId: userId,
+            Id: authRequestId
+          };
+          try {
+            if (attachment.protocol === "json") {
+              ws.send(buildSignalRJsonInvocation(
+                SIGNALR_UPDATE_TYPE_AUTH_REQUEST_RESPONSE,
+                payload,
+                contextId,
+                "AuthRequestResponseRecieved"
+              ));
+            } else {
+              ws.send(buildSignalRMessagePackInvocation(
+                SIGNALR_UPDATE_TYPE_AUTH_REQUEST_RESPONSE,
+                payload,
+                contextId,
+                "AuthRequestResponseRecieved"
+              ));
+            }
+          } catch {
+            try {
+              ws.close(1011, "Notification send failed");
+            } catch {
+            }
+          }
+        }
+      }
+    };
   }
 });
 
@@ -6739,7 +7107,107 @@ function getBackupLocalDateKey(date, timezone) {
   const parts = getDateTimeParts(date, timezone);
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
-var BACKUP_SETTINGS_CONFIG_KEY, BACKUP_RUNTIME_CONFIG_KEY, REDACTED_BACKUP_SECRET, MAX_BACKUP_DESTINATIONS;
+function parseLocalDateKey(dateKey) {
+  const match = String(dateKey || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
+  return { year, month, day };
+}
+function getUtcDateForLocalTime(timezone, year, month, day, hour, minute) {
+  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+  const actual = getDateTimeParts(new Date(utcGuess), timezone);
+  const actualUtc = Date.UTC(
+    Number(actual.year),
+    Number(actual.month) - 1,
+    Number(actual.day),
+    Number(actual.hour),
+    Number(actual.minute),
+    0,
+    0
+  );
+  const desiredUtc = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+  return new Date(utcGuess - (actualUtc - desiredUtc));
+}
+function getBackupSlotStartsForLocalDay(dateKey, timezone, startTime, intervalHours) {
+  const parsedDate = parseLocalDateKey(dateKey);
+  const parsedTime = normalizeStartTime(startTime).split(":").map((value) => Number(value));
+  if (!parsedDate || parsedTime.length !== 2) return [];
+  const [hour, minute] = parsedTime;
+  const firstSlot = getUtcDateForLocalTime(timezone, parsedDate.year, parsedDate.month, parsedDate.day, hour, minute);
+  const nextLocalDay = new Date(Date.UTC(parsedDate.year, parsedDate.month - 1, parsedDate.day, 0, 0, 0, 0));
+  nextLocalDay.setUTCDate(nextLocalDay.getUTCDate() + 1);
+  const nextDay = getUtcDateForLocalTime(
+    timezone,
+    nextLocalDay.getUTCFullYear(),
+    nextLocalDay.getUTCMonth() + 1,
+    nextLocalDay.getUTCDate(),
+    0,
+    0
+  );
+  const intervalMs = intervalHours * 60 * 60 * 1e3;
+  const slots = [];
+  for (let slotMs = firstSlot.getTime(); slotMs < nextDay.getTime(); slotMs += intervalMs) {
+    slots.push(new Date(slotMs));
+  }
+  return slots;
+}
+function hasBackupSlotBetween(destination, startInclusive, endExclusive) {
+  if (!destination.schedule.enabled) return false;
+  const startMs = startInclusive.getTime();
+  const endMs = endExclusive.getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return false;
+  const lastSuccessAt = destination.runtime.lastSuccessAt ? new Date(destination.runtime.lastSuccessAt) : null;
+  const lastSuccessMs = lastSuccessAt && Number.isFinite(lastSuccessAt.getTime()) ? lastSuccessAt.getTime() : Number.NEGATIVE_INFINITY;
+  const dayCursor = new Date(startMs);
+  dayCursor.setUTCHours(0, 0, 0, 0);
+  const endDay = new Date(endMs);
+  endDay.setUTCHours(0, 0, 0, 0);
+  const checkedLocalDateKeys = /* @__PURE__ */ new Set();
+  while (dayCursor.getTime() <= endDay.getTime() + 24 * 60 * 60 * 1e3) {
+    const localDateKey = getBackupLocalDateKey(dayCursor, destination.schedule.timezone);
+    if (!checkedLocalDateKeys.has(localDateKey)) {
+      checkedLocalDateKeys.add(localDateKey);
+      const slotStarts = getBackupSlotStartsForLocalDay(
+        localDateKey,
+        destination.schedule.timezone,
+        destination.schedule.startTime,
+        destination.schedule.intervalHours
+      );
+      for (const slotStart of slotStarts) {
+        const slotStartMs = slotStart.getTime();
+        if (slotStartMs < startMs || slotStartMs >= endMs) continue;
+        if (lastSuccessMs >= slotStartMs) continue;
+        return true;
+      }
+    }
+    dayCursor.setUTCDate(dayCursor.getUTCDate() + 1);
+  }
+  return false;
+}
+function isBackupDueNow(destination, now, windowMinutes = BACKUP_SCHEDULER_WINDOW_MINUTES) {
+  if (!destination.schedule.enabled) return false;
+  const toleranceMs = Math.max(1, windowMinutes) * 60 * 1e3;
+  const lastSuccessAt = destination.runtime.lastSuccessAt ? new Date(destination.runtime.lastSuccessAt) : null;
+  const lastSuccessMs = lastSuccessAt && Number.isFinite(lastSuccessAt.getTime()) ? lastSuccessAt.getTime() : Number.NEGATIVE_INFINITY;
+  const localDateKey = getBackupLocalDateKey(now, destination.schedule.timezone);
+  const slotStarts = getBackupSlotStartsForLocalDay(
+    localDateKey,
+    destination.schedule.timezone,
+    destination.schedule.startTime,
+    destination.schedule.intervalHours
+  );
+  for (const slotStart of slotStarts) {
+    const slotStartMs = slotStart.getTime();
+    if (now.getTime() < slotStartMs || now.getTime() >= slotStartMs + toleranceMs) continue;
+    if (lastSuccessMs >= slotStartMs) return false;
+    return true;
+  }
+  return false;
+}
+var BACKUP_SETTINGS_CONFIG_KEY, BACKUP_RUNTIME_CONFIG_KEY, BACKUP_SCHEDULER_WINDOW_MINUTES, REDACTED_BACKUP_SECRET, MAX_BACKUP_DESTINATIONS;
 var init_backup_config = __esm({
   "src/services/backup-config.ts"() {
     "use strict";
@@ -6747,6 +7215,7 @@ var init_backup_config = __esm({
     init_backup_schema();
     BACKUP_SETTINGS_CONFIG_KEY = "backup.settings.v1";
     BACKUP_RUNTIME_CONFIG_KEY = "backup.runtime.v1";
+    BACKUP_SCHEDULER_WINDOW_MINUTES = 5;
     REDACTED_BACKUP_SECRET = "********";
     MAX_BACKUP_DESTINATIONS = 24;
   }
@@ -7281,13 +7750,22 @@ function quoteIdentifier(name) {
 }
 function quoteKeyIdentifier(sql) {
   return sql.replace(
-    /(?<!\w)(?<!PRIMARY\s)(?<!FOREIGN\s)(?<!UNIQUE\s)(?<!DUPLICATE\s)(?<!`)key(?!\w)(?!`)/gi,
+    /(?<!\w)(?<!PRIMARY\s)(?<!FOREIGN\s)(?<!UNIQUE\s)(?<!DUPLICATE\s)(?<!FULLTEXT\s)(?<!SPATIAL\s)(?<!`)key(?!\w)(?!`)/gi,
     (match, offset, whole) => {
-      const before = whole.slice(Math.max(0, offset - 14), offset).toUpperCase();
-      if (/(PRIMARY|FOREIGN|UNIQUE|DUPLICATE)\s+$/.test(before)) return match;
+      const before = whole.slice(Math.max(0, offset - 16), offset).toUpperCase();
+      if (/(PRIMARY|FOREIGN|UNIQUE|DUPLICATE|FULLTEXT|SPATIAL)\s+$/.test(before)) return match;
+      if (isKeyIndexClause(whole.slice(offset + match.length))) return match;
       return "`key`";
     }
   );
+}
+function isKeyIndexClause(after) {
+  if (/^\s*\(/.test(after)) return true;
+  const tokenMatch = after.match(/^\s*("([^"]*)"|`([^`]*)`|([A-Za-z_][A-Za-z0-9_$]*))/);
+  if (!tokenMatch) return false;
+  if (!/^\s*\(/.test(after.slice(tokenMatch[0].length))) return false;
+  if (tokenMatch[1].startsWith('"') || tokenMatch[1].startsWith("`")) return true;
+  return !KEY_COLUMN_TYPE_TOKENS.has(String(tokenMatch[4] || "").toLowerCase());
 }
 function translateColumnDef(def, table) {
   let out = def;
@@ -7457,7 +7935,7 @@ function translateSql(input) {
   out = quoteKeyIdentifier(out);
   return unmaskLiterals(rewriteSqliteCatalog(out, literals), literals);
 }
-var STRING_INDEX_COLUMNS, tableColumnKinds;
+var STRING_INDEX_COLUMNS, tableColumnKinds, KEY_COLUMN_TYPE_TOKENS;
 var init_mysql_dialect = __esm({
   "src/services/mysql-dialect.ts"() {
     "use strict";
@@ -7504,6 +7982,49 @@ var init_mysql_dialect = __esm({
       "expires_at"
     ]);
     tableColumnKinds = /* @__PURE__ */ new Map();
+    KEY_COLUMN_TYPE_TOKENS = /* @__PURE__ */ new Set([
+      "text",
+      "tinytext",
+      "mediumtext",
+      "longtext",
+      "char",
+      "varchar",
+      "nchar",
+      "nvarchar",
+      "blob",
+      "tinyblob",
+      "mediumblob",
+      "longblob",
+      "binary",
+      "varbinary",
+      "int",
+      "integer",
+      "tinyint",
+      "smallint",
+      "mediumint",
+      "bigint",
+      "real",
+      "double",
+      "float",
+      "decimal",
+      "numeric",
+      "number",
+      "boolean",
+      "bool",
+      "bit",
+      "serial",
+      "uuid",
+      "json",
+      "jsonb",
+      "date",
+      "datetime",
+      "timestamp",
+      "time",
+      "year",
+      "enum",
+      "set",
+      "clob"
+    ]);
   }
 });
 
@@ -7734,7 +8255,7 @@ async function getTableCreateSql(db, table) {
   }
   return sql;
 }
-function buildShadowTableCreateSql(createSql, table) {
+function buildShadowTableCreateSql(createSql, table, mysql) {
   const tablePattern = new RegExp(`^CREATE TABLE(?:\\s+IF NOT EXISTS)?\\s+(?:"${table}"|${table})(?=\\s*\\()`, "i");
   let next = createSql.replace(tablePattern, `CREATE TABLE "${shadowTableName(table)}"`);
   if (next === createSql) {
@@ -7747,7 +8268,48 @@ function buildShadowTableCreateSql(createSql, table) {
       `REFERENCES "${shadowTableName(currentTable)}"`
     );
   }
+  if (mysql) {
+    next = stripMySqlForeignKeyConstraints(next);
+  }
   return next;
+}
+function stripMySqlForeignKeyConstraints(createSql) {
+  const openIndex = createSql.indexOf("(");
+  const closeIndex = createSql.lastIndexOf(")");
+  if (openIndex < 0 || closeIndex <= openIndex) return createSql;
+  const head = createSql.slice(0, openIndex + 1);
+  const body = createSql.slice(openIndex + 1, closeIndex);
+  const tail2 = createSql.slice(closeIndex);
+  const elements = [];
+  let depth = 0;
+  let current = "";
+  let quoteChar = null;
+  for (const char of body) {
+    if (quoteChar) {
+      current += char;
+      if (char === quoteChar) quoteChar = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quoteChar = char;
+      current += char;
+      continue;
+    }
+    if (char === "(") depth += 1;
+    else if (char === ")") depth -= 1;
+    if (char === "," && depth === 0) {
+      elements.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) elements.push(current);
+  const kept = elements.filter(
+    (element) => !/^\s*CONSTRAINT\s+(?:"[^"]+"|`[^`]+`|\w+)\s+FOREIGN\s+KEY\b/i.test(element)
+  );
+  if (kept.length === elements.length) return createSql;
+  return `${head}${kept.join(",")}${tail2}`;
 }
 async function resetRestoreArtifacts(db) {
   const dropStatements = BACKUP_TABLES.slice().reverse().map((table) => db.prepare(`DROP TABLE IF EXISTS ${shadowTableName(table)}`));
@@ -7756,10 +8318,11 @@ async function resetRestoreArtifacts(db) {
   }
 }
 async function createShadowTables(db) {
+  const mysql = isMySqlDatabase(db);
   const createStatements = [];
   for (const table of BACKUP_TABLES) {
     const createSql = await getTableCreateSql(db, table);
-    createStatements.push(db.prepare(buildShadowTableCreateSql(createSql, table)));
+    createStatements.push(db.prepare(buildShadowTableCreateSql(createSql, table, mysql)));
   }
   await db.batch(createStatements);
 }
@@ -15964,12 +16527,12 @@ var require_sequence = __commonJS({
       }
       return bytes;
     }
-    function encodeUtf8(text) {
+    function encodeUtf82(text) {
       return new TextEncoder().encode(text);
     }
     function toPatternBytes(pattern, options) {
       if (typeof pattern === "string") {
-        return options?.encoding === "utf8" ? encodeUtf8(pattern) : encodeAscii(pattern);
+        return options?.encoding === "utf8" ? encodeUtf82(pattern) : encodeAscii(pattern);
       }
       return (0, buffer_source_js_1.toUint8Array)(pattern);
     }
@@ -45975,6 +46538,530 @@ function webVaultNotFoundResponse(request) {
   });
 }
 
+// src/durable/backup-transfer-runner.ts
+init_backup_config();
+init_backup_uploader();
+init_blob_store();
+init_storage();
+init_notifications_hub();
+init_backup();
+init_backup_archive();
+init_esm();
+var BACKUP_JOB_STATE_KEY = "backup.job.state.v1";
+var BACKUP_JOB_LEASE_MS = 10 * 60 * 1e3;
+var BACKUP_JOB_HEARTBEAT_MS = 30 * 1e3;
+function badRequest(message, status = 400) {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store"
+    }
+  });
+}
+var BackupTransferRunner = class {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+  }
+  state;
+  env;
+  lastHeartbeatAt = 0;
+  async acquireJob(reason) {
+    const nowMs = Date.now();
+    const current = await this.state.storage.get(BACKUP_JOB_STATE_KEY);
+    if (current?.expiresAtMs && current.expiresAtMs > nowMs) {
+      return null;
+    }
+    const token = crypto.randomUUID();
+    const nowIso = new Date(nowMs).toISOString();
+    await this.state.storage.put(BACKUP_JOB_STATE_KEY, {
+      token,
+      reason,
+      acquiredAt: nowIso,
+      touchedAt: nowIso,
+      expiresAtMs: nowMs + BACKUP_JOB_LEASE_MS
+    });
+    this.lastHeartbeatAt = 0;
+    return token;
+  }
+  async touchJob(token) {
+    const nowMs = Date.now();
+    if (nowMs - this.lastHeartbeatAt < BACKUP_JOB_HEARTBEAT_MS) return;
+    this.lastHeartbeatAt = nowMs;
+    const current = await this.state.storage.get(BACKUP_JOB_STATE_KEY);
+    if (current?.token !== token) return;
+    await this.state.storage.put(BACKUP_JOB_STATE_KEY, {
+      ...current,
+      touchedAt: new Date(nowMs).toISOString(),
+      expiresAtMs: nowMs + BACKUP_JOB_LEASE_MS
+    });
+  }
+  async releaseJob(token) {
+    const current = await this.state.storage.get(BACKUP_JOB_STATE_KEY);
+    if (current?.token === token) {
+      await this.state.storage.delete(BACKUP_JOB_STATE_KEY);
+    }
+  }
+  async runConfiguredBackup(request) {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return badRequest("Backup run payload is invalid");
+    }
+    const trigger = body.trigger === "scheduled" ? "scheduled" : "manual";
+    const actorUserId = String(body.actorUserId || "").trim() || null;
+    if (trigger === "manual" && !actorUserId) {
+      return badRequest("Manual backup run requires an actor");
+    }
+    const token = await this.acquireJob(`${trigger}:${actorUserId || "system"}`);
+    if (!token) {
+      return badRequest("Another backup run is already in progress", 409);
+    }
+    try {
+      await this.touchJob(token);
+      const storage = new StorageService(this.env.DB);
+      const progress = actorUserId ? async (event) => {
+        await notifyUserBackupProgress(
+          this.env,
+          actorUserId,
+          event,
+          String(body.targetDeviceIdentifier || "").trim() || null
+        );
+      } : null;
+      const result = await executeConfiguredBackup(
+        this.env,
+        storage,
+        actorUserId,
+        trigger,
+        body.destinationId || null,
+        () => this.touchJob(token),
+        progress,
+        body.auditMetadata || null
+      );
+      const settings = await loadBackupSettings(storage, this.env, "UTC");
+      return new Response(JSON.stringify({
+        object: "backup-runner-result",
+        result,
+        settings
+      }), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        }
+      });
+    } catch (error) {
+      return badRequest(error instanceof Error ? error.message : "Backup run failed", 500);
+    } finally {
+      await this.releaseJob(token);
+    }
+  }
+  async runScheduledBackups() {
+    const token = await this.acquireJob("scheduled");
+    if (!token) {
+      return badRequest("Another backup run is already in progress", 409);
+    }
+    let completed = 0;
+    const failures = [];
+    try {
+      await this.touchJob(token);
+      const storage = new StorageService(this.env.DB);
+      let scanStartMs = Date.now();
+      while (true) {
+        await this.touchJob(token);
+        const settings = await loadBackupSettings(storage, this.env, "UTC");
+        const now = /* @__PURE__ */ new Date();
+        const dueDestinations = settings.destinations.filter(
+          (destination) => isBackupDueNow(destination, now, BACKUP_SCHEDULER_WINDOW_MINUTES) || hasBackupSlotBetween(destination, new Date(scanStartMs), now)
+        );
+        if (!dueDestinations.length) {
+          break;
+        }
+        scanStartMs = now.getTime();
+        for (const destination of dueDestinations) {
+          await this.touchJob(token);
+          try {
+            await executeConfiguredBackup(
+              this.env,
+              storage,
+              null,
+              "scheduled",
+              destination.id,
+              () => this.touchJob(token)
+            );
+            completed += 1;
+          } catch (error) {
+            failures.push({
+              destinationId: destination.id,
+              error: error instanceof Error ? error.message : "Scheduled backup failed"
+            });
+          }
+        }
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        completed,
+        failed: failures.length,
+        failures
+      }), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        }
+      });
+    } catch (error) {
+      return badRequest(error instanceof Error ? error.message : "Scheduled backup failed", 500);
+    } finally {
+      await this.releaseJob(token);
+    }
+  }
+  async restoreRemoteBackup(request) {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return badRequest("Remote restore payload is invalid");
+    }
+    const actorUserId = String(body.actorUserId || "").trim() || null;
+    if (!actorUserId) {
+      return badRequest("Remote restore requires an actor");
+    }
+    const token = await this.acquireJob(`restore:${actorUserId}`);
+    if (!token) {
+      return badRequest("Another backup or restore run is already in progress", 409);
+    }
+    try {
+      await this.touchJob(token);
+      const storage = new StorageService(this.env.DB);
+      const settings = await loadBackupSettings(storage, this.env, "UTC");
+      const destination = requireBackupDestination(settings, body.destinationId || null);
+      const path2 = ensureRemoteRestoreCandidate(String(body.path || ""));
+      const restoreFileNameFromPath = path2.split("/").pop() || path2;
+      const targetDeviceIdentifier = String(body.targetDeviceIdentifier || "").trim() || null;
+      const replaceExisting = !!body.replaceExisting;
+      await notifyUserBackupRestoreProgress(
+        this.env,
+        actorUserId,
+        {
+          operation: "backup-restore",
+          source: "remote",
+          step: "remote_fetch_archive",
+          fileName: restoreFileNameFromPath,
+          stageTitle: "txt_backup_restore_progress_remote_fetch_title",
+          stageDetail: "txt_backup_restore_progress_remote_fetch_detail",
+          replaceExisting
+        },
+        targetDeviceIdentifier
+      );
+      const remoteFile = await downloadRemoteBackupFile(destination, path2);
+      const checksumOk = await verifyBackupArchiveFileNameChecksum(remoteFile.bytes, remoteFile.fileName || path2);
+      if (!checksumOk && !body.allowChecksumMismatch) {
+        return badRequest("Remote backup file checksum does not match its filename");
+      }
+      const result = await importAndAuditRemoteBackupFile(
+        this.env,
+        storage,
+        actorUserId,
+        remoteFile,
+        destination,
+        path2,
+        replaceExisting,
+        !checksumOk,
+        body.auditMetadata || null,
+        targetDeviceIdentifier,
+        () => this.touchJob(token)
+      );
+      return new Response(JSON.stringify(result.result), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        }
+      });
+    } catch (error) {
+      return badRequest(error instanceof Error ? error.message : "Remote backup restore failed", 500);
+    } finally {
+      await this.releaseJob(token);
+    }
+  }
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (request.method !== "POST") {
+      return badRequest("Not found", 404);
+    }
+    if (url.pathname === "/internal/run-configured-backup") {
+      return this.runConfiguredBackup(request);
+    }
+    if (url.pathname === "/internal/run-scheduled-backups") {
+      return this.runScheduledBackups();
+    }
+    if (url.pathname === "/internal/restore-remote-backup") {
+      return this.restoreRemoteBackup(request);
+    }
+    if (url.pathname === "/internal/download-remote-attachment") {
+      let body2;
+      try {
+        body2 = await request.json();
+      } catch {
+        return badRequest("Remote attachment download payload is invalid");
+      }
+      const blobName = String(body2?.blobName || "").trim();
+      if (!body2?.destination || !isSafeBackupAttachmentBlobName(blobName)) {
+        return badRequest("Remote attachment download payload is invalid");
+      }
+      const file = await downloadRemoteBackupFile(body2.destination, `attachments/${blobName}`).catch(() => null);
+      if (!file) {
+        return badRequest("Remote attachment not found", 404);
+      }
+      return new Response(file.bytes, {
+        status: 200,
+        headers: {
+          "Content-Type": file.contentType || "application/octet-stream",
+          "Cache-Control": "no-store"
+        }
+      });
+    }
+    if (url.pathname === "/internal/download-remote-attachment-batch") {
+      let body2;
+      try {
+        body2 = await request.json();
+      } catch {
+        return badRequest("Remote attachment batch download payload is invalid");
+      }
+      const blobNames = Array.from(new Set(
+        (Array.isArray(body2?.blobNames) ? body2.blobNames : []).map((blobName) => String(blobName || "").trim()).filter(isSafeBackupAttachmentBlobName)
+      ));
+      if (!body2?.destination || !blobNames.length || blobNames.length > 40) {
+        return badRequest("Remote attachment batch download payload is invalid");
+      }
+      const encoder = new TextEncoder();
+      const entries = [];
+      const files = {};
+      for (let i2 = 0; i2 < blobNames.length; i2 += 1) {
+        const blobName = blobNames[i2];
+        const file = await downloadRemoteBackupFile(body2.destination, `attachments/${blobName}`).catch(() => null);
+        if (!file) continue;
+        const path2 = `files/${i2}.bin`;
+        entries.push({ blobName, path: path2 });
+        files[path2] = file.bytes;
+      }
+      files["manifest.json"] = encoder.encode(JSON.stringify({ version: 1, entries }));
+      return new Response(zipSync(files), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/zip",
+          "Cache-Control": "no-store"
+        }
+      });
+    }
+    if (url.pathname !== "/internal/upload-attachment-chunk") {
+      return badRequest("Not found", 404);
+    }
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return badRequest("Attachment chunk payload is invalid");
+    }
+    if (!body?.destination || !Array.isArray(body.attachments)) {
+      return badRequest("Attachment chunk payload is invalid");
+    }
+    const remoteSession = createRemoteBackupTransferSession(body.destination);
+    let uploaded = 0;
+    for (const attachment of body.attachments) {
+      const blobName = String(attachment?.blobName || "").trim();
+      if (!isSafeBackupAttachmentBlobName(blobName)) {
+        return badRequest("Attachment chunk payload is invalid");
+      }
+      const object = await getBlobObject(this.env, blobName);
+      if (!object) {
+        return badRequest(`Attachment blob missing for ${blobName}`, 409);
+      }
+      const bytes = new Uint8Array(await new Response(object.body).arrayBuffer());
+      await remoteSession.putFile(`attachments/${blobName}`, bytes, {
+        contentType: object.contentType
+      });
+      uploaded += 1;
+    }
+    return new Response(JSON.stringify({
+      ok: true,
+      uploaded
+    }), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      }
+    });
+  }
+};
+
+// server/local-durable-objects.ts
+init_notifications_hub();
+var MemoryDurableObjectStorage = class {
+  values = /* @__PURE__ */ new Map();
+  alarmAt = null;
+  async get(key) {
+    return this.values.get(key);
+  }
+  async getMany(keys) {
+    const result = /* @__PURE__ */ new Map();
+    for (const key of keys) {
+      if (this.values.has(key)) result.set(key, this.values.get(key));
+    }
+    return result;
+  }
+  async put(key, value) {
+    if (typeof key === "object" && key !== null) {
+      for (const [entryKey, entryValue] of Object.entries(key)) {
+        this.values.set(entryKey, entryValue);
+      }
+      return;
+    }
+    this.values.set(key, value);
+  }
+  async delete(key) {
+    if (Array.isArray(key)) {
+      let removed = 0;
+      for (const entry of key) {
+        if (this.values.delete(entry)) removed += 1;
+      }
+      return removed;
+    }
+    return this.values.delete(key);
+  }
+  async deleteAll() {
+    this.values.clear();
+  }
+  async list(options = {}) {
+    const prefix = options.prefix ?? "";
+    const limit = Number.isFinite(options.limit) ? Number(options.limit) : Number.POSITIVE_INFINITY;
+    let keys = Array.from(this.values.keys()).filter((key) => key.startsWith(prefix)).sort();
+    if (options.reverse) keys = keys.reverse();
+    if (Number.isFinite(limit)) keys = keys.slice(0, limit);
+    const result = /* @__PURE__ */ new Map();
+    for (const key of keys) result.set(key, this.values.get(key));
+    return result;
+  }
+  async getAlarm() {
+    return this.alarmAt;
+  }
+  async setAlarm(at) {
+    this.alarmAt = typeof at === "number" ? at : at.getTime();
+  }
+  async deleteAlarm() {
+    this.alarmAt = null;
+  }
+  async transaction(closure) {
+    return closure(this);
+  }
+};
+function createState(name, storage) {
+  return {
+    id: { name, toString: () => name },
+    storage,
+    blockConcurrencyWhile: async (closure) => closure(),
+    waitUntil: (_promise) => {
+      void _promise;
+    },
+    acceptWebSocket: () => {
+      throw new Error("WebSockets are not supported on the Node runtime");
+    },
+    getWebSockets: () => [],
+    setWebSocketAutoResponse: () => {
+    },
+    getWebSocketAutoResponse: () => null,
+    setHibernatableWebSocketEventTimeout: () => {
+    }
+  };
+}
+function jsonError(message, status) {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
+  });
+}
+function createLocalDurableObjectNamespace(label, factory, getEnv) {
+  const instances = /* @__PURE__ */ new Map();
+  const storages = /* @__PURE__ */ new Map();
+  const ensureInstance = (name) => {
+    const cached2 = instances.get(name);
+    if (cached2) return cached2;
+    let storage = storages.get(name);
+    if (!storage) {
+      storage = new MemoryDurableObjectStorage();
+      storages.set(name, storage);
+    }
+    const state = createState(name, storage);
+    const pending = (async () => factory(state, getEnv()))();
+    instances.set(name, pending);
+    void pending.catch(() => {
+      if (instances.get(name) === pending) instances.delete(name);
+    });
+    return pending;
+  };
+  const toStub = (name) => ({
+    async fetch(input, init) {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+        return jsonError(`${label} does not support WebSocket upgrades on the Node runtime`, 501);
+      }
+      let instance;
+      try {
+        instance = await ensureInstance(name);
+      } catch (error) {
+        return jsonError(
+          `${label} failed to start: ${error instanceof Error ? error.message : String(error)}`,
+          500
+        );
+      }
+      return instance.fetch(request);
+    }
+  });
+  return {
+    idFromName(name) {
+      return { name: String(name) };
+    },
+    idFromString(id) {
+      return { name: String(id) };
+    },
+    get(id) {
+      return toStub(String(id?.name ?? ""));
+    }
+  };
+}
+function installDurableObjectGlobals() {
+  const globals = globalThis;
+  if (!globals.WebSocketRequestResponsePair) {
+    globals.WebSocketRequestResponsePair = class WebSocketRequestResponsePair {
+      constructor(request, response) {
+        this.request = request;
+        this.response = response;
+      }
+      request;
+      response;
+    };
+  }
+}
+function createLocalNotificationsHubNamespace(getEnv) {
+  installDurableObjectGlobals();
+  return createLocalDurableObjectNamespace(
+    "NOTIFICATIONS_HUB",
+    (ctx, env) => new NotificationsHub(ctx, env),
+    getEnv
+  );
+}
+function createLocalBackupRunnerNamespace(getEnv) {
+  return createLocalDurableObjectNamespace(
+    "BACKUP_TRANSFER_RUNNER",
+    (ctx, env) => new BackupTransferRunner(ctx, env),
+    getEnv
+  );
+}
+
 // server/index.ts
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
 var ROOT_DIR = path.resolve(__dirname, "..");
@@ -46091,20 +47178,7 @@ var cachesShim = {
   }
 };
 globalThis.caches = cachesShim;
-function createDoStub() {
-  return {
-    idFromName(name) {
-      return { name };
-    },
-    get(_id) {
-      return {
-        async fetch(_request) {
-          return jsonResponse({ error: "durable-objects-unavailable", ErrorModel: { Message: "Realtime hub unavailable on Node runtime; clients fall back to polling.", Object: "error" } }, 501);
-        }
-      };
-    }
-  };
-}
+installDurableObjectGlobals();
 var MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -46139,11 +47213,17 @@ async function serveAssets(request) {
     }
   }
 }
+var sharedEnv = null;
 function buildEnv() {
-  return {
+  if (sharedEnv) return sharedEnv;
+  const env = {
     DB: null,
-    NOTIFICATIONS_HUB: createDoStub(),
-    BACKUP_TRANSFER_RUNNER: createDoStub(),
+    NOTIFICATIONS_HUB: createLocalNotificationsHubNamespace(
+      () => buildEnv()
+    ),
+    BACKUP_TRANSFER_RUNNER: createLocalBackupRunnerNamespace(
+      () => buildEnv()
+    ),
     ASSETS: { fetch: (input) => serveAssets(toRequest(input)) },
     ATTACHMENTS: fsR2,
     SETTINGS_KV: fileKv,
@@ -46162,6 +47242,8 @@ function buildEnv() {
     DB_CONN_LIMIT: process.env.DB_CONN_LIMIT,
     DB_CONFIG_KEY: process.env.DB_CONFIG_KEY
   };
+  sharedEnv = env;
+  return sharedEnv;
 }
 function toRequest(input) {
   if (input instanceof Request) return input;
