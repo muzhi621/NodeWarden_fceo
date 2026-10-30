@@ -153,8 +153,18 @@ npm run dev:kv
 | 环境变量配置 | 也可以直接用 `DB_HOST` 等环境变量（优先级高于前台配置） |
 | MySQL 适配器 | 业务 SQL 自动从 SQLite/D1 方言翻译为 MySQL（含 upsert/json/PRAGMA 等 20+ 处差异），19 张表自动建表 |
 | 双存储路由 | 未配置 MySQL 时自动使用 D1（Cloudflare Workers 原样可用）；配置后即时切换，无需重启 |
-| 健康检查 | `GET /healthz` 返回数据库模式、连接状态、版本 |
+| 健康检查 | `GET /healthz` 返回数据库模式与连接状态（不再回显驱动错误和版本号） |
 | 数据迁移 | 用内置备份导出/导入（`/api/admin/backup`）把 D1 数据搬到 MySQL（见下文） |
+
+> 📦 **开箱即用的阿里云 FC 部署包**：每个 [Release](https://github.com/muzhi621/NodeWarden_fceo/releases)
+> 都附带 `nodewarden-fc.zip`（已构建好前端与后端 bundle，免装依赖直接上传）。
+> 规格选型、环境变量、平台定时备份、旧库升级 SQL 见 **[FC-DEPLOY.md](FC-DEPLOY.md)**。
+>
+> 与本家（上游）行为的三处差异，升级前务必知道：
+> - **TLS 默认校验证书**：自签库设 `DB_SSL_INSECURE=1`，更好的是把 `DB_SSL_CA` 指向 PEM；
+> - 后台「测试连接」默认拒绝内网/回环地址，自建库在内网需把 host 加进 `DB_HOST_ALLOWLIST`；
+> - **定时备份改为平台触发**：`POST /internal/cron/backup` + `x-cron-secret` 头（`CRON_SECRET`），
+>   不再用进程内定时器（避免多实例重复跑、缩容到 0 后停摆）；单机自托管可用 `INPROCESS_CRON=1` 恢复旧行为。
 
 ### 2. 快速开始（Node.js + 外接 MySQL）
 
@@ -256,10 +266,11 @@ npm run deploy:kv   # KV 模式
 ### 7. 测试与验证
 
 ```bash
-npm run test:mysql-dialect   # SQL 方言翻译器单元测试（22 项）
+npm run test:mysql-dialect   # SQL 方言翻译器单元测试
+npm run test:db-lifecycle    # 切库/初始化生命周期测试
 npx tsc --noEmit             # 类型检查
 npm run build                # 前端构建
-curl http://localhost:8787/healthz   # 健康检查（返回数据库模式/版本/延迟）
+curl http://localhost:8787/healthz   # 健康检查（返回数据库模式/连接状态）
 ```
 
 ---

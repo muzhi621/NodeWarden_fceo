@@ -157,8 +157,28 @@ npm run start:node          # http://localhost:8787
 ```
 
 Then open **Admin → Database settings** (`/admin/database`) to edit/test the connection
-(AES-256-GCM encrypted, password never echoed). `/healthz` reports DB mode/version.
+(AES-256-GCM encrypted, password never echoed). `/healthz` reports DB mode and connectivity
+only — driver errors and the version string are no longer echoed to unauthenticated callers.
 Without `DB_HOST` the app falls back to D1 — `npm run deploy` works exactly like upstream.
+
+### Deploying to Aliyun FC / self-hosting Node
+
+A prebuilt, upload-ready package is attached to every
+[release](https://github.com/muzhi621/NodeWarden_fceo/releases) (`nodewarden-fc.zip`).
+Sizing that stays inside the free tier, the full env-var table, the scheduled-backup trigger
+and the manual SQL for upgrading older databases are in **[FC-DEPLOY.md](FC-DEPLOY.md)**.
+
+Three behaviours differ from upstream's Node story:
+
+- **TLS is verified by default.** For self-signed databases set `DB_SSL_INSECURE=1`, or preferably
+  point `DB_SSL_CA` at the PEM bundle. The admin "test connection" button refuses hosts that
+  resolve to loopback/private/link-local ranges unless they are listed in `DB_HOST_ALLOWLIST`.
+- **Scheduled backups are triggered by the platform**, not an in-process timer:
+  `POST /internal/cron/backup` with an `x-cron-secret` header (`CRON_SECRET`). This avoids
+  duplicate runs across instances and survives scale-to-zero. `INPROCESS_CRON=1` restores the
+  old timer for single-node self-hosting only.
+- **Request bodies are capped** at `MAX_BODY_MB` (default 100) and oversized uploads get a 413
+  instead of exhausting memory.
 
 Notes on the Node runtime: Durable Objects run in-process with in-memory state
 (`server/local-durable-objects.ts`), so the backup centre (manual/scheduled runs,
@@ -167,6 +187,10 @@ upgrades still return 501, so realtime push degrades to client polling, and DO
 state is per-process (lost on cold start).
 See `README_ZH.md` (外接数据库部署教程) for the full tutorial: TiDB Serverless setup,
 D1→MySQL data migration, FC/SCF/EdgeOne deployment options, and Dockerfile.
+
+> **Upgrading an existing MySQL database?** Read FC-DEPLOY.md §6 first — two schema fixes
+> (JSON columns back to `LONGTEXT`, and dropping the 191-byte prefix from the
+> `webauthn_credentials.credential_id` unique index) are applied by hand on old databases.
 
 ---
 
