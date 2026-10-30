@@ -1,12 +1,15 @@
 # NodeWarden BYO-DB — 阿里云 FC 部署说明
 
 > 本文件在**仓库根目录**与**部署 ZIP 根目录**各存一份，内容一致。
-> 部署包是为「阿里云函数计算 FC · Web 函数」准备的可直接上传 ZIP。
-> 代码来源：分支 `fix/node-durable-objects`（BYO-DB + Node 运行时 + 本轮代码审查修复）。
+> 部署包是为「阿里云函数计算 FC · Web 函数」准备的可直接上传 ZIP，版本 **v1.8.3**。
+> 代码来源：分支 `test`（BYO-DB + Node 运行时 + 两轮代码审查修复）。
 > 遵循用户铁律：本包/分支独立，**不合并、不影响现有分支**。
 >
 > 注：下文的「包内容」以 **ZIP 包**为准。仓库里的 `node_modules/` 是完整开发依赖，
 > `dist/`、`server/index.mjs` 需自行构建（见第九节）；`fc-entry.mjs` 只存在于 ZIP 中。
+>
+> **从 v1.8.2 升级**：本次只改了 `dist/`（前端）与 `server/index.mjs`（后端），
+> 数据库结构未变，**不需要跑任何 SQL**；直接替换这两处后重启函数即可。
 
 ## 一、包内容
 - `server/index.mjs`：**已用 esbuild 打包好的后端（纯 JS，运行时不需要 tsx/esbuild）**
