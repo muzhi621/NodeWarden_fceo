@@ -44,6 +44,12 @@ export async function getAttachmentForUser(db: D1Database, id: string, userId: s
 }
 
 export async function saveAttachment(db: D1Database, safeBind: SafeBind, attachment: Attachment): Promise<void> {
+  // The ON CONFLICT ... WHERE EXISTS guard becomes the IF(...) condition of an
+  // ON DUPLICATE KEY UPDATE. Its subquery reads `attachments` (the row being
+  // inserted) and `ciphers`; MySQL error 1093 ("can't specify target table for
+  // update in FROM clause") only fires when a subquery selects from the table
+  // being *written*, so this stays legal as long as the guard does not read
+  // `attachments` directly — keep any new condition on `excluded.*`/`ciphers`.
   const stmt = db.prepare(
     'INSERT INTO attachments(id, cipher_id, file_name, size, size_name, key) VALUES(?, ?, ?, ?, ?, ?) ' +
     'ON CONFLICT(id) DO UPDATE SET cipher_id=excluded.cipher_id, file_name=excluded.file_name, size=excluded.size, size_name=excluded.size_name, key=excluded.key ' +

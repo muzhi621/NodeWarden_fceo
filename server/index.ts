@@ -363,19 +363,23 @@ function nodeRequestToRequest(req: http.IncomingMessage, body: Buffer): Request 
   return new Request(url, init);
 }
 
-async function writeResponse(res: http.ServerResponse, response: Response): Promise<void> {
+async function writeResponse(res: http.ServerResponse, response: Response, requestMethod = 'GET'): Promise<void> {
   const headers: Record<string, string | string[]> = {};
+  // Bodies are not written for HEAD or for status codes that forbid one, and in
+  // those cases the length header is the only information the client gets.
+  const bodyless = requestMethod === 'HEAD' || response.status === 204 || response.status === 304;
   response.headers.forEach((value, key) => {
     // Node decides framing for a streamed body; forwarding these two would either
     // be wrong (content-length after re-chunking) or rejected by writeHead.
-    if (key === 'content-length' || key === 'transfer-encoding') return;
+    if (key === 'transfer-encoding') return;
+    if (key === 'content-length' && !bodyless) return;
     const existing = headers[key];
     if (existing === undefined) headers[key] = value;
     else if (Array.isArray(existing)) existing.push(value);
     else headers[key] = [existing, value];
   });
   res.writeHead(response.status, headers);
-  if (!response.body) {
+  if (bodyless || !response.body) {
     res.end();
     return;
   }
@@ -383,10 +387,29 @@ async function writeResponse(res: http.ServerResponse, response: Response): Prom
   // memory and OOMed small FC instances on large attachment downloads.
   const nodeStream = Readable.fromWeb(response.body as unknown as NodeWebReadableStream);
   nodeStream.on('error', () => res.destroy());
+  // Client aborted mid-download (or the connection died): destroy the source too,
+  // otherwise an R2/file stream stays open until GC and leaks a file descriptor
+  // on a long-running instance.
+  res.on('close', () => nodeStream.destroy());
   nodeStream.pipe(res);
 }
 
-const MAX_BODY_BYTES = Math.max(1, Number(process.env.MAX_BODY_MB || 100)) * 1024 * 1024;
+/**
+ * Body-size ceiling in bytes.
+ *
+ * `Number('abc')` is NaN, and every `received > NaN` comparison is false — a typo
+ * in MAX_BODY_MB used to disable the limit silently instead of falling back.
+ */
+const MAX_BODY_BYTES = ((): number => {
+  const raw = process.env.MAX_BODY_MB;
+  if (raw === undefined || raw.trim() === '') return 100 * 1024 * 1024;
+  const megabytes = Number(raw);
+  if (!Number.isFinite(megabytes) || megabytes <= 0) {
+    console.warn(`[server] MAX_BODY_MB="${raw}" is not a positive number, using 100 MB`);
+    return 100 * 1024 * 1024;
+  }
+  return Math.floor(megabytes * 1024 * 1024);
+})();
 
 const server = http.createServer((req, res) => {
   const chunks: Buffer[] = [];
@@ -413,11 +436,11 @@ const server = http.createServer((req, res) => {
         const body = Buffer.concat(chunks);
         const request = nodeRequestToRequest(req, body);
         const response = await pipeline(request, env);
-        await writeResponse(res, response);
+        await writeResponse(res, response, request.method);
       } catch (error) {
         console.error('Unhandled request error:', error);
         try {
-          await writeResponse(res, jsonResponse({ error: 'Internal server error' }, 500));
+          await writeResponse(res, jsonResponse({ error: 'Internal server error' }, 500), req.method || 'GET');
         } catch {
           res.destroy();
         }

@@ -1,4 +1,5 @@
 import { useState } from 'preact/hooks';
+import { Link } from 'wouter';
 import { ChevronLeft, ChevronRight, Clipboard, Plus, RefreshCw, Trash2, UserCheck, UserX } from 'lucide-preact';
 import { copyTextToClipboard } from '@/lib/clipboard';
 import LoadingState from '@/components/LoadingState';
@@ -226,7 +227,9 @@ export default function AdminPage(props: AdminPageProps) {
       <section className="card">
         <div className="section-head">
           <h3>数据库设置（外接 MySQL）</h3>
-          <a className="btn btn-secondary small" href="/admin/database">打开</a>
+          {/* Client-side navigation: a plain <a> forced a full reload, which threw
+              away the loaded profile and made the target page resolve as unknown. */}
+          <Link className="btn btn-secondary small" href="/admin/database">打开</Link>
         </div>
         <p className="muted-inline">配置外接 MySQL（TiDB / 自建 / 云数据库）连接，支持测试连接、加密保存与一键建表。</p>
       </section>

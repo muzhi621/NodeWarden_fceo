@@ -159,6 +159,30 @@ export function unsupportedResponse(message: string = 'This feature is not suppo
   return errorResponse(message, 501);
 }
 
+/**
+ * Unique-constraint violation, on either backend.
+ *
+ * D1/SQLite says `UNIQUE constraint failed: users.email`, MySQL says
+ * `ER_DUP_ENTRY` / errno 1062. Register used to rely on a "check, then insert"
+ * TOCTOU window; since the MySQL adapter now raises on a duplicate email (rather
+ * than overwriting another account), the lost race has to be translated instead
+ * of surfacing as a 500.
+ */
+export function isDuplicateKeyError(error: unknown): boolean {
+  const errno = Number((error as { errno?: number })?.errno ?? 0);
+  const code = String((error as { code?: string })?.code ?? '');
+  if (errno === 1062 || code === 'ER_DUP_ENTRY') return true;
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /UNIQUE constraint failed|Duplicate entry .* for key/i.test(message);
+}
+
+/** 409 — the request was well formed but collides with existing data. */
+export function conflictResponse(
+  message: string = 'An account or record with these details already exists.'
+): Response {
+  return errorResponse(message, 409);
+}
+
 // Identity endpoint error response (for /identity/connect/token)
 export function identityErrorResponse(
   message: string,

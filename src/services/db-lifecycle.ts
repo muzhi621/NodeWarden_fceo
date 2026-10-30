@@ -23,7 +23,8 @@ export type DbResolver = (env: Env) => Promise<D1Database>;
 
 let initializedKey: string | null = null;
 let dbInitError: string | null = null;
-let dbInitPromise: Promise<void> | null = null;
+/** In-flight schema init per database target (see S-1 in the review notes). */
+const initPromises = new Map<string, Promise<void>>();
 
 export function getDbInitError(): string | null {
   return dbInitError;
@@ -37,7 +38,7 @@ export function isDbInitialized(): boolean {
 export function resetDbLifecycle(): void {
   initializedKey = null;
   dbInitError = null;
-  dbInitPromise = null;
+  initPromises.clear();
 }
 
 /** Test hook: clear module state between test cases. */
@@ -93,8 +94,14 @@ export async function ensureDatabaseInitialized(
   const schemaKey = StorageService.schemaKeyFor(db);
   if (initializedKey === schemaKey) return;
 
-  if (!dbInitPromise) {
-    dbInitPromise = (async () => {
+  // One promise *per database*, not one per process: while the schema for the
+  // old database is still being created, a request that already sees the new
+  // config must not await that promise and then run on tables that do not exist
+  // yet. The window is only a few hundred ms, but it is exactly when the admin
+  // page and its polling are hammering the server.
+  let pending = initPromises.get(schemaKey);
+  if (!pending) {
+    pending = (async () => {
       await new StorageService(db).initializeDatabase();
       initializedKey = schemaKey;
       dbInitError = null;
@@ -104,8 +111,9 @@ export async function ensureDatabaseInitialized(
         console.error('Database initialization failed:', error);
       })
       .finally(() => {
-        dbInitPromise = null;
+        initPromises.delete(schemaKey);
       });
+    initPromises.set(schemaKey, pending);
   }
-  await dbInitPromise;
+  await pending;
 }

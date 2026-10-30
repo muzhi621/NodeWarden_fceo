@@ -1,6 +1,6 @@
 {
   "name": "nodewarden",
-  "version": "1.8.2",
+  "version": "1.8.3",
   "description": "Minimal Bitwarden-compatible server running on Cloudflare Workers",
   "author": "shuaiplus",
   "license": "LGPL-3.0",
@@ -27,6 +27,9 @@
     "test:webauthn-connectors": "node --test scripts/webauthn-mobile-connector.test.mjs scripts/webauthn-connector.test.mjs && tsx --test scripts/webauthn-connector-headers.test.ts",
     "test:mysql-dialect": "tsx --test scripts/mysql-dialect.test.ts scripts/mysql-catalog.test.ts scripts/mysql-backup-ddl.test.ts",
     "test:node-runtime": "node --import ./server/register-cf-stub.mjs --import tsx --test scripts/local-durable-objects.test.ts",
+    "test:app-routes": "tsx --test scripts/app-routes.test.ts",
+    "test:db-config-save": "tsx --test scripts/db-config-save.test.ts",
+    "test:db-policy": "tsx --test scripts/db-host-policy.test.ts",
     "test:db-lifecycle": "tsx --test scripts/db-lifecycle.test.ts",
     "migrate:d1-to-mysql": "tsx scripts/migrate-d1-to-mysql.ts",
     "start:node": "node --import ./server/register-cf-stub.mjs --import tsx server/index.ts",

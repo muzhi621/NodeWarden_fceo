@@ -469,6 +469,10 @@ export default function AppMainRoutes(props: AppMainRoutesProps) {
           <Suspense fallback={<RouteContentFallback />}>
             <DatabaseSettingsPage authedFetch={props.authedFetch} mobileLayout={props.mobileLayout} onMobileBack={() => props.onNavigate('/admin')} />
           </Suspense>
+        ) : props.profileLoading ? (
+          // On a hard load of /admin/database the profile is still in flight; an
+          // immediate 404 told admins the page did not exist.
+          <LoadingState card lines={5} />
         ) : (
           <NotFoundPage />
         )}

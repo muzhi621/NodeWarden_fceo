@@ -87,13 +87,35 @@ function isDuplicateDdlError(error: unknown): boolean {
 const IGNORABLE_DDL_ERRNOS = new Set([1050, 1060, 1061]);
 const IGNORABLE_DDL_CODES = new Set(['ER_TABLE_EXISTS_ERROR', 'ER_DUP_FIELDNAME', 'ER_DUP_KEYNAME']);
 
-/** Connection-level failures worth one retry on a fresh pool. */
+/**
+ * Failures that mean the connection died *after* the statement was sent.
+ *
+ * The server may well have executed the statement before the socket broke, so
+ * retrying an INSERT here duplicates rows (audit_logs has no unique key to save
+ * us). These are only retried for read-only statements.
+ */
 const RETRYABLE_CONN_CODES = new Set([
   'ECONNRESET',
   'EPIPE',
   'PROTOCOL_CONNECTION_LOST',
   'ER_CLIENT_INTERACTION_TIMEOUT',
+  // The server dropped the idle connection out from under mysql2: the statement
+  // never started, so even a write can be replayed safely.
+  'PROTOCOL_SEQUENCE_TIMEOUT',
 ]);
+
+/** Failures that happen before any statement reaches the server: always safe to retry. */
+const RETRYABLE_PRECONNECT_CODES = new Set([
+  'ECONNREFUSED',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENOTFOUND',
+  'ETIMEDOUT',
+  'ER_CON_COUNT_ERROR',
+]);
+
+/** Statements with no side effects — the only ones worth replaying after a reset. */
+const READ_ONLY_SQL = /^\s*(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i;
 
 function isDdlStatement(sql: string): boolean {
   return /^\s*(CREATE|ALTER|DROP)\b/i.test(sql);
@@ -227,7 +249,18 @@ export class MySqlDatabase implements D1LikeDatabase {
           typeCast: (field: { type: string; string(): string | null }, next: () => unknown) => {
             if (field.type === 'LONGLONG' || field.type === 'NEWDECIMAL') {
               const raw = field.string();
-              return raw === null ? null : Number(raw);
+              if (raw === null) return null;
+              const numeric = Number(raw);
+              if (!Number.isFinite(numeric)) return raw;
+              if (field.type === 'LONGLONG') {
+                // BIGINT above 2^53 turns into a wrong number silently (ids,
+                // counters). Keep the exact digits instead.
+                return Number.isSafeInteger(numeric) ? numeric : raw;
+              }
+              // DECIMAL: only convert when the double holds every significant
+              // digit; SUM()/COUNT() results are small, money is not.
+              const digits = raw.replace(/[-.]/g, '').replace(/^0+/, '').length;
+              return digits <= 15 ? numeric : raw;
             }
             return next();
           },
@@ -257,7 +290,13 @@ export class MySqlDatabase implements D1LikeDatabase {
       return await pool.query(sql, params);
     } catch (error) {
       const code = String((error as { code?: string })?.code ?? '');
-      if (RETRYABLE_CONN_CODES.has(code)) {
+      // A dead socket is only replayable when the statement had no side effects;
+      // otherwise the retry can insert a second row. "Never connected" failures
+      // are safe for anything.
+      const retryable =
+        RETRYABLE_PRECONNECT_CODES.has(code) ||
+        (RETRYABLE_CONN_CODES.has(code) && READ_ONLY_SQL.test(sql));
+      if (retryable) {
         // One retry after forcing a fresh pool.
         await this.close();
         return await (await this.getPool()).query(sql, params);
@@ -268,6 +307,27 @@ export class MySqlDatabase implements D1LikeDatabase {
 
   prepare(sql: string): D1LikeStatement {
     return new MySqlStatement(this, translateSql(sql), sql);
+  }
+
+  /**
+   * Remote address the pool actually connected to, or null when it cannot be read.
+   *
+   * mysql2 exposes the underlying `net.Socket` on the core (non-promise)
+   * connection. The admin "test connection" endpoint uses this as the second
+   * half of its SSRF guard: the address handed out by the resolver can differ
+   * from the one the socket landed on (DNS rebinding), and only the socket knows.
+   */
+  async peerAddress(): Promise<string | null> {
+    const pool = await this.getPool();
+    const conn = await pool.getConnection();
+    try {
+      const core = (conn as unknown as { connection?: { stream?: { remoteAddress?: string } } }).connection;
+      return core?.stream?.remoteAddress ?? null;
+    } catch {
+      return null;
+    } finally {
+      conn.release();
+    }
   }
 
   async batch(statements: D1LikeStatement[]): Promise<D1LikeResult[]> {
@@ -282,7 +342,13 @@ export class MySqlDatabase implements D1LikeDatabase {
       await conn.beginTransaction();
       for (const statement of statements) {
         const stmt = statement as MySqlStatement;
-        const sql = typeof stmt.getSql === 'function' ? stmt.getSql() : translateSql('');
+        // D1 statements are opaque; anything that is not ours cannot be executed
+        // here. The old fallback sent `translateSql('')` — an empty query — which
+        // surfaced as a confusing 1054/1064 far from the actual mistake.
+        if (typeof stmt.getSql !== 'function') {
+          throw new Error('[mysql] batch() received a statement that was not created by this database adapter');
+        }
+        const sql = stmt.getSql();
         const params = typeof stmt.getParams === 'function' ? stmt.getParams() : [];
         try {
           const [rawResult] = await conn.query(sql, params);

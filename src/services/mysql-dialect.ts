@@ -25,6 +25,8 @@
 //    used to break EVERY request once the schema version marker was stored, because
 //    StorageService.hasRequiredSchemaTables() always queries that catalog first.)
 // - LIMIT -1 (SQLite "no limit")                -> LIMIT 18446744073709551615
+// - trailing `;`                                -> stripped (MySQL rejects it via the driver)
+// - ON CONFLICT (no target) DO NOTHING          -> ON DUPLICATE KEY UPDATE <first inserted col>=<col>
 //
 // KNOWN NON-EQUIVALENCES (deliberate, documented — do not "fix" by guessing):
 // 1. `ON CONFLICT(<cols>) DO UPDATE` — MySQL's ON DUPLICATE KEY fires for ANY
@@ -42,6 +44,12 @@
 // 4. `PRAGMA table_info(t)` only exposes column names (no type/notnull/default).
 //    The single caller only needs names; anything richer must use
 //    information_schema directly.
+// 5. A UNIQUE index on an *unbounded* column (LONGTEXT) is emitted with a 191
+//    character prefix, because MySQL rejects indexing a LOB without one (1170).
+//    Uniqueness then only covers the prefix: two values that share their first
+//    191 characters collide. No table currently does this (see S-9); if one ever
+//    needs it, the column must be bounded (VARCHAR) instead. translateCreateIndex
+//    logs a warning when it happens.
 
 const STRING_INDEX_COLUMNS = new Set([
   'id', 'user_id', 'cipher_id', 'folder_id', 'device_identifier', 'request_device_identifier',
@@ -133,8 +141,88 @@ function findMatchingParen(text: string, openIndex: number): number {
   return -1;
 }
 
+/**
+ * Split on commas that are not inside parentheses or string literals.
+ *
+ * `setTail.split(',')` used to be enough for `a=excluded.a, b=excluded.b`, but a
+ * single function call (`COALESCE(x, 'y')`, `JSON_SET(doc, '$.a', 1)`) contains
+ * commas of its own. Splitting there produces balanced, syntactically valid —
+ * and silently wrong — SQL: the tail of the function call ends up as the ELSE
+ * branch of the guard `IF(...)`, so a non-matching conflict writes a literal
+ * into the column instead of leaving the row alone.
+ */
+function splitTopLevel(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let inString = false;
+  let current = '';
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      current += ch;
+      if (ch === "'") inString = false;
+      continue;
+    }
+    if (ch === "'") {
+      inString = true;
+      current += ch;
+      continue;
+    }
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth -= 1;
+    if (ch === ',' && depth === 0) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) parts.push(current);
+  return parts;
+}
+
+/**
+ * Split `SET <assignments> [WHERE <cond>]` at the first *top-level* WHERE.
+ * The previous "first ` WHERE `" search matched a WHERE inside a subquery or a
+ * string literal and cut the statement in the wrong place.
+ */
+function splitTopLevelWhere(text: string): { assignments: string; where: string } {
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "'") inString = false;
+      continue;
+    }
+    if (ch === "'") {
+      inString = true;
+      continue;
+    }
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth -= 1;
+    else if (depth === 0 && /\s/.test(ch)) {
+      const rest = text.slice(i);
+      const match = rest.match(/^\s+WHERE\s+/i);
+      if (match) {
+        return { assignments: text.slice(0, i), where: rest.slice(match[0].length) };
+      }
+    }
+  }
+  return { assignments: text, where: '' };
+}
+
+/** First column of `INSERT INTO t(col, ...) VALUES(...)`, used as a no-op SET target. */
+function firstInsertedColumn(head: string): string | null {
+  const match = head.match(/INSERT\s+(?:OR\s+[A-Za-z]+\s+)?INTO\s+[A-Za-z0-9_`".]+\s*\(([^)]*)\)/i);
+  if (!match) return null;
+  const first = (match[1].split(',')[0] ?? '').trim().replace(/["`]/g, '');
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(first) ? first : null;
+}
+
 function rewriteOnConflict(sql: string): string {
-  const conflictRe = /\bON\s+CONFLICT\s*\(([^)]*)\)\s*DO\s+(NOTHING|UPDATE\s+SET\s+([\s\S]*))$/i;
+  // SQLite allows omitting the conflict target (`ON CONFLICT DO NOTHING`).
+  const conflictRe = /\bON\s+CONFLICT(?:\s*\(([^)]*)\))?\s+DO\s+(NOTHING|UPDATE\s+SET\s+([\s\S]*))$/i;
   const match = sql.match(conflictRe);
   if (!match) return sql;
 
@@ -147,17 +235,20 @@ function rewriteOnConflict(sql: string): string {
 
   if (action.startsWith('NOTHING')) {
     // A no-op assignment: the row is left untouched whatever key conflicted.
-    const firstCol = quoteIdentifier(conflictCols[0] || 'id');
-    return `${head}ON DUPLICATE KEY UPDATE ${firstCol}=${firstCol}`;
+    // Without an explicit target, any column of the inserted row works — the
+    // column list of the INSERT is the only one we can prove exists.
+    const noopColumn = conflictCols[0] || firstInsertedColumn(head);
+    if (!noopColumn) {
+      // No conflict target and no parseable column list: INSERT IGNORE is the
+      // only construct MySQL has for "skip the row on any duplicate".
+      return head.replace(/\bINSERT\b/i, 'INSERT IGNORE').replace(/\s+$/, '');
+    }
+    const quoted = quoteIdentifier(noopColumn);
+    return `${head}ON DUPLICATE KEY UPDATE ${quoted}=${quoted}`;
   }
 
-  let setTail = match[3] || '';
-  let whereCond = '';
-  const whereMatch = setTail.match(/\s+WHERE\s+([\s\S]+)$/i);
-  if (whereMatch) {
-    whereCond = whereMatch[1].trim();
-    setTail = setTail.slice(0, whereMatch.index);
-  }
+  const { assignments: setTailRaw, where: whereCond } = splitTopLevelWhere(match[3] || '');
+  const setTail = setTailRaw;
 
   // SQLite only handles the *named* conflict target; MySQL fires for any unique
   // key and would rewrite the row that actually conflicted (a different row!).
@@ -172,7 +263,7 @@ function rewriteOnConflict(sql: string): string {
   const guard = [guardParts.join(' AND '), whereSql].filter(Boolean).join(' AND ');
 
   const assignments: string[] = [];
-  for (const item of setTail.split(',').map((s) => s.trim()).filter(Boolean)) {
+  for (const item of splitTopLevel(setTail).map((s) => s.trim()).filter(Boolean)) {
     const expr = item.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, 'VALUES($1)');
     const assignMatch = expr.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([\s\S]+)$/);
     if (!assignMatch) {
@@ -188,8 +279,17 @@ function rewriteOnConflict(sql: string): string {
   return `${head}ON DUPLICATE KEY UPDATE ${assignments.join(', ')}`;
 }
 
+/**
+ * Quote an identifier only when it is not a plain snake_case name.
+ *
+ * Repository SQL only ever uses `[a-z0-9_]` column names, and adding backticks
+ * everywhere would churn 200+ test expectations for no behavioural gain. Anything
+ * unusual (dashes, spaces, a stray quote) is backticked so it cannot turn into
+ * SQL. Reserved words are handled separately by quoteKeyIdentifier().
+ */
 function quoteIdentifier(name: string): string {
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : name;
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return name;
+  return `\`${name.replace(/`/g, '``')}\``;
 }
 
 // Column types that may follow a column literally named `key` (`key TEXT`).
@@ -415,6 +515,15 @@ function translateCreateIndex(sql: string): string {
       // credential ids would be rejected as duplicates). When the column is a
       // known bounded VARCHAR, index the whole value instead.
       if (isUnique && kind === 'text') return col;
+      if (isUnique && kind === 'lob') {
+        // MySQL cannot index a LOB without a prefix length (1170), so uniqueness
+        // degrades to "first 191 characters are unique" — see KNOWN
+        // NON-EQUIVALENCES #5. Loud, because it is a silent correctness change.
+        console.warn(
+          `[mysql-dialect] UNIQUE index on LONGTEXT column ${table}.${plain} can only use a 191-char prefix; ` +
+            'uniqueness will not cover the whole value. Make the column a bounded VARCHAR instead.'
+        );
+      }
       if (kind === 'text' || kind === 'lob' || (kind === undefined && STRING_INDEX_COLUMNS.has(plain))) {
         return `${plain}(191)`;
       }
@@ -474,7 +583,11 @@ function rewriteSqliteCatalog(sql: string, literals: string[]): string {
 }
 
 export function translateSql(input: string): string {
-  let sql = input.trim();
+  // A trailing semicolon is legal in SQLite (and common in hand-written SQL):
+  // MySQL rejects it through the prepared-statement protocol with ER_PARSE_ERROR,
+  // and it also broke the `$`-anchored ON CONFLICT matcher (the `;` ended up
+  // inside the last assignment).
+  let sql = input.trim().replace(/;\s*$/, '').trim();
   if (!sql) return sql;
 
   if (/^\s*PRAGMA\b/i.test(sql)) {

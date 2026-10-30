@@ -108,7 +108,10 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
         }
         await load();
       } else {
-        setNotice({ kind: 'error', text: result.error || '保存失败' });
+        setNotice({
+          kind: 'error',
+          text: result.schemaError ? `${result.error}（${result.schemaError}）` : result.error || '保存失败',
+        });
       }
     } catch (error) {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : String(error) });

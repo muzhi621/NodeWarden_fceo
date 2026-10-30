@@ -56,30 +56,67 @@ export async function resetDatabaseCache(): Promise<void> {
     await cached.db.close();
   }
   cached = null;
+  statusCache = null;
 }
 
-export async function getDatabaseStatus(env: Env): Promise<{ mode: 'mysql' | 'd1'; source: string; ok: boolean; error?: string; version?: string }> {
+/**
+ * `/healthz` is unauthenticated and polled by monitoring; every call used to cost
+ * a full MySQL round trip (`SELECT VERSION()`) on a pool of five connections, so
+ * hammering the endpoint could starve real traffic. Results are cached briefly —
+ * long enough to absorb polling, short enough that a real outage still shows up.
+ */
+const STATUS_CACHE_MS = 5_000;
+let statusCache: { key: string; at: number; value: DatabaseStatus } | null = null;
+
+export interface DatabaseStatus {
+  mode: 'mysql' | 'd1';
+  source: string;
+  ok: boolean;
+  error?: string;
+  version?: string;
+}
+
+export async function getDatabaseStatus(env: Env): Promise<DatabaseStatus> {
+  let mode: 'mysql' | 'd1' = 'd1';
+  let source = 'd1';
+  let cacheKey = 'd1';
   try {
     const config = await resolveDbConfig(env);
+    mode = config.mode;
+    source = config.source;
+    cacheKey = [config.mode, config.host, config.port, config.database].join('|');
+
+    if (statusCache && statusCache.key === cacheKey && Date.now() - statusCache.at < STATUS_CACHE_MS) {
+      return statusCache.value;
+    }
+
     if (config.mode === 'd1' && !env.DB) {
-      return {
+      const missing: DatabaseStatus = {
         mode: 'd1',
         source: 'd1',
         ok: false,
         error: 'D1 binding missing on this runtime. Configure an external MySQL (DB_* env vars or the admin UI at /admin/database).',
       };
+      statusCache = { key: cacheKey, at: Date.now(), value: missing };
+      return missing;
     }
     const db = await getDatabase(env);
     if (config.mode === 'mysql') {
       const row = await db.prepare('SELECT VERSION() AS version').first<{ version: string }>();
-      return { mode: 'mysql', source: config.source, ok: true, version: row?.version };
+      const status: DatabaseStatus = { mode: 'mysql', source: config.source, ok: true, version: row?.version };
+      statusCache = { key: cacheKey, at: Date.now(), value: status };
+      return status;
     }
     await db.prepare('SELECT 1 AS ok').first();
-    return { mode: 'd1', source: 'd1', ok: true };
+    const status: DatabaseStatus = { mode: 'd1', source: 'd1', ok: true };
+    statusCache = { key: cacheKey, at: Date.now(), value: status };
+    return status;
   } catch (error) {
+    // Keep the real mode: reporting `mode: 'd1'` for a broken MySQL made the
+    // health output actively misleading for whoever reads the dashboard.
     return {
-      mode: 'd1',
-      source: 'd1',
+      mode,
+      source,
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     };

@@ -1,7 +1,7 @@
 import { Env } from './types';
 import { AuthService } from './services/auth';
 import { RateLimitService, getClientIdentifier } from './services/ratelimit';
-import { handleCors, errorResponse } from './utils/response';
+import { handleCors, errorResponse, conflictResponse, isDuplicateKeyError } from './utils/response';
 import { LIMITS } from './config/limits';
 import { handleAuthenticatedRoute } from './router-authenticated';
 import { handlePublicRoute } from './router-public';
@@ -212,6 +212,12 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
     return errorResponse('Not found', 404);
   } catch (error) {
+    // A duplicate email / credential id lost the "check then insert" race. That is
+    // a normal, expected outcome for the caller (409), not a server fault.
+    if (isDuplicateKeyError(error)) {
+      console.warn('Request rejected: duplicate key', error instanceof Error ? error.message : error);
+      return conflictResponse();
+    }
     console.error('Request error:', error);
     return errorResponse('Internal server error', 500);
   }

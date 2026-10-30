@@ -39,9 +39,26 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
  * admin (or a stolen admin token) dial arbitrary host:port pairs exposes them.
  * DB_HOST_ALLOWLIST lets a self-hosted-in-VPC deployment opt back in.
  *
- * Implemented with plain string checks on purpose: this module is bundled for
- * Cloudflare Workers too, where `node:net` is not available.
+ * Two layers, because string matching alone is not a security boundary:
+ *   1. Before connecting: resolve the name and reject if ANY answer is private
+ *      (a plain string check misses `localtest.me`, `127.0.0.1.nip.io`, `lvh.me`
+ *      and any other public DNS record that points at 127.0.0.1 / 10.x / the
+ *      169.254.169.254 metadata endpoint).
+ *   2. After connecting: compare the socket's remote address, which is the only
+ *      value that cannot lie — it catches DNS rebinding (public on the first
+ *      lookup, loopback on the second).
+ *
+ * The IP checks themselves are plain string arithmetic on purpose: this module is
+ * bundled for Cloudflare Workers too, where `node:net` does not exist.
  */
+function ipv4ToInt(address: string): number | null {
+  const parts = address.split('.');
+  if (parts.length !== 4) return null;
+  const octets = parts.map((part) => Number(part));
+  if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return ((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3];
+}
+
 function isPrivateIpv4(host: string): boolean {
   const parts = host.split('.');
   if (parts.length !== 4) return false;
@@ -49,29 +66,150 @@ function isPrivateIpv4(host: string): boolean {
   if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
   const [a, b] = octets;
   return (
+    a === 0 || // "this network", resolves to localhost on Linux
     a === 10 ||
     a === 127 ||
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
-    (a === 169 && b === 254) // link-local, includes 169.254.169.254 metadata
+    (a === 169 && b === 254) || // link-local, includes 169.254.169.254 metadata
+    (a === 100 && b >= 64 && b <= 127) || // carrier-grade NAT
+    a >= 224 // multicast + reserved + broadcast
   );
 }
 
-function assertHostAllowed(host: string): string | null {
-  const allowlist = (readEnv('DB_HOST_ALLOWLIST') || '')
+function isPrivateIpv6(raw: string): boolean {
+  // `[::1]` from a URL-style host must be unwrapped first, otherwise none of the
+  // prefix tests below match.
+  const address = raw.trim().replace(/^\[|\]$/g, '').toLowerCase();
+  if (!address.includes(':')) return false;
+  if (address === '::1' || address === '::') return true;
+  if (address.startsWith('::ffff:')) return isPrivateIpv4(address.slice(7));
+  return /^(fc|fd|fe80|ff)/.test(address); // unique-local, link-local, multicast
+}
+
+function isPrivateAddress(address: string): boolean {
+  const clean = address.trim().replace(/^\[|\]$/g, '');
+  return clean.includes(':') ? isPrivateIpv6(clean) : isPrivateIpv4(clean);
+}
+
+/** `10.0.0.0/8` style entries, for deployments whose VPC range is not a single host. */
+function matchesCidr(address: string, entry: string): boolean {
+  const [network, bitsRaw] = entry.split('/');
+  const bits = Number(bitsRaw);
+  if (!network || !Number.isInteger(bits) || bits < 0 || bits > 32) return false;
+  const ip = ipv4ToInt(address);
+  const base = ipv4ToInt(network);
+  if (ip === null || base === null) return false;
+  if (bits === 0) return true;
+  const mask = (0xffffffff << (32 - bits)) >>> 0;
+  return (ip & mask) === (base & mask);
+}
+
+/**
+ * `DB_HOST_ALLOWLIST` from either the process env (Node) or the binding (Workers).
+ *
+ * `env` is typed `unknown` on purpose: the Workers `Env` interface has no index
+ * signature, and a structural `{ DB_HOST_ALLOWLIST?: string }` parameter is
+ * rejected by the weak-type check.
+ */
+function hostAllowlist(env: unknown): string[] {
+  const fromProcess = readEnv('DB_HOST_ALLOWLIST') ?? '';
+  const bound = (env as { DB_HOST_ALLOWLIST?: unknown } | null | undefined)?.DB_HOST_ALLOWLIST;
+  const fromBinding = typeof bound === 'string' ? bound : '';
+  return `${fromProcess},${fromBinding}`
     .split(',')
-    .map((entry: string) => entry.trim())
+    .map((entry) => entry.trim().toLowerCase())
     .filter(Boolean);
-  if (allowlist.includes(host)) return null;
+}
+
+function allowlistAllowsHost(entries: string[], host: string): boolean {
+  const lowered = host.toLowerCase();
+  return entries.some((entry) => {
+    if (entry === lowered) return true;
+    if (entry.startsWith('*.') && lowered.endsWith(entry.slice(1))) return true;
+    if (entry.includes('/') && matchesCidr(lowered, entry)) return true;
+    return false;
+  });
+}
+
+function allowlistAllowsAddress(entries: string[], address: string): boolean {
+  const clean = address.trim().replace(/^\[|\]$/g, '').toLowerCase();
+  return entries.some((entry) => {
+    if (entry === clean) return true;
+    if (entry.includes('/') && matchesCidr(clean, entry)) return true;
+    return false;
+  });
+}
+
+type HostPolicyResult = { ok: true } | { ok: false; error: string; kind: 'blocked' | 'dns' };
+
+interface ResolvedAddress {
+  address: string;
+  family: number;
+}
+
+/**
+ * Resolve a hostname through Node's resolver.
+ *
+ * Returns `null` when the module is unavailable (Cloudflare Workers), which means
+ * "cannot check here" rather than "denied" — on that runtime there is no TCP
+ * socket to abuse anyway. A thrown lookup error is reported separately because
+ * "does not resolve" is a different answer from "private".
+ */
+async function resolveHost(host: string): Promise<ResolvedAddress[] | 'unavailable' | 'unresolvable'> {
+  try {
+    const dnsName = 'node:dns';
+    const dns = (await import(/* @vite-ignore */ dnsName)) as {
+      promises: { lookup(h: string, o: { all: true }): Promise<ResolvedAddress[]> };
+    };
+    const rows = await dns.promises.lookup(host, { all: true });
+    return rows.length > 0 ? rows : 'unresolvable';
+  } catch (error) {
+    const code = (error as { code?: string })?.code;
+    if (code === 'MODULE_NOT_FOUND' || code === 'ERR_MODULE_NOT_FOUND' || code === 'ERR_UNKNOWN_BUILTIN_MODULE') {
+      return 'unavailable';
+    }
+    return 'unresolvable';
+  }
+}
+
+async function checkHostPolicy(host: string, env: unknown): Promise<HostPolicyResult> {
+  const entries = hostAllowlist(env);
+  // An explicit allowlist entry is an opt-in by the operator: skip the private
+  // range checks for it (that is the whole point of the escape hatch), but still
+  // refuse a name that does not resolve at all.
+  const explicitlyAllowed = allowlistAllowsHost(entries, host);
 
   const lowered = host.toLowerCase();
-  if (lowered === 'localhost' || lowered.endsWith('.local') || lowered.endsWith('.internal')) {
-    return 'host not allowed';
+  if (!explicitlyAllowed) {
+    if (lowered === 'localhost' || lowered.endsWith('.local') || lowered.endsWith('.internal')) {
+      return { ok: false, error: 'host not allowed', kind: 'blocked' };
+    }
+    if (isPrivateAddress(lowered)) return { ok: false, error: 'host not allowed', kind: 'blocked' };
   }
-  if (isPrivateIpv4(lowered)) return 'host not allowed';
-  // IPv6 literals: block loopback / unique-local / link-local.
-  if (lowered.includes(':') && /^(::1$|::ffff:|fc|fd|fe80)/i.test(lowered)) return 'host not allowed';
-  return null;
+
+  const resolved = await resolveHost(host);
+  if (resolved === 'unavailable') return { ok: true }; // no TCP on this runtime
+  if (resolved === 'unresolvable') {
+    return { ok: false, error: 'connection failed (dns)', kind: 'dns' };
+  }
+  if (!explicitlyAllowed) {
+    // Every answer must be public: a name with one public and one loopback A
+    // record would otherwise pass and connect to whatever the resolver returns
+    // first.
+    for (const entry of resolved) {
+      if (isPrivateAddress(entry.address) && !allowlistAllowsAddress(entries, entry.address)) {
+        return { ok: false, error: 'host not allowed', kind: 'blocked' };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+/** Second layer: the socket's peer address, which DNS rebinding cannot fake. */
+function checkPeerAddress(peer: string, env: unknown): boolean {
+  if (!isPrivateAddress(peer)) return true;
+  return allowlistAllowsAddress(hostAllowlist(env), peer);
 }
 
 /** Coarse failure class: useful for an admin, useless for a port scanner. */
@@ -124,7 +262,10 @@ function normalizeCandidate(body: Record<string, unknown>, fallback?: DbRuntimeC
   };
 }
 
-async function testMySqlConnection(config: DbRuntimeConfig): Promise<{
+async function testMySqlConnection(
+  config: DbRuntimeConfig,
+  env: unknown
+): Promise<{
   ok: boolean;
   latencyMs: number;
   version?: string;
@@ -132,11 +273,13 @@ async function testMySqlConnection(config: DbRuntimeConfig): Promise<{
   error?: string;
   errorKind?: string;
 }> {
-  const blocked = assertHostAllowed(config.host || '');
-  if (blocked) {
-    // Same shape as a failed connection so the response cannot be used to tell
-    // "blocked by policy" apart from "host does not exist".
-    return { ok: false, latencyMs: 0, error: blocked, errorKind: 'blocked' };
+  const policy = await checkHostPolicy(config.host || '', env);
+  if (!policy.ok) {
+    // The endpoint is admin-only and an operator needs to know *why* nothing
+    // happened, so the message is explicit. What stays hidden is the resolved
+    // address list and any topology behind it.
+    console.error('[db-config] host rejected by policy', { host: config.host, kind: policy.kind });
+    return { ok: false, latencyMs: 0, error: policy.error, errorKind: policy.kind };
   }
   const startedAt = Date.now();
   const db = new MySqlDatabase({
@@ -151,6 +294,13 @@ async function testMySqlConnection(config: DbRuntimeConfig): Promise<{
   });
   try {
     const versionRow = await db.prepare('SELECT VERSION() AS version').first<{ version: string }>();
+    // The pool is capped at one connection, so this reads the very socket the
+    // query above used.
+    const peer = await db.peerAddress();
+    if (peer && !checkPeerAddress(peer, env)) {
+      console.error('[db-config] connection peer is a private address, refusing', { host: config.host });
+      return { ok: false, latencyMs: Date.now() - startedAt, error: 'host not allowed', errorKind: 'blocked' };
+    }
     let schemaState = 'empty';
     try {
       const tableRow = await db
@@ -218,14 +368,66 @@ export async function handleAdminTestDbConfig(request: Request, env: Env, actorU
       : null);
   const { config, error } = normalizeCandidate(body, fallback);
   if (error) return errorResponse(error, 400);
-  const result = await testMySqlConnection(config);
+  const result = await testMySqlConnection(config, env);
   return jsonResponse(result, result.ok ? 200 : 502);
+}
+
+/**
+ * Create/migrate the schema through a throwaway connection to the *candidate*
+ * settings, before anything is persisted.
+ *
+ * Persisting first is what used to be able to lock the deployment out: if the
+ * account can connect but lacks CREATE privileges, the config was already
+ * stored and the next boot ran without tables — and since `/admin/database`
+ * itself needs a working `users` table, the UI to roll back was gone too.
+ */
+async function bootstrapSchemaOnCandidate(config: DbRuntimeConfig): Promise<{ ok: boolean; error?: string }> {
+  const probe = new MySqlDatabase({
+    host: config.host || '',
+    port: config.port || 3306,
+    user: config.user || '',
+    password: config.password || '',
+    database: config.database || '',
+    ssl: config.ssl !== false,
+    connectionLimit: 1,
+    connectTimeoutMs: 15_000,
+  });
+  try {
+    await new StorageService(probe as unknown as D1Database).initializeDatabase();
+    return { ok: true };
+  } catch (initError) {
+    const message = initError instanceof Error ? initError.message : String(initError);
+    console.error('[db-config] schema bootstrap on candidate database failed:', initError);
+    return { ok: false, error: message };
+  } finally {
+    await probe.close();
+  }
+}
+
+/** Clearing the runtime config falls back to env config or D1 — neither may exist here. */
+function clearingWouldLeaveNoDatabase(env: Env): boolean {
+  return !resolveDbConfigFromEnv(env) && !env.DB;
+}
+
+function wantsForce(request: Request): boolean {
+  try {
+    return new URL(request.url).searchParams.get('force') === '1';
+  } catch {
+    return false;
+  }
 }
 
 export async function handleAdminSaveDbConfig(request: Request, env: Env, actorUser: User): Promise<Response> {
   const body = await readJsonBody(request);
 
   if (body.mode === 'd1') {
+    if (clearingWouldLeaveNoDatabase(env) && !wantsForce(request)) {
+      return errorResponse(
+        'This runtime has no D1 binding and no DB_* environment variables: clearing the runtime config ' +
+          'would leave the app without any database and lock you out of this page. Pass ?force=1 to clear anyway.',
+        409
+      );
+    }
     await clearRuntimeConfig(env);
     await resetDatabaseCache();
     await auditDbConfigChange(env, actorUser, 'admin.db_config.cleared', null);
@@ -236,9 +438,29 @@ export async function handleAdminSaveDbConfig(request: Request, env: Env, actorU
   const { config, error } = normalizeCandidate(body, stored);
   if (error) return errorResponse(error, 400);
 
-  const test = await testMySqlConnection(config);
+  const test = await testMySqlConnection(config, env);
   if (!test.ok) {
     return jsonResponse({ ok: false, error: test.error ?? 'connection test failed', errorKind: test.errorKind }, 502);
+  }
+
+  // Verify DDL rights on the candidate *before* persisting: a database that can
+  // be read but not migrated must not become the configured one.
+  if (test.schemaState !== 'ready') {
+    const bootstrap = await bootstrapSchemaOnCandidate(config);
+    if (!bootstrap.ok) {
+      return jsonResponse(
+        {
+          ok: false,
+          saved: false,
+          error:
+            'Connected, but creating the schema failed, so the configuration was NOT saved and the current ' +
+            `database is still in use. Grant CREATE/ALTER/INDEX on this schema (or import the schema manually).`,
+          schemaError: bootstrap.error,
+          errorKind: 'schema',
+        },
+        502
+      );
+    }
   }
 
   const saved = await saveRuntimeConfig(env, config);
@@ -252,9 +474,10 @@ export async function handleAdminSaveDbConfig(request: Request, env: Env, actorU
     return errorResponse('Failed to persist database config', 500);
   }
 
-  // Rebuild the pool with the new settings and bootstrap the schema. The schema
-  // step is keyed by the target database, so a freshly configured MySQL really
-  // gets its tables (a process-wide "already initialized" flag used to skip it).
+  // Rebuild the pool with the new settings and run the schema step against the
+  // real pool. It is keyed by the target database, so a freshly configured MySQL
+  // really gets its tables (a process-wide "already initialized" flag used to
+  // skip it). The candidate bootstrap above normally made this a no-op.
   await resetDatabaseCache();
   const db = await getDatabase(env);
   (env as { DB: D1Database }).DB = db;
@@ -291,7 +514,13 @@ export async function handleAdminSaveDbConfig(request: Request, env: Env, actorU
 }
 
 export async function handleAdminClearDbConfig(request: Request, env: Env, actorUser: User): Promise<Response> {
-  void request;
+  if (clearingWouldLeaveNoDatabase(env) && !wantsForce(request)) {
+    return errorResponse(
+      'This runtime has no D1 binding and no DB_* environment variables: clearing the runtime config would ' +
+        'leave the app without any database and lock you out of this page. Pass ?force=1 to clear anyway.',
+      409
+    );
+  }
   await clearRuntimeConfig(env);
   await resetDatabaseCache();
   await auditDbConfigChange(env, actorUser, 'admin.db_config.cleared', null);
@@ -322,3 +551,18 @@ async function auditDbConfigChange(
     console.error('[db-config] audit write failed:', error);
   }
 }
+
+/**
+ * Test-only surface for the host policy. These helpers are pure (the address
+ * arithmetic) or read the process env, so they can be exercised without a MySQL
+ * server — which matters, because a security check nobody can unit-test tends to
+ * rot.
+ */
+export const __testing = {
+  isPrivateAddress,
+  matchesCidr,
+  allowlistAllowsHost,
+  allowlistAllowsAddress,
+  checkHostPolicy,
+  checkPeerAddress,
+};

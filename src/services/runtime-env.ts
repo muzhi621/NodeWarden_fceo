@@ -18,8 +18,32 @@ export function readEnv(name: string): string | undefined {
   return value === undefined ? undefined : value;
 }
 
-export function readEnvFlag(name: string): boolean {
-  return readEnv(name) === '1';
+const TRUTHY_FLAGS = new Set(['1', 'true', 'yes', 'on']);
+const FALSY_FLAGS = new Set(['0', 'false', 'no', 'off', '']);
+
+/**
+ * Boolean env flag.
+ *
+ * Accepts the spellings people actually type (`1`, `true`, `yes`, `on`); an
+ * explicit false value wins over the default, and anything unrecognised falls
+ * back to it. Checking only `=== '1'` made `DB_SSL_INSECURE=true` silently do
+ * nothing, which for a TLS switch is the wrong way to fail.
+ */
+export function readEnvFlag(name: string, defaultValue = false): boolean {
+  const raw = readEnv(name);
+  if (raw === undefined) return defaultValue;
+  const value = raw.trim().toLowerCase();
+  if (TRUTHY_FLAGS.has(value)) return true;
+  if (FALSY_FLAGS.has(value)) return false;
+  return defaultValue;
+}
+
+/** Positive integer env value; falls back when unset, empty or not a number. */
+export function readEnvInt(name: string, defaultValue: number): number {
+  const raw = readEnv(name);
+  if (raw === undefined || raw.trim() === '') return defaultValue;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : defaultValue;
 }
 
 /** Read a file path from env and return its contents, or undefined when unset/unreadable. */

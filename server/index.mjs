@@ -4010,6 +4010,16 @@ function errorResponse(message, status = 400) {
 function unsupportedResponse(message = "This feature is not supported by this server.") {
   return errorResponse(message, 501);
 }
+function isDuplicateKeyError(error) {
+  const errno = Number(error?.errno ?? 0);
+  const code = String(error?.code ?? "");
+  if (errno === 1062 || code === "ER_DUP_ENTRY") return true;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /UNIQUE constraint failed|Duplicate entry .* for key/i.test(message);
+}
+function conflictResponse(message = "An account or record with these details already exists.") {
+  return errorResponse(message, 409);
+}
 function identityErrorResponse(message, error = "invalid_grant", status = 400, headers = {}) {
   return jsonResponse(
     {
@@ -6306,7 +6316,7 @@ var APP_VERSION;
 var init_app_version = __esm({
   "shared/app-version.ts"() {
     "use strict";
-    APP_VERSION = "1.8.2";
+    APP_VERSION = "1.8.3";
   }
 });
 
@@ -7770,31 +7780,90 @@ function findMatchingParen(text, openIndex) {
   }
   return -1;
 }
+function splitTopLevel(text) {
+  const parts = [];
+  let depth = 0;
+  let inString = false;
+  let current = "";
+  for (let i2 = 0; i2 < text.length; i2 += 1) {
+    const ch = text[i2];
+    if (inString) {
+      current += ch;
+      if (ch === "'") inString = false;
+      continue;
+    }
+    if (ch === "'") {
+      inString = true;
+      current += ch;
+      continue;
+    }
+    if (ch === "(") depth += 1;
+    else if (ch === ")") depth -= 1;
+    if (ch === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) parts.push(current);
+  return parts;
+}
+function splitTopLevelWhere(text) {
+  let depth = 0;
+  let inString = false;
+  for (let i2 = 0; i2 < text.length; i2 += 1) {
+    const ch = text[i2];
+    if (inString) {
+      if (ch === "'") inString = false;
+      continue;
+    }
+    if (ch === "'") {
+      inString = true;
+      continue;
+    }
+    if (ch === "(") depth += 1;
+    else if (ch === ")") depth -= 1;
+    else if (depth === 0 && /\s/.test(ch)) {
+      const rest = text.slice(i2);
+      const match = rest.match(/^\s+WHERE\s+/i);
+      if (match) {
+        return { assignments: text.slice(0, i2), where: rest.slice(match[0].length) };
+      }
+    }
+  }
+  return { assignments: text, where: "" };
+}
+function firstInsertedColumn(head) {
+  const match = head.match(/INSERT\s+(?:OR\s+[A-Za-z]+\s+)?INTO\s+[A-Za-z0-9_`".]+\s*\(([^)]*)\)/i);
+  if (!match) return null;
+  const first = (match[1].split(",")[0] ?? "").trim().replace(/["`]/g, "");
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(first) ? first : null;
+}
 function rewriteOnConflict(sql) {
-  const conflictRe = /\bON\s+CONFLICT\s*\(([^)]*)\)\s*DO\s+(NOTHING|UPDATE\s+SET\s+([\s\S]*))$/i;
+  const conflictRe = /\bON\s+CONFLICT(?:\s*\(([^)]*)\))?\s+DO\s+(NOTHING|UPDATE\s+SET\s+([\s\S]*))$/i;
   const match = sql.match(conflictRe);
   if (!match) return sql;
   const head = sql.slice(0, match.index);
   const action = (match[2] || "").toUpperCase();
   const conflictCols = (match[1] || "").split(",").map((c) => c.trim().replace(/"/g, "")).filter(Boolean);
   if (action.startsWith("NOTHING")) {
-    const firstCol = quoteIdentifier(conflictCols[0] || "id");
-    return `${head}ON DUPLICATE KEY UPDATE ${firstCol}=${firstCol}`;
+    const noopColumn = conflictCols[0] || firstInsertedColumn(head);
+    if (!noopColumn) {
+      return head.replace(/\bINSERT\b/i, "INSERT IGNORE").replace(/\s+$/, "");
+    }
+    const quoted = quoteIdentifier(noopColumn);
+    return `${head}ON DUPLICATE KEY UPDATE ${quoted}=${quoted}`;
   }
-  let setTail = match[3] || "";
-  let whereCond = "";
-  const whereMatch = setTail.match(/\s+WHERE\s+([\s\S]+)$/i);
-  if (whereMatch) {
-    whereCond = whereMatch[1].trim();
-    setTail = setTail.slice(0, whereMatch.index);
-  }
+  const { assignments: setTailRaw, where: whereCond } = splitTopLevelWhere(match[3] || "");
+  const setTail = setTailRaw;
   const guardParts = conflictCols.map(
     (col) => `${quoteIdentifier(col)}=VALUES(${quoteIdentifier(col)})`
   );
   const whereSql = whereCond ? whereCond.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, "VALUES($1)") : "";
   const guard = [guardParts.join(" AND "), whereSql].filter(Boolean).join(" AND ");
   const assignments = [];
-  for (const item of setTail.split(",").map((s) => s.trim()).filter(Boolean)) {
+  for (const item of splitTopLevel(setTail).map((s) => s.trim()).filter(Boolean)) {
     const expr = item.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, "VALUES($1)");
     const assignMatch = expr.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([\s\S]+)$/);
     if (!assignMatch) {
@@ -7807,7 +7876,8 @@ function rewriteOnConflict(sql) {
   return `${head}ON DUPLICATE KEY UPDATE ${assignments.join(", ")}`;
 }
 function quoteIdentifier(name) {
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : name;
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return name;
+  return `\`${name.replace(/`/g, "``")}\``;
 }
 function quoteKeyIdentifier(sql) {
   return sql.replace(
@@ -7954,6 +8024,11 @@ function translateCreateIndex(sql) {
       if (/\(\d+\)\s*$/.test(col)) return col;
       const kind = columnKindOf(table, plain);
       if (isUnique && kind === "text") return col;
+      if (isUnique && kind === "lob") {
+        console.warn(
+          `[mysql-dialect] UNIQUE index on LONGTEXT column ${table}.${plain} can only use a 191-char prefix; uniqueness will not cover the whole value. Make the column a bounded VARCHAR instead.`
+        );
+      }
       if (kind === "text" || kind === "lob" || kind === void 0 && STRING_INDEX_COLUMNS.has(plain)) {
         return `${plain}(191)`;
       }
@@ -7994,7 +8069,7 @@ function rewriteSqliteCatalog(sql, literals) {
   );
 }
 function translateSql(input) {
-  let sql = input.trim();
+  let sql = input.trim().replace(/;\s*$/, "").trim();
   if (!sql) return sql;
   if (/^\s*PRAGMA\b/i.test(sql)) {
     return translatePragma(sql);
@@ -8125,8 +8200,13 @@ function readEnv(name) {
   const value = nodeProcess()?.env?.[name];
   return value === void 0 ? void 0 : value;
 }
-function readEnvFlag(name) {
-  return readEnv(name) === "1";
+function readEnvFlag(name, defaultValue = false) {
+  const raw = readEnv(name);
+  if (raw === void 0) return defaultValue;
+  const value = raw.trim().toLowerCase();
+  if (TRUTHY_FLAGS.has(value)) return true;
+  if (FALSY_FLAGS.has(value)) return false;
+  return defaultValue;
 }
 async function readEnvFile(name, label) {
   const filePath = readEnv(name);
@@ -8143,9 +8223,12 @@ async function readEnvFile(name, label) {
     return void 0;
   }
 }
+var TRUTHY_FLAGS, FALSY_FLAGS;
 var init_runtime_env = __esm({
   "src/services/runtime-env.ts"() {
     "use strict";
+    TRUTHY_FLAGS = /* @__PURE__ */ new Set(["1", "true", "yes", "on"]);
+    FALSY_FLAGS = /* @__PURE__ */ new Set(["0", "false", "no", "off", ""]);
   }
 });
 
@@ -8186,7 +8269,7 @@ function toResult(rows, affectedRows, insertId) {
 function isMySqlDatabase(db) {
   return !!db && typeof db === "object" && db.dialect === "mysql";
 }
-var IGNORABLE_DDL_ERRNOS, IGNORABLE_DDL_CODES, RETRYABLE_CONN_CODES, MySqlStatement, MySqlDatabase;
+var IGNORABLE_DDL_ERRNOS, IGNORABLE_DDL_CODES, RETRYABLE_CONN_CODES, RETRYABLE_PRECONNECT_CODES, READ_ONLY_SQL, MySqlStatement, MySqlDatabase;
 var init_storage_mysql = __esm({
   "src/services/storage-mysql.ts"() {
     "use strict";
@@ -8198,8 +8281,20 @@ var init_storage_mysql = __esm({
       "ECONNRESET",
       "EPIPE",
       "PROTOCOL_CONNECTION_LOST",
-      "ER_CLIENT_INTERACTION_TIMEOUT"
+      "ER_CLIENT_INTERACTION_TIMEOUT",
+      // The server dropped the idle connection out from under mysql2: the statement
+      // never started, so even a write can be replayed safely.
+      "PROTOCOL_SEQUENCE_TIMEOUT"
     ]);
+    RETRYABLE_PRECONNECT_CODES = /* @__PURE__ */ new Set([
+      "ECONNREFUSED",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "ENOTFOUND",
+      "ETIMEDOUT",
+      "ER_CON_COUNT_ERROR"
+    ]);
+    READ_ONLY_SQL = /^\s*(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i;
     MySqlStatement = class {
       constructor(db, translatedSql, originalSql) {
         this.db = db;
@@ -8305,7 +8400,14 @@ var init_storage_mysql = __esm({
               typeCast: (field, next) => {
                 if (field.type === "LONGLONG" || field.type === "NEWDECIMAL") {
                   const raw = field.string();
-                  return raw === null ? null : Number(raw);
+                  if (raw === null) return null;
+                  const numeric = Number(raw);
+                  if (!Number.isFinite(numeric)) return raw;
+                  if (field.type === "LONGLONG") {
+                    return Number.isSafeInteger(numeric) ? numeric : raw;
+                  }
+                  const digits = raw.replace(/[-.]/g, "").replace(/^0+/, "").length;
+                  return digits <= 15 ? numeric : raw;
                 }
                 return next();
               }
@@ -8329,7 +8431,8 @@ var init_storage_mysql = __esm({
           return await pool.query(sql, params);
         } catch (error) {
           const code = String(error?.code ?? "");
-          if (RETRYABLE_CONN_CODES.has(code)) {
+          const retryable = RETRYABLE_PRECONNECT_CODES.has(code) || RETRYABLE_CONN_CODES.has(code) && READ_ONLY_SQL.test(sql);
+          if (retryable) {
             await this.close();
             return await (await this.getPool()).query(sql, params);
           }
@@ -8339,6 +8442,26 @@ var init_storage_mysql = __esm({
       prepare(sql) {
         return new MySqlStatement(this, translateSql(sql), sql);
       }
+      /**
+       * Remote address the pool actually connected to, or null when it cannot be read.
+       *
+       * mysql2 exposes the underlying `net.Socket` on the core (non-promise)
+       * connection. The admin "test connection" endpoint uses this as the second
+       * half of its SSRF guard: the address handed out by the resolver can differ
+       * from the one the socket landed on (DNS rebinding), and only the socket knows.
+       */
+      async peerAddress() {
+        const pool = await this.getPool();
+        const conn = await pool.getConnection();
+        try {
+          const core = conn.connection;
+          return core?.stream?.remoteAddress ?? null;
+        } catch {
+          return null;
+        } finally {
+          conn.release();
+        }
+      }
       async batch(statements) {
         const pool = await this.getPool();
         const conn = await pool.getConnection();
@@ -8347,7 +8470,10 @@ var init_storage_mysql = __esm({
           await conn.beginTransaction();
           for (const statement of statements) {
             const stmt = statement;
-            const sql = typeof stmt.getSql === "function" ? stmt.getSql() : translateSql("");
+            if (typeof stmt.getSql !== "function") {
+              throw new Error("[mysql] batch() received a statement that was not created by this database adapter");
+            }
+            const sql = stmt.getSql();
             const params = typeof stmt.getParams === "function" ? stmt.getParams() : [];
             try {
               const [rawResult] = await conn.query(sql, params);
@@ -35760,29 +35886,47 @@ async function resetDatabaseCache() {
     await cached.db.close();
   }
   cached = null;
+  statusCache = null;
 }
+var STATUS_CACHE_MS = 5e3;
+var statusCache = null;
 async function getDatabaseStatus(env) {
+  let mode = "d1";
+  let source = "d1";
+  let cacheKey2 = "d1";
   try {
     const config = await resolveDbConfig(env);
+    mode = config.mode;
+    source = config.source;
+    cacheKey2 = [config.mode, config.host, config.port, config.database].join("|");
+    if (statusCache && statusCache.key === cacheKey2 && Date.now() - statusCache.at < STATUS_CACHE_MS) {
+      return statusCache.value;
+    }
     if (config.mode === "d1" && !env.DB) {
-      return {
+      const missing = {
         mode: "d1",
         source: "d1",
         ok: false,
         error: "D1 binding missing on this runtime. Configure an external MySQL (DB_* env vars or the admin UI at /admin/database)."
       };
+      statusCache = { key: cacheKey2, at: Date.now(), value: missing };
+      return missing;
     }
     const db = await getDatabase(env);
     if (config.mode === "mysql") {
       const row = await db.prepare("SELECT VERSION() AS version").first();
-      return { mode: "mysql", source: config.source, ok: true, version: row?.version };
+      const status2 = { mode: "mysql", source: config.source, ok: true, version: row?.version };
+      statusCache = { key: cacheKey2, at: Date.now(), value: status2 };
+      return status2;
     }
     await db.prepare("SELECT 1 AS ok").first();
-    return { mode: "d1", source: "d1", ok: true };
+    const status = { mode: "d1", source: "d1", ok: true };
+    statusCache = { key: cacheKey2, at: Date.now(), value: status };
+    return status;
   } catch (error) {
     return {
-      mode: "d1",
-      source: "d1",
+      mode,
+      source,
       ok: false,
       error: error instanceof Error ? error.message : String(error)
     };
@@ -35802,24 +35946,113 @@ async function readJsonBody3(request) {
     return {};
   }
 }
+function ipv4ToInt(address) {
+  const parts = address.split(".");
+  if (parts.length !== 4) return null;
+  const octets = parts.map((part) => Number(part));
+  if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return (octets[0] << 24 >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3];
+}
 function isPrivateIpv4(host) {
   const parts = host.split(".");
   if (parts.length !== 4) return false;
   const octets = parts.map((part) => Number(part));
   if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
   const [a, b] = octets;
-  return a === 10 || a === 127 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 169 && b === 254;
+  return a === 0 || // "this network", resolves to localhost on Linux
+  a === 10 || a === 127 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 169 && b === 254 || // link-local, includes 169.254.169.254 metadata
+  a === 100 && b >= 64 && b <= 127 || // carrier-grade NAT
+  a >= 224;
 }
-function assertHostAllowed(host) {
-  const allowlist = (readEnv("DB_HOST_ALLOWLIST") || "").split(",").map((entry) => entry.trim()).filter(Boolean);
-  if (allowlist.includes(host)) return null;
+function isPrivateIpv6(raw) {
+  const address = raw.trim().replace(/^\[|\]$/g, "").toLowerCase();
+  if (!address.includes(":")) return false;
+  if (address === "::1" || address === "::") return true;
+  if (address.startsWith("::ffff:")) return isPrivateIpv4(address.slice(7));
+  return /^(fc|fd|fe80|ff)/.test(address);
+}
+function isPrivateAddress(address) {
+  const clean = address.trim().replace(/^\[|\]$/g, "");
+  return clean.includes(":") ? isPrivateIpv6(clean) : isPrivateIpv4(clean);
+}
+function matchesCidr(address, entry) {
+  const [network, bitsRaw] = entry.split("/");
+  const bits2 = Number(bitsRaw);
+  if (!network || !Number.isInteger(bits2) || bits2 < 0 || bits2 > 32) return false;
+  const ip = ipv4ToInt(address);
+  const base = ipv4ToInt(network);
+  if (ip === null || base === null) return false;
+  if (bits2 === 0) return true;
+  const mask = 4294967295 << 32 - bits2 >>> 0;
+  return (ip & mask) === (base & mask);
+}
+function hostAllowlist(env) {
+  const fromProcess = readEnv("DB_HOST_ALLOWLIST") ?? "";
+  const bound = env?.DB_HOST_ALLOWLIST;
+  const fromBinding = typeof bound === "string" ? bound : "";
+  return `${fromProcess},${fromBinding}`.split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean);
+}
+function allowlistAllowsHost(entries, host) {
   const lowered = host.toLowerCase();
-  if (lowered === "localhost" || lowered.endsWith(".local") || lowered.endsWith(".internal")) {
-    return "host not allowed";
+  return entries.some((entry) => {
+    if (entry === lowered) return true;
+    if (entry.startsWith("*.") && lowered.endsWith(entry.slice(1))) return true;
+    if (entry.includes("/") && matchesCidr(lowered, entry)) return true;
+    return false;
+  });
+}
+function allowlistAllowsAddress(entries, address) {
+  const clean = address.trim().replace(/^\[|\]$/g, "").toLowerCase();
+  return entries.some((entry) => {
+    if (entry === clean) return true;
+    if (entry.includes("/") && matchesCidr(clean, entry)) return true;
+    return false;
+  });
+}
+async function resolveHost(host) {
+  try {
+    const dnsName = "node:dns";
+    const dns = await import(
+      /* @vite-ignore */
+      dnsName
+    );
+    const rows = await dns.promises.lookup(host, { all: true });
+    return rows.length > 0 ? rows : "unresolvable";
+  } catch (error) {
+    const code = error?.code;
+    if (code === "MODULE_NOT_FOUND" || code === "ERR_MODULE_NOT_FOUND" || code === "ERR_UNKNOWN_BUILTIN_MODULE") {
+      return "unavailable";
+    }
+    return "unresolvable";
   }
-  if (isPrivateIpv4(lowered)) return "host not allowed";
-  if (lowered.includes(":") && /^(::1$|::ffff:|fc|fd|fe80)/i.test(lowered)) return "host not allowed";
-  return null;
+}
+async function checkHostPolicy(host, env) {
+  const entries = hostAllowlist(env);
+  const explicitlyAllowed = allowlistAllowsHost(entries, host);
+  const lowered = host.toLowerCase();
+  if (!explicitlyAllowed) {
+    if (lowered === "localhost" || lowered.endsWith(".local") || lowered.endsWith(".internal")) {
+      return { ok: false, error: "host not allowed", kind: "blocked" };
+    }
+    if (isPrivateAddress(lowered)) return { ok: false, error: "host not allowed", kind: "blocked" };
+  }
+  const resolved = await resolveHost(host);
+  if (resolved === "unavailable") return { ok: true };
+  if (resolved === "unresolvable") {
+    return { ok: false, error: "connection failed (dns)", kind: "dns" };
+  }
+  if (!explicitlyAllowed) {
+    for (const entry of resolved) {
+      if (isPrivateAddress(entry.address) && !allowlistAllowsAddress(entries, entry.address)) {
+        return { ok: false, error: "host not allowed", kind: "blocked" };
+      }
+    }
+  }
+  return { ok: true };
+}
+function checkPeerAddress(peer, env) {
+  if (!isPrivateAddress(peer)) return true;
+  return allowlistAllowsAddress(hostAllowlist(env), peer);
 }
 function classifyConnectionError(error) {
   const code = String(error?.code ?? "");
@@ -35861,10 +36094,11 @@ function normalizeCandidate(body, fallback) {
     }
   };
 }
-async function testMySqlConnection(config) {
-  const blocked = assertHostAllowed(config.host || "");
-  if (blocked) {
-    return { ok: false, latencyMs: 0, error: blocked, errorKind: "blocked" };
+async function testMySqlConnection(config, env) {
+  const policy = await checkHostPolicy(config.host || "", env);
+  if (!policy.ok) {
+    console.error("[db-config] host rejected by policy", { host: config.host, kind: policy.kind });
+    return { ok: false, latencyMs: 0, error: policy.error, errorKind: policy.kind };
   }
   const startedAt = Date.now();
   const db = new MySqlDatabase({
@@ -35879,6 +36113,11 @@ async function testMySqlConnection(config) {
   });
   try {
     const versionRow = await db.prepare("SELECT VERSION() AS version").first();
+    const peer = await db.peerAddress();
+    if (peer && !checkPeerAddress(peer, env)) {
+      console.error("[db-config] connection peer is a private address, refusing", { host: config.host });
+      return { ok: false, latencyMs: Date.now() - startedAt, error: "host not allowed", errorKind: "blocked" };
+    }
     let schemaState = "empty";
     try {
       const tableRow = await db.prepare("SELECT COUNT(*) AS n FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'").first();
@@ -35939,12 +36178,50 @@ async function handleAdminTestDbConfig(request, env, actorUser) {
   } : null);
   const { config, error } = normalizeCandidate(body, fallback);
   if (error) return errorResponse(error, 400);
-  const result = await testMySqlConnection(config);
+  const result = await testMySqlConnection(config, env);
   return jsonResponse(result, result.ok ? 200 : 502);
+}
+async function bootstrapSchemaOnCandidate(config) {
+  const probe = new MySqlDatabase({
+    host: config.host || "",
+    port: config.port || 3306,
+    user: config.user || "",
+    password: config.password || "",
+    database: config.database || "",
+    ssl: config.ssl !== false,
+    connectionLimit: 1,
+    connectTimeoutMs: 15e3
+  });
+  try {
+    await new StorageService(probe).initializeDatabase();
+    return { ok: true };
+  } catch (initError) {
+    const message = initError instanceof Error ? initError.message : String(initError);
+    console.error("[db-config] schema bootstrap on candidate database failed:", initError);
+    return { ok: false, error: message };
+  } finally {
+    await probe.close();
+  }
+}
+function clearingWouldLeaveNoDatabase(env) {
+  return !resolveDbConfigFromEnv(env) && !env.DB;
+}
+function wantsForce(request) {
+  try {
+    return new URL(request.url).searchParams.get("force") === "1";
+  } catch {
+    return false;
+  }
 }
 async function handleAdminSaveDbConfig(request, env, actorUser) {
   const body = await readJsonBody3(request);
   if (body.mode === "d1") {
+    if (clearingWouldLeaveNoDatabase(env) && !wantsForce(request)) {
+      return errorResponse(
+        "This runtime has no D1 binding and no DB_* environment variables: clearing the runtime config would leave the app without any database and lock you out of this page. Pass ?force=1 to clear anyway.",
+        409
+      );
+    }
     await clearRuntimeConfig(env);
     await resetDatabaseCache();
     await auditDbConfigChange(env, actorUser, "admin.db_config.cleared", null);
@@ -35953,9 +36230,24 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
   const stored = await loadRuntimeConfig(env);
   const { config, error } = normalizeCandidate(body, stored);
   if (error) return errorResponse(error, 400);
-  const test = await testMySqlConnection(config);
+  const test = await testMySqlConnection(config, env);
   if (!test.ok) {
     return jsonResponse({ ok: false, error: test.error ?? "connection test failed", errorKind: test.errorKind }, 502);
+  }
+  if (test.schemaState !== "ready") {
+    const bootstrap = await bootstrapSchemaOnCandidate(config);
+    if (!bootstrap.ok) {
+      return jsonResponse(
+        {
+          ok: false,
+          saved: false,
+          error: `Connected, but creating the schema failed, so the configuration was NOT saved and the current database is still in use. Grant CREATE/ALTER/INDEX on this schema (or import the schema manually).`,
+          schemaError: bootstrap.error,
+          errorKind: "schema"
+        },
+        502
+      );
+    }
   }
   const saved = await saveRuntimeConfig(env, config);
   if (!saved && !hasConfigStore(env)) {
@@ -35994,7 +36286,12 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
   });
 }
 async function handleAdminClearDbConfig(request, env, actorUser) {
-  void request;
+  if (clearingWouldLeaveNoDatabase(env) && !wantsForce(request)) {
+    return errorResponse(
+      "This runtime has no D1 binding and no DB_* environment variables: clearing the runtime config would leave the app without any database and lock you out of this page. Pass ?force=1 to clear anyway.",
+      409
+    );
+  }
   await clearRuntimeConfig(env);
   await resetDatabaseCache();
   await auditDbConfigChange(env, actorUser, "admin.db_config.cleared", null);
@@ -46714,6 +47011,10 @@ async function handleRequest(request, env) {
     if (authenticatedResponse) return authenticatedResponse;
     return errorResponse("Not found", 404);
   } catch (error) {
+    if (isDuplicateKeyError(error)) {
+      console.warn("Request rejected: duplicate key", error instanceof Error ? error.message : error);
+      return conflictResponse();
+    }
     console.error("Request error:", error);
     return errorResponse("Internal server error", 500);
   }
@@ -46723,7 +47024,7 @@ async function handleRequest(request, env) {
 init_storage();
 var initializedKey = null;
 var dbInitError = null;
-var dbInitPromise = null;
+var initPromises = /* @__PURE__ */ new Map();
 function getDbInitError() {
   return dbInitError;
 }
@@ -46747,8 +47048,9 @@ async function ensureDatabaseInitialized(env, resolve = getDatabase) {
   attachDatabase(env, db);
   const schemaKey = StorageService.schemaKeyFor(db);
   if (initializedKey === schemaKey) return;
-  if (!dbInitPromise) {
-    dbInitPromise = (async () => {
+  let pending = initPromises.get(schemaKey);
+  if (!pending) {
+    pending = (async () => {
       await new StorageService(db).initializeDatabase();
       initializedKey = schemaKey;
       dbInitError = null;
@@ -46756,10 +47058,11 @@ async function ensureDatabaseInitialized(env, resolve = getDatabase) {
       dbInitError = error instanceof Error ? error.message : String(error);
       console.error("Database initialization failed:", error);
     }).finally(() => {
-      dbInitPromise = null;
+      initPromises.delete(schemaKey);
     });
+    initPromises.set(schemaKey, pending);
   }
-  await dbInitPromise;
+  await pending;
 }
 
 // server/index.ts
@@ -47633,25 +47936,37 @@ function nodeRequestToRequest(req, body) {
   }
   return new Request(url, init);
 }
-async function writeResponse(res, response) {
+async function writeResponse(res, response, requestMethod = "GET") {
   const headers = {};
+  const bodyless = requestMethod === "HEAD" || response.status === 204 || response.status === 304;
   response.headers.forEach((value, key) => {
-    if (key === "content-length" || key === "transfer-encoding") return;
+    if (key === "transfer-encoding") return;
+    if (key === "content-length" && !bodyless) return;
     const existing = headers[key];
     if (existing === void 0) headers[key] = value;
     else if (Array.isArray(existing)) existing.push(value);
     else headers[key] = [existing, value];
   });
   res.writeHead(response.status, headers);
-  if (!response.body) {
+  if (bodyless || !response.body) {
     res.end();
     return;
   }
   const nodeStream = Readable.fromWeb(response.body);
   nodeStream.on("error", () => res.destroy());
+  res.on("close", () => nodeStream.destroy());
   nodeStream.pipe(res);
 }
-var MAX_BODY_BYTES = Math.max(1, Number(process.env.MAX_BODY_MB || 100)) * 1024 * 1024;
+var MAX_BODY_BYTES = (() => {
+  const raw = process.env.MAX_BODY_MB;
+  if (raw === void 0 || raw.trim() === "") return 100 * 1024 * 1024;
+  const megabytes = Number(raw);
+  if (!Number.isFinite(megabytes) || megabytes <= 0) {
+    console.warn(`[server] MAX_BODY_MB="${raw}" is not a positive number, using 100 MB`);
+    return 100 * 1024 * 1024;
+  }
+  return Math.floor(megabytes * 1024 * 1024);
+})();
 var server = http.createServer((req, res) => {
   const chunks = [];
   let received = 0;
@@ -47676,11 +47991,11 @@ var server = http.createServer((req, res) => {
         const body = Buffer.concat(chunks);
         const request = nodeRequestToRequest(req, body);
         const response = await pipeline(request, env);
-        await writeResponse(res, response);
+        await writeResponse(res, response, request.method);
       } catch (error) {
         console.error("Unhandled request error:", error);
         try {
-          await writeResponse(res, jsonResponse({ error: "Internal server error" }, 500));
+          await writeResponse(res, jsonResponse({ error: "Internal server error" }, 500), req.method || "GET");
         } catch {
           res.destroy();
         }

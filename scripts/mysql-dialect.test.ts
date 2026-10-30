@@ -399,3 +399,78 @@ test('translated output never contains SQLite-only syntax', () => {
     }
   }
 });
+
+// --- review round 2: B-1 / S-2 / S-9 --------------------------------------
+
+test('guarded upsert keeps function calls with commas intact (B-1)', () => {
+  const out = translateSql(
+    'INSERT INTO users(id, name) VALUES(?, ?) ' +
+      "ON CONFLICT(id) DO UPDATE SET name = COALESCE(excluded.name, 'x'), updated_at = excluded.updated_at"
+  );
+  // The literal must stay where it was written (2nd argument of COALESCE), not
+  // become the ELSE branch of the guard — that used to write 'x' into the row
+  // when a different unique key conflicted.
+  assert.match(out, /name=IF\(id=VALUES\(id\), COALESCE\(VALUES\(name\), 'x'\), name\)/);
+  assert.match(out, /updated_at=IF\(id=VALUES\(id\), VALUES\(updated_at\), updated_at\)/);
+  assert.doesNotMatch(out, /, name\), 'x'\)/);
+  // Exactly one IF per assignment: a mis-split produced a second one.
+  assert.equal((out.match(/\bIF\(/g) || []).length, 2, out);
+});
+
+test('guarded upsert keeps JSON_SET arguments intact (B-1)', () => {
+  const out = translateSql(
+    'INSERT INTO t(id, doc) VALUES(?, ?) ' +
+      "ON CONFLICT(id) DO UPDATE SET doc = JSON_SET(excluded.doc, '$.a', 1), updated_at = excluded.updated_at"
+  );
+  assert.match(out, /doc=IF\(id=VALUES\(id\), JSON_SET\(VALUES\(doc\), '\$\.a', 1\), doc\)/);
+  assert.match(out, /updated_at=IF\(id=VALUES\(id\), VALUES\(updated_at\), updated_at\)/);
+});
+
+test('WHERE inside a SET subquery is not mistaken for the guard clause (S-2)', () => {
+  const out = translateSql(
+    'INSERT INTO t(id, a) VALUES(?, ?) ' +
+      'ON CONFLICT(id) DO UPDATE SET a=(SELECT v FROM u WHERE u.id=t.id), b=excluded.b'
+  );
+  assert.match(out, /a=IF\(id=VALUES\(id\), \(SELECT v FROM u WHERE u\.id=t\.id\), a\)/);
+  assert.match(out, /b=IF\(id=VALUES\(id\), VALUES\(b\), b\)/);
+});
+
+test('ON CONFLICT without a target maps to a no-op duplicate update (S-2)', () => {
+  const out = translateSql('INSERT INTO t(a, b) VALUES(?, ?) ON CONFLICT DO NOTHING');
+  // No target means "ignore any conflict"; the first inserted column is the only
+  // one we can prove exists, and `a=a` changes nothing whatever key was hit.
+  assert.match(out, /ON DUPLICATE KEY UPDATE a=a/);
+  assert.doesNotMatch(out, /ON CONFLICT/);
+});
+
+test('ON CONFLICT without a target or column list falls back to INSERT IGNORE (S-2)', () => {
+  const out = translateSql('INSERT INTO t VALUES(1) ON CONFLICT DO NOTHING');
+  assert.match(out, /^INSERT IGNORE INTO t VALUES\(1\)$/);
+});
+
+test('a trailing semicolon is stripped before translation (S-2)', () => {
+  const out = translateSql('INSERT INTO t(a, b) VALUES(?, ?) ON CONFLICT(a) DO UPDATE SET b=excluded.b;');
+  assert.doesNotMatch(out, /;/);
+  assert.match(out, /b=IF\(a=VALUES\(a\), VALUES\(b\), b\)$/);
+});
+
+test('UNIQUE index on a LONGTEXT column keeps a prefix and warns (S-9)', () => {
+  resetDialectTableCache();
+  // `doc` is not in STRING_INDEX_COLUMNS and has no default, so it stays LONGTEXT.
+  translateSql('CREATE TABLE t (id TEXT PRIMARY KEY, doc TEXT)');
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (message: string) => {
+    warnings.push(String(message));
+  };
+  try {
+    const out = translateSql('CREATE UNIQUE INDEX idx ON t(doc)');
+    // MySQL cannot index a LOB without a prefix (1170); the non-equivalence is
+    // documented and logged instead of silently degrading.
+    assert.match(out, /\(doc\(191\)\)/);
+    assert.equal(warnings.length, 1, `expected one warning, got ${warnings.length}`);
+    assert.match(warnings[0], /UNIQUE index on LONGTEXT column t\.doc/);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
