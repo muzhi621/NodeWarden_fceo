@@ -7,6 +7,7 @@
 // keep using D1 (the default) — mysql2 requires Node TCP sockets.
 
 import { translateSql } from './mysql-dialect';
+import { readEnv, readEnvFile, readEnvFlag } from './runtime-env';
 
 export interface MySqlConfig {
   host: string;
@@ -67,14 +68,32 @@ function normalizeParams(params: unknown[]): unknown[] {
 }
 
 function isDuplicateDdlError(error: unknown): boolean {
-  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  return (
-    msg.includes('duplicate column name') ||
-    msg.includes('duplicate key name') ||
-    msg.includes('already exists') ||
-    msg.includes('duplicate entry')
-  );
+  const errno = Number((error as { errno?: number })?.errno ?? 0);
+  const code = String((error as { code?: string })?.code ?? '');
+  // Only "object already exists" is ignorable for re-runnable DDL. Matching on
+  // message substrings used to swallow ER_DUP_ENTRY (1062) as well, so a UNIQUE
+  // index that failed because of dirty data looked like a success and the
+  // constraint silently never existed.
+  if (IGNORABLE_DDL_ERRNOS.has(errno) || IGNORABLE_DDL_CODES.has(code)) return true;
+  if (errno === 1062 || code === 'ER_DUP_ENTRY') {
+    console.error(
+      '[mysql] DDL rejected due to duplicate data — the index/constraint was NOT created:',
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+  return false;
 }
+
+const IGNORABLE_DDL_ERRNOS = new Set([1050, 1060, 1061]);
+const IGNORABLE_DDL_CODES = new Set(['ER_TABLE_EXISTS_ERROR', 'ER_DUP_FIELDNAME', 'ER_DUP_KEYNAME']);
+
+/** Connection-level failures worth one retry on a fresh pool. */
+const RETRYABLE_CONN_CODES = new Set([
+  'ECONNRESET',
+  'EPIPE',
+  'PROTOCOL_CONNECTION_LOST',
+  'ER_CLIENT_INTERACTION_TIMEOUT',
+]);
 
 function isDdlStatement(sql: string): boolean {
   return /^\s*(CREATE|ALTER|DROP)\b/i.test(sql);
@@ -143,6 +162,10 @@ class MySqlStatement implements D1LikeStatement {
     return this.translatedSql;
   }
 
+  getOriginalSql(): string {
+    return this.originalSql;
+  }
+
   getParams(): unknown[] {
     return this.params;
   }
@@ -152,6 +175,8 @@ export class MySqlDatabase implements D1LikeDatabase {
   readonly dialect = 'mysql';
   private pool: MySqlPool | null = null;
   private poolPromise: Promise<MySqlPool> | null = null;
+  /** Bumped by close() so an in-flight getPool() cannot resurrect a dead pool. */
+  private generation = 0;
 
   constructor(private readonly config: MySqlConfig) {}
 
@@ -159,10 +184,21 @@ export class MySqlDatabase implements D1LikeDatabase {
     return this.config;
   }
 
+  private async sslOptions(): Promise<Record<string, unknown> | undefined> {
+    if (!this.config.ssl) return undefined;
+    // Secure by default: the connection carries the database password, so an
+    // unverified certificate means anyone on the path can complete the handshake.
+    // DB_SSL_INSECURE=1 is the explicit escape hatch for self-signed servers;
+    // DB_SSL_CA points at a PEM file (the correct fix for private CAs).
+    const ca = await readEnvFile('DB_SSL_CA', 'DB_SSL_CA');
+    return { rejectUnauthorized: !readEnvFlag('DB_SSL_INSECURE'), ...(ca ? { ca } : {}) };
+  }
+
   private async getPool(): Promise<MySqlPool> {
     if (this.pool) return this.pool;
     if (!this.poolPromise) {
-      this.poolPromise = (async () => {
+      const generation = this.generation;
+      const pending = (async () => {
         // Lazy, non-literal dynamic import so Workers bundling never pulls in mysql2.
         const moduleName = 'mysql2/promise';
         const mysql = (await import(/* @vite-ignore */ moduleName)) as {
@@ -178,11 +214,16 @@ export class MySqlDatabase implements D1LikeDatabase {
           connectionLimit: this.config.connectionLimit,
           connectTimeout: this.config.connectTimeoutMs,
           charset: 'utf8mb4',
-          timezone: '+08:00',
+          timezone: readEnv('DB_TIMEZONE') || 'Z',
           enableKeepAlive: true,
           keepAliveInitialDelay: 10_000,
           multipleStatements: false,
-          ssl: this.config.ssl ? { rejectUnauthorized: false } : undefined,
+          // SQLite/D1 report `changes` as MATCHED rows; MySQL reports CHANGED rows
+          // by default. Without FOUND_ROWS every `meta.changes > 0` guard (40+
+          // call sites) turns into a false "not found" when a column is set to a
+          // value it already had.
+          flags: ['FOUND_ROWS'],
+          ssl: await this.sslOptions(),
           typeCast: (field: { type: string; string(): string | null }, next: () => unknown) => {
             if (field.type === 'LONGLONG' || field.type === 'NEWDECIMAL') {
               const raw = field.string();
@@ -191,9 +232,20 @@ export class MySqlDatabase implements D1LikeDatabase {
             return next();
           },
         });
-        this.pool = pool;
+        // A close() that happened while we were connecting wins: don't resurrect.
+        if (generation === this.generation) this.pool = pool;
         return pool;
       })();
+
+      this.poolPromise = pending
+        .catch((error: unknown) => {
+          // Never cache a rejected promise: the pool must be retryable.
+          this.poolPromise = null;
+          throw error;
+        })
+        .finally(() => {
+          if (generation === this.generation) this.poolPromise = null;
+        }) as Promise<MySqlPool>;
     }
     return this.poolPromise;
   }
@@ -204,12 +256,11 @@ export class MySqlDatabase implements D1LikeDatabase {
     try {
       return await pool.query(sql, params);
     } catch (error) {
-      const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
-      if (msg.includes('connection') && (msg.includes('lost') || msg.includes('closed') || msg.includes('reset'))) {
+      const code = String((error as { code?: string })?.code ?? '');
+      if (RETRYABLE_CONN_CODES.has(code)) {
         // One retry after forcing a fresh pool.
         await this.close();
-        const fresh = await this.getPool();
-        return await fresh.query(sql, params);
+        return await (await this.getPool()).query(sql, params);
       }
       throw error;
     }
@@ -223,6 +274,10 @@ export class MySqlDatabase implements D1LikeDatabase {
     const pool = await this.getPool();
     const conn = await pool.getConnection();
     const results: D1LikeResult[] = [];
+    // NOTE: MySQL DDL is implicitly committing, so a batch that mixes DDL with
+    // DML cannot be rolled back as a unit. Schema statements are idempotent, so a
+    // partial DDL run is harmless; data batches (the interesting case) do roll
+    // back atomically.
     try {
       await conn.beginTransaction();
       for (const statement of statements) {
@@ -238,7 +293,7 @@ export class MySqlDatabase implements D1LikeDatabase {
             results.push(toResult([], result?.affectedRows ?? 0, result?.insertId ?? 0));
           }
         } catch (error) {
-          const original = (statement as unknown as { originalSql?: string }).originalSql ?? '';
+          const original = typeof stmt.getOriginalSql === 'function' ? stmt.getOriginalSql() : '';
           if (isDdlStatement(original) && isDuplicateDdlError(error)) {
             results.push(toResult([], 0, 0));
             continue;
@@ -260,17 +315,26 @@ export class MySqlDatabase implements D1LikeDatabase {
     }
   }
 
+  /**
+   * Retire the current pool.
+   *
+   * `end()` waits for open queries, so closing synchronously on a config change
+   * would fail every request that is mid-flight. Instead we bump the generation
+   * (so a concurrent getPool() cannot publish the pool we are dropping) and give
+   * in-flight statements a short grace period before the sockets are closed.
+   */
   async close(): Promise<void> {
+    this.generation += 1;
     const pool = this.pool;
     this.pool = null;
     this.poolPromise = null;
-    if (pool) {
-      try {
-        await pool.end();
-      } catch {
-        // ignore
-      }
-    }
+    if (!pool) return;
+    const timer = setTimeout(() => {
+      void pool.end().catch(() => {
+        // ignore: the pool is already gone
+      });
+    }, 5_000);
+    (timer as unknown as { unref?: () => void }).unref?.();
   }
 }
 

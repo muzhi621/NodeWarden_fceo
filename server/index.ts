@@ -18,6 +18,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import type { ReadableStream as NodeWebReadableStream } from 'node:stream/web';
 import { fileURLToPath } from 'node:url';
 
 import { handleRequest } from '../src/router';
@@ -82,9 +84,12 @@ const fileKv = {
 // ---------------------------------------------------------------------------
 
 function safeObjectPath(key: string): string {
-  const normalized = path.normalize(key).replace(/^([/\\.])+/, '');
-  const full = path.join(ATTACHMENTS_DIR, normalized);
-  if (!full.startsWith(ATTACHMENTS_DIR)) throw new Error('Invalid object key');
+  // Containment check via path.relative: a plain startsWith() also accepts
+  // sibling directories such as "/data/attachments-evil".
+  const normalized = key.replace(/^[/\\]+/, '');
+  const full = path.resolve(ATTACHMENTS_DIR, normalized);
+  const rel = path.relative(ATTACHMENTS_DIR, full);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('Invalid object key');
   return full;
 }
 
@@ -112,16 +117,19 @@ const fsR2 = {
   async get(key: string): Promise<{ body: ReadableStream; size: number; httpMetadata: { contentType: string }; customMetadata: Record<string, string> } | null> {
     const full = safeObjectPath(key);
     try {
-      const bytes = await fsp.readFile(full);
+      // Stream, don't slurp: attachments can be large and FC instances are small
+      // (0.5 GB). Reading the file into a Buffer first doubled peak memory.
+      const stat = await fsp.stat(full);
       let meta: { contentType?: string; customMetadata?: Record<string, string> } = {};
       try {
         meta = JSON.parse(await fsp.readFile(`${full}.meta.json`, 'utf8'));
       } catch {
         // no meta
       }
+      const stream = fs.createReadStream(full);
       return {
-        body: new Response(bytes).body as ReadableStream,
-        size: bytes.byteLength,
+        body: Readable.toWeb(stream) as unknown as ReadableStream,
+        size: stat.size,
         httpMetadata: { contentType: meta.contentType || 'application/octet-stream' },
         customMetadata: meta.customMetadata || {},
       };
@@ -198,10 +206,18 @@ const MIME: Record<string, string> = {
 
 async function serveAssets(request: Request): Promise<Response> {
   const url = new URL(request.url);
-  let rel = decodeURIComponent(url.pathname);
+  let rel: string;
+  try {
+    rel = decodeURIComponent(url.pathname);
+  } catch {
+    return new Response('Bad Request', { status: 400, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+  }
   if (rel === '/' || rel === '') rel = '/index.html';
-  const full = path.join(DIST_DIR, rel);
-  if (!full.startsWith(DIST_DIR)) return new Response('Forbidden', { status: 403 });
+  const full = path.resolve(DIST_DIR, rel.replace(/^[/\\]+/, ''));
+  const contained = path.relative(DIST_DIR, full);
+  if (!contained || contained.startsWith('..') || path.isAbsolute(contained)) {
+    return new Response('Forbidden', { status: 403 });
+  }
   try {
     const bytes = await fsp.readFile(full);
     const ext = path.extname(full).toLowerCase();
@@ -276,16 +292,12 @@ function toRequest(input: RequestInfo | URL): Request {
 
 async function handleHealthz(env: Env): Promise<Response> {
   const status = await getDatabaseStatus(env);
+  if (status.error) {
+    // Public endpoint: never echo raw driver errors (host, user, schema names).
+    console.error('[healthz] database unavailable:', status.error);
+  }
   return jsonResponse(
-    {
-      ok: status.ok,
-      db: status.ok ? 'up' : 'down',
-      mode: status.mode,
-      source: status.source,
-      runtime: 'node',
-      ...(status.version ? { version: status.version } : {}),
-      ...(status.error ? { error: status.error } : {}),
-    },
+    { ok: status.ok, db: status.ok ? 'up' : 'down', mode: status.mode, source: status.source, runtime: 'node' },
     status.ok ? 200 : 503
   );
 }
@@ -294,6 +306,10 @@ async function pipeline(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   let pathname = url.pathname;
   if (pathname.length > 1) pathname = pathname.replace(/\/+$/, '');
+
+  if (pathname === '/internal/cron/backup' && request.method === 'POST') {
+    return handleCronTick(request, env);
+  }
 
   if (isWebVaultHidden(env) && !isBackendRequestPath(pathname)) {
     return webVaultNotFoundResponse(request);
@@ -350,24 +366,47 @@ function nodeRequestToRequest(req: http.IncomingMessage, body: Buffer): Request 
 async function writeResponse(res: http.ServerResponse, response: Response): Promise<void> {
   const headers: Record<string, string | string[]> = {};
   response.headers.forEach((value, key) => {
+    // Node decides framing for a streamed body; forwarding these two would either
+    // be wrong (content-length after re-chunking) or rejected by writeHead.
+    if (key === 'content-length' || key === 'transfer-encoding') return;
     const existing = headers[key];
     if (existing === undefined) headers[key] = value;
     else if (Array.isArray(existing)) existing.push(value);
     else headers[key] = [existing, value];
   });
   res.writeHead(response.status, headers);
-  if (response.body) {
-    const buffer = Buffer.from(await response.arrayBuffer());
-    res.end(buffer);
-  } else {
+  if (!response.body) {
     res.end();
+    return;
   }
+  // Stream with backpressure: buffering the whole body (arrayBuffer) doubled peak
+  // memory and OOMed small FC instances on large attachment downloads.
+  const nodeStream = Readable.fromWeb(response.body as unknown as NodeWebReadableStream);
+  nodeStream.on('error', () => res.destroy());
+  nodeStream.pipe(res);
 }
+
+const MAX_BODY_BYTES = Math.max(1, Number(process.env.MAX_BODY_MB || 100)) * 1024 * 1024;
 
 const server = http.createServer((req, res) => {
   const chunks: Buffer[] = [];
-  req.on('data', (chunk: Buffer) => chunks.push(chunk));
+  let received = 0;
+  let rejected = false;
+  req.on('data', (chunk: Buffer) => {
+    if (rejected) return;
+    received += chunk.length;
+    if (received > MAX_BODY_BYTES) {
+      rejected = true;
+      // Unbounded buffering is a memory DoS on a self-hosted instance.
+      res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8', Connection: 'close' });
+      res.end(JSON.stringify({ error: 'Payload too large' }));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
   req.on('end', () => {
+    if (rejected) return;
     void (async () => {
       try {
         const env = buildEnv();
@@ -391,26 +430,76 @@ const server = http.createServer((req, res) => {
   });
 });
 
+server.requestTimeout = Number(process.env.REQUEST_TIMEOUT_MS || 300_000);
+server.headersTimeout = Number(process.env.HEADERS_TIMEOUT_MS || 60_000);
+server.keepAliveTimeout = Number(process.env.KEEPALIVE_TIMEOUT_MS || 65_000);
+server.on('error', (error: { code?: string; message?: string }) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use. Set PORT to a free port.`);
+  } else {
+    console.error('Server error:', error);
+  }
+  process.exitCode = 1;
+});
+
 // WebSocket upgrade (notifications hub) is unavailable on this runtime.
 server.on('upgrade', (_req, socket) => {
   socket.write('HTTP/1.1 501 Not Implemented\r\nConnection: close\r\n\r\n');
   socket.destroy();
 });
 
-// Scheduled backup tick (mirrors the */5 cron trigger on Workers).
-const SCHEDULER_INTERVAL_MS = 5 * 60 * 1000;
-setInterval(() => {
-  void (async () => {
-    try {
-      const env = buildEnv();
-      await ensureDatabaseInitialized(env);
-      const { runScheduledBackupIfDue } = await import('../src/handlers/backup');
-      await runScheduledBackupIfDue(env);
-    } catch (error) {
-      console.error('Scheduled backup tick failed:', error);
-    }
-  })();
-}, SCHEDULER_INTERVAL_MS);
+// ---------------------------------------------------------------------------
+// Scheduled backup tick
+// ---------------------------------------------------------------------------
+// Driven by the platform (Aliyun FC timer trigger / EdgeOne cron) hitting
+// POST /internal/cron/backup with the shared secret. An in-process setInterval
+// was wrong for serverless: it never fires while the instance is scaled to zero,
+// it lets every instance run its own copy (duplicated WebDAV uploads, since the
+// 10-minute job lease lives in per-process memory), and it prevents idle
+// recycling. Set INPROCESS_CRON=1 only for a single long-lived self-hosted node.
+const CRON_SECRET = process.env.CRON_SECRET || '';
+
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function handleCronTick(request: Request, env: Env): Promise<Response> {
+  if (!CRON_SECRET) {
+    // Refuse to run an unauthenticated trigger: this endpoint starts backups.
+    return jsonResponse({ error: 'cron trigger not configured (set CRON_SECRET)' }, 503);
+  }
+  const provided = request.headers.get('x-cron-secret') || '';
+  if (!timingSafeEqual(provided, CRON_SECRET)) {
+    return jsonResponse({ error: 'Unauthorized' }, 401);
+  }
+  await ensureDatabaseInitialized(env);
+  const dbInitError = getDbInitError();
+  if (dbInitError) {
+    console.error('Skipping scheduled backup because DB init failed:', dbInitError);
+    return jsonResponse({ ok: false, error: 'database unavailable' }, 503);
+  }
+  const { runScheduledBackupIfDue } = await import('../src/handlers/backup');
+  await runScheduledBackupIfDue(env);
+  return jsonResponse({ ok: true });
+}
+
+if (process.env.INPROCESS_CRON === '1') {
+  const intervalMs = Number(process.env.INPROCESS_CRON_INTERVAL_MS || 5 * 60 * 1000);
+  const timer = setInterval(() => {
+    void handleCronTick(
+      new Request(`http://localhost/internal/cron/backup`, {
+        method: 'POST',
+        headers: { 'x-cron-secret': CRON_SECRET },
+      }),
+      buildEnv()
+    ).catch((error: unknown) => console.error('Scheduled backup tick failed:', error));
+  }, intervalMs);
+  timer.unref?.();
+  console.log(`  cron:           in-process every ${Math.round(intervalMs / 1000)}s (INPROCESS_CRON=1)`);
+}
 
 server.listen(PORT, () => {
   console.log(`NodeWarden (Node runtime / BYO-DB) listening on http://localhost:${PORT}`);
@@ -418,4 +507,5 @@ server.listen(PORT, () => {
   console.log(`  attachments:    ${ATTACHMENTS_DIR}`);
   console.log(`  web vault:      ${DIST_DIR}`);
   console.log(`  database:       ${process.env.DB_HOST ? `MySQL ${process.env.DB_HOST}:${process.env.DB_PORT || 3306}/${process.env.DB_NAME || ''}` : 'configured via env DB_* or admin UI (/admin/database)'}`);
+  console.log(`  cron:           POST /internal/cron/backup (x-cron-secret)${CRON_SECRET ? '' : ' — CRON_SECRET not set, endpoint disabled'}`);
 });

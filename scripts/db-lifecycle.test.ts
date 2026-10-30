@@ -25,7 +25,7 @@ interface MockDb {
   sqls: string[];
 }
 
-function mockD1(): MockDb {
+function mockD1(config?: { host: string; port: number; database: string }): MockDb {
   const sqls: string[] = [];
   const statement = (sql: string) => ({
     bind(..._values: unknown[]) {
@@ -47,6 +47,8 @@ function mockD1(): MockDb {
     },
   });
   const db = {
+    // Mimics MySqlDatabase.getConfig(): lets a test model "a different database".
+    ...(config ? { getConfig: () => config } : {}),
     prepare(sql: string) {
       sqls.push(`prepare:${sql}`);
       return statement(sql);
@@ -153,4 +155,38 @@ test('new StorageService(env.DB).getUserCount works after attach (FC crash shape
   const storage = new StorageService(env.DB);
   const count = await storage.getUserCount();
   assert.equal(typeof count, 'number');
+});
+
+
+// --- regression: schema init is per database target (C-2) -------------------
+
+test('switching databases re-runs schema init for the new target', async () => {
+  resetDbLifecycleForTests();
+  const dbA = mockD1({ host: 'db-a.internal', port: 3306, database: 'nodewarden' });
+  const dbB = mockD1({ host: 'db-b.internal', port: 3306, database: 'nodewarden' });
+
+  await ensureDatabaseInitialized(freshEnv(), async () => dbA.db);
+  assert.equal(countInitRuns(dbA.sqls), 1);
+
+  // Admin points the app at another MySQL at runtime. A process-wide
+  // "schema verified" flag made this a no-op, so the new database ended up with
+  // zero tables while the UI reported "ready".
+  const envB = freshEnv();
+  await ensureDatabaseInitialized(envB, async () => dbB.db);
+  assert.equal(envB.DB, dbB.db, 'new database must be attached');
+  assert.equal(countInitRuns(dbB.sqls), 1, 'schema must be created on the new database');
+
+  // Switching back must not re-run the DDL a second time for A.
+  await ensureDatabaseInitialized(freshEnv(), async () => dbA.db);
+  assert.equal(countInitRuns(dbA.sqls), 1, 'known database must not be re-initialized');
+});
+
+test('missing database binding reports an init error instead of crashing', async () => {
+  resetDbLifecycleForTests();
+  const env = freshEnv();
+  // Node runtime without DB_* env vars: getDatabase() resolves the D1 binding,
+  // which is null there. It used to throw on null.getConfig() / null.prepare().
+  await ensureDatabaseInitialized(env, async () => null as unknown as D1Database);
+  assert.ok(getDbInitError(), 'must surface a controlled error');
+  assert.ok(!isDbInitialized());
 });

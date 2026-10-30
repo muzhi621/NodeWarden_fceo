@@ -24,6 +24,24 @@
 //   (MySQL has no sqlite_master: error 1146 "Table 'db.sqlite_master' doesn't exist"
 //    used to break EVERY request once the schema version marker was stored, because
 //    StorageService.hasRequiredSchemaTables() always queries that catalog first.)
+// - LIMIT -1 (SQLite "no limit")                -> LIMIT 18446744073709551615
+//
+// KNOWN NON-EQUIVALENCES (deliberate, documented — do not "fix" by guessing):
+// 1. `ON CONFLICT(<cols>) DO UPDATE` — MySQL's ON DUPLICATE KEY fires for ANY
+//    unique key, so every assignment is wrapped in IF(<cols>=VALUES(<cols>), ...).
+//    When a *different* unique key is violated the statement becomes a no-op
+//    instead of raising SQLite's "UNIQUE constraint failed". Tables that carry a
+//    second unique key (users.email, webauthn_credentials.credential_id) are
+//    therefore written with an explicit UPDATE-then-INSERT in their repositories.
+// 2. Unique indexes are emitted on the full column (never with a prefix), which
+//    requires the column to be a bounded VARCHAR — see STRING_INDEX_COLUMNS.
+// 3. `TEXT DEFAULT '[]'` (JSON seed values) keeps LONGTEXT and DROPS the default:
+//    MySQL only accepts expression defaults for LOB types (8.0.13+, not portable
+//    to TiDB), and every insert path supplies the column explicitly. Reads fall
+//    back through parseJsonArray(..., []).
+// 4. `PRAGMA table_info(t)` only exposes column names (no type/notnull/default).
+//    The single caller only needs names; anything richer must use
+//    information_schema directly.
 
 const STRING_INDEX_COLUMNS = new Set([
   'id', 'user_id', 'cipher_id', 'folder_id', 'device_identifier', 'request_device_identifier',
@@ -36,13 +54,17 @@ const STRING_INDEX_COLUMNS = new Set([
 ]);
 
 // Recorded from CREATE TABLE translations: table -> column -> kind.
-const tableColumnKinds = new Map<string, Map<string, 'text' | 'int'>>();
+// 'text' = bounded VARCHAR (indexable as-is), 'lob' = LONGTEXT (needs a prefix
+// to be indexed at all), 'int' = BIGINT.
+type ColumnKind = 'text' | 'lob' | 'int';
+
+const tableColumnKinds = new Map<string, Map<string, ColumnKind>>();
 
 export function resetDialectTableCache(): void {
   tableColumnKinds.clear();
 }
 
-function recordColumn(table: string, column: string, kind: 'text' | 'int'): void {
+function recordColumn(table: string, column: string, kind: ColumnKind): void {
   let cols = tableColumnKinds.get(table);
   if (!cols) {
     cols = new Map();
@@ -51,11 +73,8 @@ function recordColumn(table: string, column: string, kind: 'text' | 'int'): void
   cols.set(column, kind);
 }
 
-function columnIsText(table: string, column: string): boolean {
-  const cols = tableColumnKinds.get(table);
-  const kind = cols?.get(column);
-  if (kind) return kind === 'text';
-  return STRING_INDEX_COLUMNS.has(column);
+function columnKindOf(table: string, column: string): ColumnKind | undefined {
+  return tableColumnKinds.get(table)?.get(column);
 }
 
 function maskLiterals(sql: string): { masked: string; literals: string[] } {
@@ -121,11 +140,15 @@ function rewriteOnConflict(sql: string): string {
 
   const head = sql.slice(0, match.index);
   const action = (match[2] || '').toUpperCase();
+  const conflictCols = (match[1] || '')
+    .split(',')
+    .map((c) => c.trim().replace(/"/g, ''))
+    .filter(Boolean);
 
   if (action.startsWith('NOTHING')) {
-    const conflictCols = (match[1] || '').split(',').map((c) => c.trim()).filter(Boolean);
-    const firstCol = conflictCols[0] || 'id';
-    return `${head}ON DUPLICATE KEY UPDATE ${quoteIdentifier(firstCol)}=${quoteIdentifier(firstCol)}`;
+    // A no-op assignment: the row is left untouched whatever key conflicted.
+    const firstCol = quoteIdentifier(conflictCols[0] || 'id');
+    return `${head}ON DUPLICATE KEY UPDATE ${firstCol}=${firstCol}`;
   }
 
   let setTail = match[3] || '';
@@ -136,23 +159,30 @@ function rewriteOnConflict(sql: string): string {
     setTail = setTail.slice(0, whereMatch.index);
   }
 
-  const items = setTail.split(',').map((s) => s.trim()).filter(Boolean);
+  // SQLite only handles the *named* conflict target; MySQL fires for any unique
+  // key and would rewrite the row that actually conflicted (a different row!).
+  // Wrapping every assignment in IF(target matches, new value, old value) restores
+  // the SQLite semantics: no target match => no data change, never a cross-row write.
+  const guardParts = conflictCols.map(
+    (col) => `${quoteIdentifier(col)}=VALUES(${quoteIdentifier(col)})`
+  );
+  const whereSql = whereCond
+    ? whereCond.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, 'VALUES($1)')
+    : '';
+  const guard = [guardParts.join(' AND '), whereSql].filter(Boolean).join(' AND ');
+
   const assignments: string[] = [];
-  for (const item of items) {
-    const itemMatch = item.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*excluded\.([A-Za-z_][A-Za-z0-9_]*)$/i);
-    if (!itemMatch) {
-      // Fallback: plain value replacement without conditional wrapper.
-      assignments.push(item.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, 'VALUES($1)'));
+  for (const item of setTail.split(',').map((s) => s.trim()).filter(Boolean)) {
+    const expr = item.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, 'VALUES($1)');
+    const assignMatch = expr.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([\s\S]+)$/);
+    if (!assignMatch) {
+      // Cannot identify the target column — leave the fragment untouched rather
+      // than emit invalid SQL; the caller still compiles (no guard, old behaviour).
+      assignments.push(expr);
       continue;
     }
-    const targetCol = quoteIdentifier(itemMatch[1]);
-    const valueExpr = `VALUES(${quoteIdentifier(itemMatch[2])})`;
-    if (whereCond) {
-      const cond = whereCond.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, 'VALUES($1)');
-      assignments.push(`${targetCol}=IF(${cond}, ${valueExpr}, ${targetCol})`);
-    } else {
-      assignments.push(`${targetCol}=${valueExpr}`);
-    }
+    const targetCol = quoteIdentifier(assignMatch[1]);
+    assignments.push(guard ? `${targetCol}=IF(${guard}, ${assignMatch[2]}, ${targetCol})` : `${targetCol}=${assignMatch[2]}`);
   }
 
   return `${head}ON DUPLICATE KEY UPDATE ${assignments.join(', ')}`;
@@ -207,7 +237,14 @@ function isKeyIndexClause(after: string): boolean {
   return !KEY_COLUMN_TYPE_TOKENS.has(String(tokenMatch[4] || '').toLowerCase());
 }
 
-function translateColumnDef(def: string, table: string): string {
+/** Value of a `DEFAULT <literal>` clause while literals are still masked. */
+function maskedDefaultValue(def: string, literals: string[]): string | null {
+  const match = def.match(/\bDEFAULT\s+\u0000(\d+)\u0000/i);
+  if (!match) return null;
+  return literals[Number(match[1])] ?? null;
+}
+
+function translateColumnDef(def: string, table: string, literals: string[] = []): string {
   let out = def;
   const nameMatch = out.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
   const columnName = nameMatch ? nameMatch[1] : '';
@@ -222,15 +259,39 @@ function translateColumnDef(def: string, table: string): string {
     if (columnName) recordColumn(table, columnName, 'text');
     return out;
   }
-  if (/\bTEXT\b/i.test(out)) {
-    if (/\bDEFAULT\b/i.test(out)) {
-      // MySQL forbids DEFAULT on TEXT/LONGTEXT. Bounded VARCHAR keeps the
-      // default (role/status/level/'[]' JSON columns are small).
-      out = out.replace(/\bTEXT\b/i, 'VARCHAR(2048)');
-    } else {
-      out = out.replace(/\bTEXT\b/i, 'LONGTEXT');
+  if (/\bTEXT\b/i.test(out) && /\bDEFAULT\b/i.test(out)) {
+    const rawDefault = maskedDefaultValue(out, literals);
+    // JSON seed default ('[]' / '{}'): the column holds a growing JSON document,
+    // so it must stay a LOB. MySQL only allows DEFAULT on TEXT/BLOB in expression
+    // form (8.0.13+, not portable to TiDB), and every insert path writes the
+    // column explicitly — drop the default and keep NOT NULL.
+    const isJsonDefault = rawDefault !== null
+      ? /^'\s*[[{]/.test(rawDefault)
+      : /DEFAULT\s+'\s*[[{]/i.test(out); // direct (unmasked) test calls
+    if (isJsonDefault) {
+      out = out
+        .replace(/\bTEXT\b/i, 'LONGTEXT')
+        .replace(/\s+DEFAULT\s+\u0000\d+\u0000/i, '')
+        .replace(/\s+DEFAULT\s+'(?:[^']|'')*'/i, '');
+      if (columnName) recordColumn(table, columnName, 'lob');
+      return out;
     }
+    // Short enum-ish default (role/status/level/category/purpose): bounded VARCHAR
+    // keeps the default and stays indexable.
+    out = out.replace(/\bTEXT\b/i, 'VARCHAR(255)');
     if (columnName) recordColumn(table, columnName, 'text');
+    return out;
+  }
+  if (/\bTEXT\b/i.test(out) && columnName && STRING_INDEX_COLUMNS.has(columnName)) {
+    // Identifier-like column (id/token/hash/timestamp): bounded VARCHAR so it
+    // can back a real (non-prefix) index and match FK/PK lengths.
+    out = out.replace(/\bTEXT\b/i, 'VARCHAR(512)');
+    recordColumn(table, columnName, 'text');
+    return out;
+  }
+  if (/\bTEXT\b/i.test(out)) {
+    out = out.replace(/\bTEXT\b/i, 'LONGTEXT');
+    if (columnName) recordColumn(table, columnName, 'lob');
     return out;
   }
   if (/\bINTEGER\b/i.test(out)) {
@@ -241,7 +302,16 @@ function translateColumnDef(def: string, table: string): string {
   return out;
 }
 
-function translateCreateTable(sql: string): string {
+/** True for column types we may still resize to satisfy key/FK length rules. */
+const RESIZABLE_TEXT = /\b(?:LONGTEXT|VARCHAR\((?:2048|512|255)\))/i;
+
+function resizeText(colDef: string, size: number): string {
+  return colDef
+    .replace(/\bLONGTEXT\b/i, `VARCHAR(${size})`)
+    .replace(/\bVARCHAR\((?:2048|512|255)\)/i, `VARCHAR(${size})`);
+}
+
+function translateCreateTable(sql: string, literals: string[] = []): string {
   const headerMatch = sql.match(/^(\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)([A-Za-z_"][A-Za-z0-9_"]*)\s*\(/i);
   if (!headerMatch) return sql;
 
@@ -295,10 +365,10 @@ function translateCreateTable(sql: string): string {
       }
       return part.replace(/PRIMARY\s+KEY\s*\(/i, 'PRIMARY KEY (');
     }
-    const colDef = translateColumnDef(part, table);
-    const nameMatch = colDef.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
-    const colName = nameMatch ? nameMatch[1] : '';
-    if (colName && (/LONGTEXT/i.test(colDef) || /VARCHAR\(2048\)/i.test(colDef))) {
+    const colDef = translateColumnDef(part, table, literals);
+    const colNameMatch = colDef.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
+    const colName = colNameMatch ? colNameMatch[1] : '';
+    if (colName && RESIZABLE_TEXT.test(colDef)) {
       if (pkCols.includes(colName)) {
         // Key columns must be bounded VARCHAR to be indexable. FK members keep
         // VARCHAR(512) to match the referenced key; other composite PK members
@@ -306,12 +376,12 @@ function translateCreateTable(sql: string): string {
         // budget. A single-column PK keeps the full VARCHAR(512).
         const size = pkCols.length === 1 || fkCols.has(colName) ? 512 : 255;
         recordColumn(table, colName, 'text');
-        return colDef.replace(/\bLONGTEXT\b/i, `VARCHAR(${size})`).replace(/\bVARCHAR\(2048\)/i, `VARCHAR(${size})`);
+        return resizeText(colDef, size);
       }
       if (fkCols.has(colName)) {
         // FK columns must have the exact type/length of the referenced key.
         recordColumn(table, colName, 'text');
-        return colDef.replace(/\bLONGTEXT\b/i, 'VARCHAR(512)').replace(/\bVARCHAR\(2048\)/i, 'VARCHAR(512)');
+        return resizeText(colDef, 512);
       }
     }
     return colDef;
@@ -328,6 +398,7 @@ function translateCreateTable(sql: string): string {
 }
 
 function translateCreateIndex(sql: string): string {
+  const isUnique = /^\s*CREATE\s+UNIQUE\s+INDEX\b/i.test(sql);
   // Drop IF NOT EXISTS (MySQL lacks it; adapter swallows duplicate-key errors).
   let out = sql.replace(/\bIF\s+NOT\s+EXISTS\b/gi, '');
   // Add prefix lengths to text columns in the column list.
@@ -338,7 +409,15 @@ function translateCreateIndex(sql: string): string {
       const col = rawCol.trim();
       const plain = col.replace(/\s*\(\d+\)\s*$/, '');
       if (/\(\d+\)\s*$/.test(col)) return col;
-      if (columnIsText(table, plain)) return `${plain}(191)`;
+      const kind = columnKindOf(table, plain);
+      // A UNIQUE index with a prefix only enforces uniqueness on the prefix: two
+      // values differing past the prefix would collide (and long WebAuthn
+      // credential ids would be rejected as duplicates). When the column is a
+      // known bounded VARCHAR, index the whole value instead.
+      if (isUnique && kind === 'text') return col;
+      if (kind === 'text' || kind === 'lob' || (kind === undefined && STRING_INDEX_COLUMNS.has(plain))) {
+        return `${plain}(191)`;
+      }
       return col;
     });
     return `${head}(${translatedCols.join(', ')})`;
@@ -346,13 +425,13 @@ function translateCreateIndex(sql: string): string {
   return out;
 }
 
-function translateAlterTable(sql: string): string {
+function translateAlterTable(sql: string, literals: string[] = []): string {
   let out = sql;
   const addMatch = out.match(/(\bADD\s+COLUMN\s+)([A-Za-z_"][A-Za-z0-9_"]*\s+[\s\S]+)$/i);
   if (addMatch) {
     const tableNameMatch = out.match(/ALTER\s+TABLE\s+([A-Za-z_"][A-Za-z0-9_"]*)/i);
     const table = (tableNameMatch ? tableNameMatch[1] : '').replace(/"/g, '');
-    const colDef = translateColumnDef(addMatch[2], table);
+    const colDef = translateColumnDef(addMatch[2], table, literals);
     out = out.slice(0, addMatch.index) + addMatch[1] + colDef;
   }
   return out;
@@ -422,13 +501,17 @@ export function translateSql(input: string): string {
   out = out.replace(/\bINSERT\s+OR\s+IGNORE\b/gi, 'INSERT IGNORE');
   out = out.replace(/\bINSERT\s+OR\s+REPLACE\b/gi, 'REPLACE');
 
+  // SQLite's "no limit" (LIMIT -1) — MySQL requires a non-negative LIMIT and
+  // still needs one when OFFSET is used. 2^64-1 is MySQL's documented "all rows".
+  out = out.replace(/\bLIMIT\s+-1\b/gi, 'LIMIT 18446744073709551615');
+
   // DDL.
   if (/^\s*CREATE\s+TABLE\b/i.test(out)) {
-    out = translateCreateTable(out);
+    out = translateCreateTable(out, literals);
   } else if (/^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\b/i.test(out)) {
     out = translateCreateIndex(out);
   } else if (/^\s*ALTER\s+TABLE\b/i.test(out)) {
-    out = translateAlterTable(out);
+    out = translateAlterTable(out, literals);
   }
 
   // Reserved word `key` as identifier.

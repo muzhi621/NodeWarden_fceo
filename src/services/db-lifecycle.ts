@@ -21,7 +21,7 @@ import { getDatabase } from './storage-factory';
 
 export type DbResolver = (env: Env) => Promise<D1Database>;
 
-let dbInitialized = false;
+let initializedKey: string | null = null;
 let dbInitError: string | null = null;
 let dbInitPromise: Promise<void> | null = null;
 
@@ -30,17 +30,22 @@ export function getDbInitError(): string | null {
 }
 
 export function isDbInitialized(): boolean {
-  return dbInitialized;
+  return initializedKey !== null;
+}
+
+/** Forget the "already initialized" state so the next call re-runs the schema. */
+export function resetDbLifecycle(): void {
+  initializedKey = null;
+  dbInitError = null;
+  dbInitPromise = null;
 }
 
 /** Test hook: clear module state between test cases. */
 export function resetDbLifecycleForTests(): void {
-  dbInitialized = false;
-  dbInitError = null;
-  dbInitPromise = null;
-  // StorageService gates schema creation on a static flag; reset it too so
-  // tests can observe initialization independently.
-  (StorageService as unknown as { schemaVerified: boolean }).schemaVerified = false;
+  resetDbLifecycle();
+  // StorageService caches verified databases; clear it so tests can observe
+  // initialization independently.
+  StorageService.invalidateSchemaCache();
 }
 
 function attachDatabase(env: Env, db: D1Database): void {
@@ -49,7 +54,12 @@ function attachDatabase(env: Env, db: D1Database): void {
 
 /**
  * Resolve the storage backend, attach it to `env.DB` for this request, and
- * (once per process) create/migrate the schema.
+ * (once per database target) create/migrate the schema.
+ *
+ * The schema step is keyed by the resolved database (D1 vs a specific MySQL
+ * host/database) instead of a process-wide boolean: pointing the app at another
+ * database at runtime must run the schema again, otherwise the new database is
+ * used without any tables.
  *
  * `resolve` is injectable for tests; production callers use getDatabase().
  */
@@ -57,13 +67,37 @@ export async function ensureDatabaseInitialized(
   env: Env,
   resolve: DbResolver = getDatabase
 ): Promise<void> {
-  if (!dbInitialized && !dbInitPromise) {
+  let db: D1Database | null = null;
+  try {
+    // getDatabase() is cached, so this is a no-op lookup in the steady state.
+    db = await resolve(env);
+  } catch (error) {
+    dbInitError = error instanceof Error ? error.message : String(error);
+    console.error('Failed to resolve database for request env:', error);
+    return;
+  }
+
+  if (!db) {
+    // Node runtime without DB_* env vars and without a stored config: the D1
+    // binding does not exist here, so there is nothing to talk to. Report it as
+    // an init error (controlled 500) instead of crashing on null.prepare later.
+    dbInitError = 'No database configured: set DB_* env vars or use /admin/database.';
+    console.error(dbInitError);
+    return;
+  }
+
+  // See the module doc comment: the Node runtime hands each request a fresh env
+  // with DB = null, so the attachment has to happen on every call.
+  attachDatabase(env, db);
+
+  const schemaKey = StorageService.schemaKeyFor(db);
+  if (initializedKey === schemaKey) return;
+
+  if (!dbInitPromise) {
     dbInitPromise = (async () => {
-      const db = await resolve(env);
-      attachDatabase(env, db);
-      const storage = new StorageService(db);
-      await storage.initializeDatabase();
-      dbInitialized = true;
+      await new StorageService(db).initializeDatabase();
+      initializedKey = schemaKey;
+      dbInitError = null;
     })()
       .catch((error: unknown) => {
         dbInitError = error instanceof Error ? error.message : String(error);
@@ -73,17 +107,5 @@ export async function ensureDatabaseInitialized(
         dbInitPromise = null;
       });
   }
-  if (dbInitPromise) await dbInitPromise;
-
-  // Always (re)attach the resolved DB to *this* request's env — see the module
-  // doc comment. The Node runtime hands each request a fresh env with DB=null.
-  if (dbInitialized) {
-    try {
-      attachDatabase(env, await resolve(env));
-      dbInitError = null;
-    } catch (error) {
-      dbInitError = error instanceof Error ? error.message : String(error);
-      console.error('Failed to resolve database for request env:', error);
-    }
-  }
+  await dbInitPromise;
 }

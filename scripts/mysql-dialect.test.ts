@@ -10,7 +10,9 @@ test('upsert: ON CONFLICT DO UPDATE SET with excluded values', () => {
   const out = translateSql(
     "INSERT INTO config(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
   );
-  assert.match(out, /ON DUPLICATE KEY UPDATE value=VALUES\(value\)/);
+  // MySQL cannot express the conflict target, so every assignment is guarded:
+  // a conflict on another unique key must not touch the row.
+  assert.match(out, /ON DUPLICATE KEY UPDATE value=IF\(`key`=VALUES\(`key`\), VALUES\(value\), value\)/);
   assert.doesNotMatch(out, /ON CONFLICT/);
   assert.match(out, /`key`/);
   assert.doesNotMatch(out, /PRIMARY `KEY`|DUPLICATE `KEY`/);
@@ -31,8 +33,8 @@ test('upsert: DO UPDATE with trailing WHERE becomes conditional assignments', ()
     'UPDATE t SET a=1 WHERE 0; INSERT INTO devices(user_id, name) VALUES(?, ?) ' +
     'ON CONFLICT(id) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at WHERE user_id=excluded.user_id'
   );
-  assert.match(out, /name=IF\(user_id=VALUES\(user_id\), VALUES\(name\), name\)/);
-  assert.match(out, /updated_at=IF\(user_id=VALUES\(user_id\), VALUES\(updated_at\), updated_at\)/);
+  assert.match(out, /name=IF\(id=VALUES\(id\) AND user_id=VALUES\(user_id\), VALUES\(name\), name\)/);
+  assert.match(out, /updated_at=IF\(id=VALUES\(id\) AND user_id=VALUES\(user_id\), VALUES\(updated_at\), updated_at\)/);
   assert.doesNotMatch(out, /excluded\./);
 });
 
@@ -128,7 +130,11 @@ test('CREATE TABLE: TEXT DEFAULT becomes VARCHAR with default kept', () => {
   const out = translateSql(
     "CREATE TABLE IF NOT EXISTS domain_settings (user_id TEXT PRIMARY KEY, equivalent_domains TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL)"
   );
-  assert.match(out, /equivalent_domains VARCHAR\(2048\) NOT NULL DEFAULT '\[\]'/);
+  // JSON seed defaults must stay a LOB (they grow): the default is dropped rather
+  // than capping the column at a VARCHAR bound.
+  assert.match(out, /equivalent_domains LONGTEXT NOT NULL/);
+  assert.doesNotMatch(out, /equivalent_domains VARCHAR/);
+  assert.doesNotMatch(out, /equivalent_domains LONGTEXT NOT NULL DEFAULT/);
 });
 
 test('CREATE TABLE: users table keeps UNIQUE email indexable', () => {
@@ -140,7 +146,7 @@ test('CREATE TABLE: users table keeps UNIQUE email indexable', () => {
   assert.match(out, /email VARCHAR\(512\) NOT NULL UNIQUE/);
   assert.match(out, /`key` LONGTEXT NOT NULL/);
   assert.match(out, /kdf_type BIGINT NOT NULL/);
-  assert.match(out, /role VARCHAR\(2048\) NOT NULL DEFAULT 'user'/);
+  assert.match(out, /role VARCHAR\(255\) NOT NULL DEFAULT 'user'/);
 });
 
 test('CREATE TABLE: table options ENGINE/CHARSET/COLLATE after closing paren (regression)', () => {
@@ -192,7 +198,7 @@ test('ALTER TABLE ADD COLUMN translates types and strips TEXT defaults', () => {
   const out = translateSql("ALTER TABLE users ADD COLUMN yubikey_nfc INTEGER NOT NULL DEFAULT 0");
   assert.match(out, /ADD COLUMN yubikey_nfc BIGINT NOT NULL DEFAULT 0/);
   const out2 = translateSql("ALTER TABLE domain_settings ADD COLUMN custom_equivalent_domains TEXT NOT NULL DEFAULT '[]'");
-  assert.match(out2, /ADD COLUMN custom_equivalent_domains VARCHAR\(2048\) NOT NULL DEFAULT '\[\]'/);
+  assert.match(out2, /ADD COLUMN custom_equivalent_domains LONGTEXT NOT NULL/);
 });
 
 test('double-quoted identifiers become backticks', () => {
@@ -220,7 +226,10 @@ test('real repository statement: refresh token upsert', () => {
     'INSERT INTO refresh_tokens(token, user_id, expires_at) VALUES(?, ?, ?) ' +
     'ON CONFLICT(token) DO UPDATE SET user_id=excluded.user_id, expires_at=excluded.expires_at'
   );
-  assert.match(out, /ON DUPLICATE KEY UPDATE user_id=VALUES\(user_id\), expires_at=VALUES\(expires_at\)/);
+  assert.match(
+    out,
+    /ON DUPLICATE KEY UPDATE user_id=IF\(token=VALUES\(token\), VALUES\(user_id\), user_id\), expires_at=IF\(token=VALUES\(token\), VALUES\(expires_at\), expires_at\)/
+  );
 });
 
 test('real repository statement: insert or ignore rate bucket', () => {
@@ -280,6 +289,113 @@ test('schema-wide: every CREATE TABLE fits MySQL key/type constraints', () => {
     // 3) Inline UNIQUE columns must be bounded VARCHAR (indexable).
     for (const bad of body.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s+LONGTEXT\b[^,]*\bUNIQUE\b/gi)) {
       assert.fail(`UNIQUE on LONGTEXT column ${bad[1]} is not indexable: ${out}`);
+    }
+  }
+});
+
+// --- regression: cross-row overwrite via ON DUPLICATE KEY (C-1) -------------
+
+test('upsert guard: assignment never fires when a DIFFERENT unique key conflicts', () => {
+  resetDialectTableCache();
+  // users has id PK + email UNIQUE. SQLite raises on the email collision; MySQL
+  // must at least leave the other account untouched (guard evaluates to false).
+  const out = translateSql(
+    'INSERT INTO users(id, email, master_password_hash) VALUES(?, ?, ?) ' +
+    'ON CONFLICT(id) DO UPDATE SET email=excluded.email, master_password_hash=excluded.master_password_hash'
+  );
+  assert.match(out, /email=IF\(id=VALUES\(id\), VALUES\(email\), email\)/);
+  assert.match(out, /master_password_hash=IF\(id=VALUES\(id\), VALUES\(master_password_hash\), master_password_hash\)/);
+  // No bare assignment may survive: `col=VALUES(col)` would update whatever row
+  // conflicted, which for users/webauthn_credentials is a different account.
+  assert.doesNotMatch(out, /email=VALUES\(email\)/);
+});
+
+test('upsert guard: expression assignments are guarded too', () => {
+  const out = translateSql(
+    'INSERT INTO rate_limit_buckets(ip, attempts, updated_at) VALUES(?, 1, ?) ' +
+    'ON CONFLICT(ip) DO UPDATE SET attempts = attempts + 1, updated_at = excluded.updated_at'
+  );
+  assert.match(out, /attempts=IF\(ip=VALUES\(ip\), attempts \+ 1, attempts\)/);
+});
+
+// --- regression: unique index prefix (M-3) ---------------------------------
+
+test('CREATE UNIQUE INDEX: no prefix on a known bounded VARCHAR column', () => {
+  resetDialectTableCache();
+  translateSql(
+    'CREATE TABLE IF NOT EXISTS webauthn_credentials (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, credential_id TEXT NOT NULL)'
+  );
+  const out = translateSql(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_webauthn_credentials_credential_id ON webauthn_credentials(credential_id)'
+  );
+  // A prefixed UNIQUE index only enforces uniqueness on the first 191 chars and
+  // rejects long (but valid) WebAuthn credential ids as duplicates.
+  assert.match(out, /ON webauthn_credentials\(credential_id\)$/);
+  assert.doesNotMatch(out, /credential_id\(191\)/);
+  // The column itself must be bounded, or MySQL rejects the index (1170).
+  const create = translateSql('CREATE TABLE IF NOT EXISTS t3 (credential_id TEXT NOT NULL)');
+  assert.match(create, /credential_id VARCHAR\(512\) NOT NULL/);
+});
+
+test('CREATE UNIQUE INDEX: unknown/LOB column keeps a prefix (still valid SQL)', () => {
+  resetDialectTableCache();
+  const out = translateSql('CREATE UNIQUE INDEX IF NOT EXISTS idx_x ON unknown_tbl(some_col)');
+  assert.match(out, /ON unknown_tbl\(some_col(\(191\))?\)/);
+});
+
+// --- regression: LIMIT -1 (C-3) --------------------------------------------
+
+test('LIMIT -1 becomes a valid MySQL limit that still works with OFFSET', () => {
+  const out = translateSql(
+    'SELECT id FROM audit_logs ORDER BY created_at DESC LIMIT -1 OFFSET ?'
+  );
+  assert.doesNotMatch(out, /LIMIT -1/);
+  assert.match(out, /LIMIT 18446744073709551615 OFFSET \?/);
+});
+
+test('LIMIT -1 inside a string literal is untouched', () => {
+  const out = translateSql("UPDATE config SET value = 'LIMIT -1 OFFSET 3' WHERE key = ?");
+  assert.match(out, /'LIMIT -1 OFFSET 3'/);
+});
+
+// --- regression: portable audit prune (C-3, MySQL error 1093) --------------
+
+test('audit prune SQL is executable on both dialects', () => {
+  // Mirrors pruneAuditLogsToMax: no LIMIT -1, and the same-table subquery is
+  // wrapped in a derived table so MySQL accepts it (ER_UPDATE_TABLE_USED).
+  const out = translateSql(
+    'DELETE FROM audit_logs WHERE id NOT IN (' +
+      'SELECT id FROM (SELECT id FROM audit_logs ORDER BY created_at DESC LIMIT ?) AS keep)'
+  );
+  assert.doesNotMatch(out, /LIMIT -1/);
+  assert.match(out, /AS keep\)/);
+});
+
+// --- guard: no SQLite-only syntax survives translation ---------------------
+
+test('translated output never contains SQLite-only syntax', () => {
+  const sqliteOnly = [
+    /\bON\s+CONFLICT\b/i,
+    /\bINSERT\s+OR\s+(IGNORE|REPLACE|ABORT|FAIL|ROLLBACK)\b/i,
+    /\bFROM\s+(?:main\.)?sqlite_(?:master|schema)\b/i,
+    /\bAUTOINCREMENT\b/i,
+    /\bLIMIT\s+-1\b/i,
+    /\bstrftime\s*\(/i,
+    /\bPRAGMA\b/i,
+  ];
+  const statements = [
+    "INSERT INTO config(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    'INSERT OR IGNORE INTO config(key, value) VALUES(?, ?)',
+    "SELECT name FROM sqlite_master WHERE type = 'table'",
+    "UPDATE t SET a = CAST(strftime('%s','now') AS INTEGER) * 1000",
+    'SELECT id FROM t LIMIT -1 OFFSET ?',
+    'CREATE TABLE IF NOT EXISTS t (id TEXT PRIMARY KEY)',
+  ];
+  for (const stmt of statements) {
+    resetDialectTableCache();
+    const out = translateSql(stmt);
+    for (const re of sqliteOnly) {
+      assert.doesNotMatch(out, re, `${re} survived translation of: ${stmt} -> ${out}`);
     }
   }
 });

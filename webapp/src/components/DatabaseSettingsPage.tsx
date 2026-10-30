@@ -98,10 +98,14 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
     try {
       const result = await saveDbConfig(props.authedFetch, collectInput());
       if (result.ok) {
-        setNotice({
-          kind: 'ok',
-          text: `已保存并生效（${result.version || 'MySQL'}，${result.latencyMs ?? 0}ms）。配置已加密存储，密码不再回显。`,
-        });
+        if (result.warning) {
+          setNotice({ kind: 'error', text: result.warning });
+        } else {
+          setNotice({
+            kind: 'ok',
+            text: `已保存并生效（${result.version || 'MySQL'}，${result.latencyMs ?? 0}ms）。配置已加密存储，密码不再回显。`,
+          });
+        }
         await load();
       } else {
         setNotice({ kind: 'error', text: result.error || '保存失败' });

@@ -52,15 +52,13 @@ async function maybeServeAsset(request: Request, env: Env): Promise<Response | n
 
 async function handleHealthz(env: Env): Promise<Response> {
   const status = await getDatabaseStatus(env);
+  if (status.error) {
+    // Unauthenticated endpoint: raw MySQL errors leak the DB user, egress IP and
+    // schema names. Keep the detail in the logs, expose only the shape.
+    console.error('[healthz] database unavailable:', status.error);
+  }
   return jsonResponse(
-    {
-      ok: status.ok,
-      db: status.ok ? 'up' : 'down',
-      mode: status.mode,
-      source: status.source,
-      ...(status.version ? { version: status.version } : {}),
-      ...(status.error ? { error: status.error } : {}),
-    },
+    { ok: status.ok, db: status.ok ? 'up' : 'down', mode: status.mode, source: status.source },
     status.ok ? 200 : 503
   );
 }

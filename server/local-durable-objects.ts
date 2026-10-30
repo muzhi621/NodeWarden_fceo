@@ -44,10 +44,18 @@ type StorageListOptions = { prefix?: string; limit?: number; reverse?: boolean }
 /**
  * Minimal stand-in for `DurableObjectStorage`: same method surface the Worker
  * code uses, backed by a Map.
+ *
+ * `setAlarm` is not just bookkeeping — the platform would call the object's
+ * `alarm()` when it fires (NotificationsHub uses it to purge expired websocket
+ * tickets). A field-only implementation silently broke that contract and let the
+ * ticket map grow forever on a long-lived instance.
  */
 class MemoryDurableObjectStorage {
   private readonly values = new Map<string, unknown>();
   private alarmAt: number | null = null;
+  private alarmTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(private readonly onAlarm?: () => Promise<void>) {}
 
   async get<T = unknown>(key: string): Promise<T | undefined> {
     return this.values.get(key) as T | undefined;
@@ -103,10 +111,45 @@ class MemoryDurableObjectStorage {
 
   async setAlarm(at: number | Date): Promise<void> {
     this.alarmAt = typeof at === 'number' ? at : at.getTime();
+    this.arm();
   }
 
   async deleteAlarm(): Promise<void> {
     this.alarmAt = null;
+    this.disarm();
+  }
+
+  private disarm(): void {
+    if (this.alarmTimer) {
+      clearTimeout(this.alarmTimer);
+      this.alarmTimer = null;
+    }
+  }
+
+  private arm(): void {
+    this.disarm();
+    if (this.alarmAt === null) return;
+    // Node fires timeouts above 2^31-1 ms immediately; re-arm in slices instead.
+    const delay = Math.min(Math.max(this.alarmAt - Date.now(), 0), 2_147_483_647);
+    this.alarmTimer = setTimeout(() => {
+      this.alarmTimer = null;
+      void this.fire();
+    }, delay);
+    (this.alarmTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  private async fire(): Promise<void> {
+    if (this.alarmAt === null) return;
+    if (this.alarmAt > Date.now()) {
+      this.arm(); // woke up early (timer clamp): wait out the remainder
+      return;
+    }
+    this.alarmAt = null;
+    try {
+      await this.onAlarm?.();
+    } catch (error) {
+      console.error('[local-do] alarm handler failed:', error);
+    }
   }
 
   async transaction<T>(closure: (txn: MemoryDurableObjectStorage) => Promise<T>): Promise<T> {
@@ -158,19 +201,34 @@ export function createLocalDurableObjectNamespace(
 ): LocalDurableObjectNamespace {
   const instances = new Map<string, Promise<DurableObjectLike>>();
   const storages = new Map<string, MemoryDurableObjectStorage>();
+  // Alarm callbacks need to reach the live instance; a holder survives instance
+  // restarts (a failed constructor retries) without rebinding the storage.
+  const instanceRefs = new Map<string, { current: DurableObjectLike | null }>();
 
   const ensureInstance = (name: string): Promise<DurableObjectLike> => {
     const cached = instances.get(name);
     if (cached) return cached;
 
+    let ref = instanceRefs.get(name);
+    if (!ref) {
+      ref = { current: null };
+      instanceRefs.set(name, ref);
+    }
+
     let storage = storages.get(name);
     if (!storage) {
-      storage = new MemoryDurableObjectStorage();
+      storage = new MemoryDurableObjectStorage(async () => {
+        const target = ref!.current as unknown as { alarm?: () => Promise<void> } | null;
+        await target?.alarm?.();
+      });
       storages.set(name, storage);
     }
     const state = createState(name, storage);
 
-    const pending: Promise<DurableObjectLike> = (async () => factory(state, getEnv()))();
+    const pending: Promise<DurableObjectLike> = (async () => factory(state, getEnv()))().then((instance) => {
+      ref!.current = instance;
+      return instance;
+    });
     instances.set(name, pending);
     // A constructor failure must not poison the name forever: drop the entry so
     // the next call retries (the caller still sees the 500).

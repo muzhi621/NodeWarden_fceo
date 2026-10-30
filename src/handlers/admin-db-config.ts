@@ -20,6 +20,8 @@ import {
 import { resetDatabaseCache, getDatabase } from '../services/storage-factory';
 import { MySqlDatabase } from '../services/storage-mysql';
 import { StorageService } from '../services/storage';
+import { writeAuditEvent } from '../services/audit-events';
+import { readEnv } from '../services/runtime-env';
 
 async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
   try {
@@ -28,6 +30,61 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
   } catch {
     return {};
   }
+}
+
+/**
+ * Reject targets that turn the admin "test connection" form into an internal
+ * network probe. A serverless function usually sits inside a VPC where private
+ * ranges, link-local metadata endpoints and localhost are reachable; letting an
+ * admin (or a stolen admin token) dial arbitrary host:port pairs exposes them.
+ * DB_HOST_ALLOWLIST lets a self-hosted-in-VPC deployment opt back in.
+ *
+ * Implemented with plain string checks on purpose: this module is bundled for
+ * Cloudflare Workers too, where `node:net` is not available.
+ */
+function isPrivateIpv4(host: string): boolean {
+  const parts = host.split('.');
+  if (parts.length !== 4) return false;
+  const octets = parts.map((part) => Number(part));
+  if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  const [a, b] = octets;
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254) // link-local, includes 169.254.169.254 metadata
+  );
+}
+
+function assertHostAllowed(host: string): string | null {
+  const allowlist = (readEnv('DB_HOST_ALLOWLIST') || '')
+    .split(',')
+    .map((entry: string) => entry.trim())
+    .filter(Boolean);
+  if (allowlist.includes(host)) return null;
+
+  const lowered = host.toLowerCase();
+  if (lowered === 'localhost' || lowered.endsWith('.local') || lowered.endsWith('.internal')) {
+    return 'host not allowed';
+  }
+  if (isPrivateIpv4(lowered)) return 'host not allowed';
+  // IPv6 literals: block loopback / unique-local / link-local.
+  if (lowered.includes(':') && /^(::1$|::ffff:|fc|fd|fe80)/i.test(lowered)) return 'host not allowed';
+  return null;
+}
+
+/** Coarse failure class: useful for an admin, useless for a port scanner. */
+function classifyConnectionError(error: unknown): string {
+  const code = String((error as { code?: string })?.code ?? '');
+  const msg = error instanceof Error ? error.message : String(error);
+  if (code === 'ECONNREFUSED' || /ECONNREFUSED/.test(msg)) return 'refused';
+  if (code === 'ETIMEDOUT' || /ETIMEDOUT|timeout/i.test(msg)) return 'timeout';
+  if (code === 'ENOTFOUND' || /ENOTFOUND/.test(msg)) return 'dns';
+  if (/Access denied/i.test(msg)) return 'auth';
+  if (/certificate|TLS|SSL|self[- ]signed/i.test(msg)) return 'tls';
+  if (/Unknown database/i.test(msg)) return 'database';
+  return 'unknown';
 }
 
 function normalizeCandidate(body: Record<string, unknown>, fallback?: DbRuntimeConfig | null): {
@@ -73,7 +130,14 @@ async function testMySqlConnection(config: DbRuntimeConfig): Promise<{
   version?: string;
   schemaState?: string;
   error?: string;
+  errorKind?: string;
 }> {
+  const blocked = assertHostAllowed(config.host || '');
+  if (blocked) {
+    // Same shape as a failed connection so the response cannot be used to tell
+    // "blocked by policy" apart from "host does not exist".
+    return { ok: false, latencyMs: 0, error: blocked, errorKind: 'blocked' };
+  }
   const startedAt = Date.now();
   const db = new MySqlDatabase({
     host: config.host || '',
@@ -103,10 +167,18 @@ async function testMySqlConnection(config: DbRuntimeConfig): Promise<{
       schemaState,
     };
   } catch (error) {
+    const kind = classifyConnectionError(error);
+    console.error('[db-config] connection test failed', {
+      host: config.host,
+      port: config.port,
+      kind,
+      message: error instanceof Error ? error.message : String(error),
+    });
     return {
       ok: false,
       latencyMs: Date.now() - startedAt,
-      error: error instanceof Error ? error.message : String(error),
+      error: `connection failed (${kind})`,
+      errorKind: kind,
     };
   } finally {
     await db.close();
@@ -151,13 +223,13 @@ export async function handleAdminTestDbConfig(request: Request, env: Env, actorU
 }
 
 export async function handleAdminSaveDbConfig(request: Request, env: Env, actorUser: User): Promise<Response> {
-  void actorUser;
   const body = await readJsonBody(request);
 
   if (body.mode === 'd1') {
     await clearRuntimeConfig(env);
     await resetDatabaseCache();
-    return jsonResponse({ ok: true, mode: 'd1' });
+    await auditDbConfigChange(env, actorUser, 'admin.db_config.cleared', null);
+    return jsonResponse({ ok: true, mode: 'd1', effective: true });
   }
 
   const stored = await loadRuntimeConfig(env);
@@ -166,7 +238,7 @@ export async function handleAdminSaveDbConfig(request: Request, env: Env, actorU
 
   const test = await testMySqlConnection(config);
   if (!test.ok) {
-    return jsonResponse({ ok: false, error: test.error ?? 'connection test failed' }, 502);
+    return jsonResponse({ ok: false, error: test.error ?? 'connection test failed', errorKind: test.errorKind }, 502);
   }
 
   const saved = await saveRuntimeConfig(env, config);
@@ -180,20 +252,73 @@ export async function handleAdminSaveDbConfig(request: Request, env: Env, actorU
     return errorResponse('Failed to persist database config', 500);
   }
 
-  // Rebuild the pool with the new settings and bootstrap the schema.
+  // Rebuild the pool with the new settings and bootstrap the schema. The schema
+  // step is keyed by the target database, so a freshly configured MySQL really
+  // gets its tables (a process-wide "already initialized" flag used to skip it).
   await resetDatabaseCache();
   const db = await getDatabase(env);
   (env as { DB: D1Database }).DB = db;
   const storage = new StorageService(db);
-  await storage.initializeDatabase();
+  let schemaReady = false;
+  let schemaError: string | undefined;
+  try {
+    await storage.initializeDatabase();
+    schemaReady = true;
+  } catch (initError) {
+    schemaError = initError instanceof Error ? initError.message : String(initError);
+    console.error('[db-config] schema bootstrap failed after save:', initError);
+  }
 
-  return jsonResponse({ ok: true, mode: 'mysql', schemaReady: true, latencyMs: test.latencyMs, version: test.version });
+  // Env vars win over the runtime config (see resolveDbConfig), so "saved" must
+  // not be reported as "in effect" when DB_* is set.
+  const envOverride = !!resolveDbConfigFromEnv(env);
+  await auditDbConfigChange(env, actorUser, 'admin.db_config.saved', config);
+
+  return jsonResponse({
+    ok: true,
+    mode: 'mysql',
+    saved: true,
+    effective: !envOverride && schemaReady,
+    warning: envOverride
+      ? 'DB_* 环境变量优先于运行时配置：配置已保存，但当前生效的仍是环境变量指向的数据库。'
+      : schemaError
+        ? `配置已保存，但建表失败：${schemaError}`
+        : undefined,
+    schemaReady,
+    latencyMs: test.latencyMs,
+    version: test.version,
+  });
 }
 
 export async function handleAdminClearDbConfig(request: Request, env: Env, actorUser: User): Promise<Response> {
   void request;
-  void actorUser;
   await clearRuntimeConfig(env);
   await resetDatabaseCache();
+  await auditDbConfigChange(env, actorUser, 'admin.db_config.cleared', null);
   return jsonResponse({ ok: true, mode: 'd1' });
+}
+
+/** Changing where the database lives is a high-privilege action: keep a trail. */
+async function auditDbConfigChange(
+  env: Env,
+  actorUser: User,
+  action: string,
+  config: DbRuntimeConfig | null
+): Promise<void> {
+  if (!env.DB) return;
+  const target = config ? `${config.host}:${config.port ?? 3306}/${config.database ?? ''}` : 'd1';
+  try {
+    await writeAuditEvent(new StorageService(env.DB), {
+      actorUserId: actorUser.id,
+      action,
+      category: 'system',
+      level: 'security',
+      targetType: 'database',
+      targetId: target,
+      metadata: { destinationName: target, destinationType: config ? 'mysql' : 'd1', status: 'ok' },
+    });
+  } catch (error) {
+    // Auditing must never break the config change itself.
+    console.error('[db-config] audit write failed:', error);
+  }
 }

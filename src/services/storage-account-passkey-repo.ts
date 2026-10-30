@@ -160,16 +160,40 @@ export async function saveAccountPasskeyCredential(
   credential: AccountPasskeyCredential
 ): Promise<void> {
   await ensureAccountPasskeySchema(db);
+  // webauthn_credentials has two unique keys (id PK + credential_id UNIQUE).
+  // MySQL's ON DUPLICATE KEY UPDATE would rewrite whichever row conflicted, so a
+  // credential_id collision could overwrite another user's authenticator (public
+  // key swap => login as them). Update-then-insert instead: an id match updates,
+  // a credential_id collision raises 1062 exactly like SQLite did.
+  const updated = await safeBind(
+    db.prepare(
+      'UPDATE webauthn_credentials SET purpose=?, name=?, public_key=?, credential_id=?, counter=?, type=?, aa_guid=?, ' +
+        'transports=?, encrypted_user_key=?, encrypted_public_key=?, encrypted_private_key=?, supports_prf=?, updated_at=? ' +
+        'WHERE id=?'
+    ),
+    credential.purpose,
+    credential.name,
+    credential.publicKey,
+    credential.credentialId,
+    credential.counter,
+    credential.type,
+    credential.aaGuid,
+    credential.transports ? JSON.stringify(credential.transports) : null,
+    credential.encryptedUserKey,
+    credential.encryptedPublicKey,
+    credential.encryptedPrivateKey,
+    credential.supportsPrf ? 1 : 0,
+    credential.updatedAt,
+    credential.id
+  ).run();
+  if (Number(updated.meta.changes ?? 0) > 0) return;
+
   await safeBind(
     db.prepare(
       'INSERT INTO webauthn_credentials(' +
         'id, user_id, purpose, name, public_key, credential_id, counter, type, aa_guid, transports, ' +
         'encrypted_user_key, encrypted_public_key, encrypted_private_key, supports_prf, created_at, updated_at' +
-        ') VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
-        'ON CONFLICT(id) DO UPDATE SET ' +
-        'purpose=excluded.purpose, name=excluded.name, public_key=excluded.public_key, credential_id=excluded.credential_id, counter=excluded.counter, ' +
-        'type=excluded.type, aa_guid=excluded.aa_guid, transports=excluded.transports, encrypted_user_key=excluded.encrypted_user_key, ' +
-        'encrypted_public_key=excluded.encrypted_public_key, encrypted_private_key=excluded.encrypted_private_key, supports_prf=excluded.supports_prf, updated_at=excluded.updated_at'
+        ') VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ),
     credential.id,
     credential.userId,

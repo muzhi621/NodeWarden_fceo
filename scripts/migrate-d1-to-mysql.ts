@@ -45,15 +45,20 @@ function parseArgs(argv: string[]): CliOptions {
   };
   const file = get('--file');
   if (!file) {
-    console.error('Usage: migrate-d1-to-mysql --file <d1-dump.sql> [--host h] [--port p] [--user u] [--password pw] [--database db] [--ssl] [--truncate] [--dry-run]');
+    console.error('Usage: migrate-d1-to-mysql --file <d1-dump.sql> [--host h] [--port p] [--user u] [--database db] [--ssl] [--truncate] [--dry-run]');
+    console.error('       Password: pass via DB_PASSWORD env var (preferred) — --password ends up in ps/shell history.');
     process.exit(2);
+  }
+  const cliPassword = get('--password');
+  if (cliPassword) {
+    console.warn('[migrate] warning: --password is visible to other processes and in shell history; prefer DB_PASSWORD.');
   }
   return {
     file,
     host: get('--host') ?? process.env.DB_HOST ?? '127.0.0.1',
     port: Number(get('--port') ?? process.env.DB_PORT ?? 3306),
     user: get('--user') ?? process.env.DB_USER ?? 'root',
-    password: get('--password') ?? process.env.DB_PASSWORD ?? '',
+    password: cliPassword ?? process.env.DB_PASSWORD ?? '',
     database: get('--database') ?? process.env.DB_NAME ?? 'nodewarden',
     ssl: argv.includes('--ssl') || process.env.DB_SSL === 'true',
     truncate: argv.includes('--truncate'),
@@ -132,7 +137,10 @@ async function main(): Promise<void> {
     password: opts.password,
     database: opts.database,
     ssl: opts.ssl,
-    connectionLimit: 5,
+    // Exactly one connection: SET FOREIGN_KEY_CHECKS is a SESSION variable, so it
+    // must be issued on the same connection that runs the import. With a bigger
+    // pool the SET lands on one socket and the batches run on others.
+    connectionLimit: 1,
     connectTimeoutMs: 10_000,
   };
 

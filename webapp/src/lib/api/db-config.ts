@@ -57,13 +57,13 @@ export async function testDbConfig(authedFetch: AuthedFetch, input: DbConfigInpu
   return body ?? { ok: false, latencyMs: 0, error: `HTTP ${resp.status}` };
 }
 
-export async function saveDbConfig(authedFetch: AuthedFetch, input: DbConfigInput): Promise<{ ok: boolean; error?: string; latencyMs?: number; version?: string }> {
+export async function saveDbConfig(authedFetch: AuthedFetch, input: DbConfigInput): Promise<{ ok: boolean; error?: string; latencyMs?: number; version?: string; effective?: boolean; schemaReady?: boolean; warning?: string }> {
   const resp = await authedFetch('/api/admin/db-config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
-  const body = await parseJson<{ ok: boolean; error?: string; latencyMs?: number; version?: string }>(resp);
+  const body = await parseJson<{ ok: boolean; error?: string; latencyMs?: number; version?: string; effective?: boolean; schemaReady?: boolean; warning?: string }>(resp);
   if (!body) return { ok: false, error: `HTTP ${resp.status}` };
   return body;
 }

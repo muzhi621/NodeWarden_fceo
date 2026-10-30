@@ -182,8 +182,23 @@ async function writeStoredPayload(env: Env, payload: string | null): Promise<boo
   return false;
 }
 
-export async function loadRuntimeConfig(env: Env): Promise<DbRuntimeConfig | null> {
+// Reading the stored payload costs a KV/R2 round trip + an AES-GCM decrypt, and
+// resolveDbConfig() runs on EVERY request (db-lifecycle re-attaches env.DB per
+// request). Caching it means steady state costs one read per TTL instead of one
+// per request; write paths refresh the cache so a save takes effect immediately.
+const CONFIG_CACHE_TTL_MS = 30_000;
+let payloadCache: { payload: string | null; at: number } | null = null;
+
+async function readStoredPayloadCached(env: Env): Promise<string | null> {
+  const now = Date.now();
+  if (payloadCache && now - payloadCache.at < CONFIG_CACHE_TTL_MS) return payloadCache.payload;
   const payload = await readStoredPayload(env);
+  payloadCache = { payload, at: now };
+  return payload;
+}
+
+export async function loadRuntimeConfig(env: Env): Promise<DbRuntimeConfig | null> {
+  const payload = await readStoredPayloadCached(env);
   if (!payload) return null;
   return decryptJson(env, payload);
 }
@@ -191,11 +206,15 @@ export async function loadRuntimeConfig(env: Env): Promise<DbRuntimeConfig | nul
 export async function saveRuntimeConfig(env: Env, config: DbRuntimeConfig): Promise<boolean> {
   const payload = await encryptJson(env, config);
   if (!payload) return false;
-  return writeStoredPayload(env, payload);
+  const saved = await writeStoredPayload(env, payload);
+  if (saved) payloadCache = { payload, at: Date.now() };
+  return saved;
 }
 
 export async function clearRuntimeConfig(env: Env): Promise<boolean> {
-  return writeStoredPayload(env, null);
+  const saved = await writeStoredPayload(env, null);
+  if (saved) payloadCache = { payload: null, at: Date.now() };
+  return saved;
 }
 
 function parsePort(raw: string | undefined, fallback: number): number {

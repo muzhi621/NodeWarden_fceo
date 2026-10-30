@@ -908,11 +908,42 @@ async function getAllUsers(db) {
 }
 async function saveUser(db, safeBind, user) {
   const email = user.email.toLowerCase();
-  const stmt = db.prepare(
-    "INSERT INTO users(id, email, name, master_password_hint, master_password_hash, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, role, status, verify_devices, totp_secret, totp_recovery_code, yubikey_key1, yubikey_key2, yubikey_key3, yubikey_key4, yubikey_key5, yubikey_nfc, api_key, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email=excluded.email, name=excluded.name, master_password_hint=excluded.master_password_hint, master_password_hash=excluded.master_password_hash, key=excluded.key, private_key=excluded.private_key, public_key=excluded.public_key, kdf_type=excluded.kdf_type, kdf_iterations=excluded.kdf_iterations, kdf_memory=excluded.kdf_memory, kdf_parallelism=excluded.kdf_parallelism, security_stamp=excluded.security_stamp, role=excluded.role, status=excluded.status, verify_devices=excluded.verify_devices, totp_secret=excluded.totp_secret, totp_recovery_code=excluded.totp_recovery_code, yubikey_key1=excluded.yubikey_key1, yubikey_key2=excluded.yubikey_key2, yubikey_key3=excluded.yubikey_key3, yubikey_key4=excluded.yubikey_key4, yubikey_key5=excluded.yubikey_key5, yubikey_nfc=excluded.yubikey_nfc, api_key=excluded.api_key, updated_at=excluded.updated_at"
-  );
+  const updated = await safeBind(
+    db.prepare(
+      "UPDATE users SET email=?, name=?, master_password_hint=?, master_password_hash=?, key=?, private_key=?, public_key=?, kdf_type=?, kdf_iterations=?, kdf_memory=?, kdf_parallelism=?, security_stamp=?, role=?, status=?, verify_devices=?, totp_secret=?, totp_recovery_code=?, yubikey_key1=?, yubikey_key2=?, yubikey_key3=?, yubikey_key4=?, yubikey_key5=?, yubikey_nfc=?, api_key=?, updated_at=? WHERE id=?"
+    ),
+    email,
+    user.name,
+    user.masterPasswordHint,
+    user.masterPasswordHash,
+    user.key,
+    user.privateKey,
+    user.publicKey,
+    user.kdfType,
+    user.kdfIterations,
+    user.kdfMemory,
+    user.kdfParallelism,
+    user.securityStamp,
+    user.role,
+    user.status,
+    user.verifyDevices ? 1 : 0,
+    user.totpSecret,
+    user.totpRecoveryCode,
+    user.yubikeyKey1,
+    user.yubikeyKey2,
+    user.yubikeyKey3,
+    user.yubikeyKey4,
+    user.yubikeyKey5,
+    user.yubikeyNfc ? 1 : 0,
+    user.apiKey,
+    user.updatedAt,
+    user.id
+  ).run();
+  if (Number(updated.meta.changes ?? 0) > 0) return;
   await safeBind(
-    stmt,
+    db.prepare(
+      "INSERT INTO users(id, email, name, master_password_hint, master_password_hash, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, role, status, verify_devices, totp_secret, totp_recovery_code, yubikey_key1, yubikey_key2, yubikey_key3, yubikey_key4, yubikey_key5, yubikey_nfc, api_key, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ),
     user.id,
     email,
     user.name,
@@ -1129,7 +1160,7 @@ async function pruneAuditLogs(db, beforeIso) {
 async function pruneAuditLogsToMax(db, maxEntries) {
   const limit = Math.max(1, Math.floor(maxEntries));
   const result = await db.prepare(
-    "DELETE FROM audit_logs WHERE id IN (SELECT id FROM audit_logs ORDER BY created_at DESC LIMIT -1 OFFSET ?)"
+    "DELETE FROM audit_logs WHERE id NOT IN (SELECT id FROM (SELECT id FROM audit_logs ORDER BY created_at DESC LIMIT ?) AS keep)"
   ).bind(limit).run();
   return Number(result.meta.changes ?? 0);
 }
@@ -2728,9 +2759,29 @@ function mapChallengeRow(row) {
 }
 async function saveAccountPasskeyCredential(db, safeBind, credential) {
   await ensureAccountPasskeySchema(db);
+  const updated = await safeBind(
+    db.prepare(
+      "UPDATE webauthn_credentials SET purpose=?, name=?, public_key=?, credential_id=?, counter=?, type=?, aa_guid=?, transports=?, encrypted_user_key=?, encrypted_public_key=?, encrypted_private_key=?, supports_prf=?, updated_at=? WHERE id=?"
+    ),
+    credential.purpose,
+    credential.name,
+    credential.publicKey,
+    credential.credentialId,
+    credential.counter,
+    credential.type,
+    credential.aaGuid,
+    credential.transports ? JSON.stringify(credential.transports) : null,
+    credential.encryptedUserKey,
+    credential.encryptedPublicKey,
+    credential.encryptedPrivateKey,
+    credential.supportsPrf ? 1 : 0,
+    credential.updatedAt,
+    credential.id
+  ).run();
+  if (Number(updated.meta.changes ?? 0) > 0) return;
   await safeBind(
     db.prepare(
-      "INSERT INTO webauthn_credentials(id, user_id, purpose, name, public_key, credential_id, counter, type, aa_guid, transports, encrypted_user_key, encrypted_public_key, encrypted_private_key, supports_prf, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET purpose=excluded.purpose, name=excluded.name, public_key=excluded.public_key, credential_id=excluded.credential_id, counter=excluded.counter, type=excluded.type, aa_guid=excluded.aa_guid, transports=excluded.transports, encrypted_user_key=excluded.encrypted_user_key, encrypted_public_key=excluded.encrypted_public_key, encrypted_private_key=excluded.encrypted_private_key, supports_prf=excluded.supports_prf, updated_at=excluded.updated_at"
+      "INSERT INTO webauthn_credentials(id, user_id, purpose, name, public_key, credential_id, counter, type, aa_guid, transports, encrypted_user_key, encrypted_public_key, encrypted_private_key, supports_prf, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     ),
     credential.id,
     credential.userId,
@@ -2879,7 +2930,11 @@ var init_storage = __esm({
       }
       db;
       static attachmentTokenTableReady = false;
-      static schemaVerified = false;
+      // Schema readiness is a property of a *database*, not of the process: the
+      // BYO-DB feature can point the app at a different MySQL at runtime, and a
+      // process-wide boolean made `initializeDatabase()` return early so the new
+      // database never got its tables (while the admin UI was told "ready").
+      static verifiedSchemaKeys = /* @__PURE__ */ new Set();
       static lastRefreshTokenCleanupAt = 0;
       static lastAttachmentTokenCleanupAt = 0;
       static lastTotpReplayCleanupAt = 0;
@@ -2954,11 +3009,21 @@ var init_storage = __esm({
       }
       // --- Database initialization ---
       // Strategy:
-      // - Run only once per isolate.
-      // - Execute idempotent schema SQL on first request in each isolate.
+      // - Run once per database target (D1 or a given MySQL host/db).
+      // - Execute idempotent schema SQL on first request for that target.
       // - Keep statements idempotent so updates are safe.
+      static schemaKeyFor(db) {
+        if (!db) return "none";
+        const config = db.getConfig?.();
+        return config ? `mysql:${config.host}:${config.port}/${config.database}` : "d1";
+      }
+      /** Test hook / runtime switch: forget which databases have been verified. */
+      static invalidateSchemaCache() {
+        _StorageService.verifiedSchemaKeys.clear();
+      }
       async initializeDatabase() {
-        if (_StorageService.schemaVerified) return;
+        const schemaKey = _StorageService.schemaKeyFor(this.db);
+        if (_StorageService.verifiedSchemaKeys.has(schemaKey)) return;
         await this.db.prepare("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL)").run();
         const schemaVersion = await getConfigValue(this.db, STORAGE_SCHEMA_VERSION_KEY);
         const schemaMissingRequiredTables = schemaVersion === STORAGE_SCHEMA_VERSION ? !await this.hasRequiredSchemaTables() : true;
@@ -2967,7 +3032,7 @@ var init_storage = __esm({
           await setConfigValue(this.db, STORAGE_SCHEMA_VERSION_KEY, STORAGE_SCHEMA_VERSION);
         }
         await ensurePushInstallationCredentials(this.db);
-        _StorageService.schemaVerified = true;
+        _StorageService.verifiedSchemaKeys.add(schemaKey);
       }
       // --- Config / setup ---
       async isRegistered() {
@@ -7652,11 +7717,8 @@ function recordColumn(table, column, kind) {
   }
   cols.set(column, kind);
 }
-function columnIsText(table, column) {
-  const cols = tableColumnKinds.get(table);
-  const kind = cols?.get(column);
-  if (kind) return kind === "text";
-  return STRING_INDEX_COLUMNS.has(column);
+function columnKindOf(table, column) {
+  return tableColumnKinds.get(table)?.get(column);
 }
 function maskLiterals(sql) {
   const literals = [];
@@ -7714,10 +7776,10 @@ function rewriteOnConflict(sql) {
   if (!match) return sql;
   const head = sql.slice(0, match.index);
   const action = (match[2] || "").toUpperCase();
+  const conflictCols = (match[1] || "").split(",").map((c) => c.trim().replace(/"/g, "")).filter(Boolean);
   if (action.startsWith("NOTHING")) {
-    const conflictCols = (match[1] || "").split(",").map((c) => c.trim()).filter(Boolean);
-    const firstCol = conflictCols[0] || "id";
-    return `${head}ON DUPLICATE KEY UPDATE ${quoteIdentifier(firstCol)}=${quoteIdentifier(firstCol)}`;
+    const firstCol = quoteIdentifier(conflictCols[0] || "id");
+    return `${head}ON DUPLICATE KEY UPDATE ${firstCol}=${firstCol}`;
   }
   let setTail = match[3] || "";
   let whereCond = "";
@@ -7726,22 +7788,21 @@ function rewriteOnConflict(sql) {
     whereCond = whereMatch[1].trim();
     setTail = setTail.slice(0, whereMatch.index);
   }
-  const items = setTail.split(",").map((s) => s.trim()).filter(Boolean);
+  const guardParts = conflictCols.map(
+    (col) => `${quoteIdentifier(col)}=VALUES(${quoteIdentifier(col)})`
+  );
+  const whereSql = whereCond ? whereCond.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, "VALUES($1)") : "";
+  const guard = [guardParts.join(" AND "), whereSql].filter(Boolean).join(" AND ");
   const assignments = [];
-  for (const item of items) {
-    const itemMatch = item.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*excluded\.([A-Za-z_][A-Za-z0-9_]*)$/i);
-    if (!itemMatch) {
-      assignments.push(item.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, "VALUES($1)"));
+  for (const item of setTail.split(",").map((s) => s.trim()).filter(Boolean)) {
+    const expr = item.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, "VALUES($1)");
+    const assignMatch = expr.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([\s\S]+)$/);
+    if (!assignMatch) {
+      assignments.push(expr);
       continue;
     }
-    const targetCol = quoteIdentifier(itemMatch[1]);
-    const valueExpr = `VALUES(${quoteIdentifier(itemMatch[2])})`;
-    if (whereCond) {
-      const cond = whereCond.replace(/\bexcluded\.([A-Za-z_][A-Za-z0-9_]*)/gi, "VALUES($1)");
-      assignments.push(`${targetCol}=IF(${cond}, ${valueExpr}, ${targetCol})`);
-    } else {
-      assignments.push(`${targetCol}=${valueExpr}`);
-    }
+    const targetCol = quoteIdentifier(assignMatch[1]);
+    assignments.push(guard ? `${targetCol}=IF(${guard}, ${assignMatch[2]}, ${targetCol})` : `${targetCol}=${assignMatch[2]}`);
   }
   return `${head}ON DUPLICATE KEY UPDATE ${assignments.join(", ")}`;
 }
@@ -7767,7 +7828,12 @@ function isKeyIndexClause(after) {
   if (tokenMatch[1].startsWith('"') || tokenMatch[1].startsWith("`")) return true;
   return !KEY_COLUMN_TYPE_TOKENS.has(String(tokenMatch[4] || "").toLowerCase());
 }
-function translateColumnDef(def, table) {
+function maskedDefaultValue(def, literals) {
+  const match = def.match(/\bDEFAULT\s+\u0000(\d+)\u0000/i);
+  if (!match) return null;
+  return literals[Number(match[1])] ?? null;
+}
+function translateColumnDef(def, table, literals = []) {
   let out = def;
   const nameMatch = out.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
   const columnName = nameMatch ? nameMatch[1] : "";
@@ -7781,13 +7847,26 @@ function translateColumnDef(def, table) {
     if (columnName) recordColumn(table, columnName, "text");
     return out;
   }
-  if (/\bTEXT\b/i.test(out)) {
-    if (/\bDEFAULT\b/i.test(out)) {
-      out = out.replace(/\bTEXT\b/i, "VARCHAR(2048)");
-    } else {
-      out = out.replace(/\bTEXT\b/i, "LONGTEXT");
+  if (/\bTEXT\b/i.test(out) && /\bDEFAULT\b/i.test(out)) {
+    const rawDefault = maskedDefaultValue(out, literals);
+    const isJsonDefault = rawDefault !== null ? /^'\s*[[{]/.test(rawDefault) : /DEFAULT\s+'\s*[[{]/i.test(out);
+    if (isJsonDefault) {
+      out = out.replace(/\bTEXT\b/i, "LONGTEXT").replace(/\s+DEFAULT\s+\u0000\d+\u0000/i, "").replace(/\s+DEFAULT\s+'(?:[^']|'')*'/i, "");
+      if (columnName) recordColumn(table, columnName, "lob");
+      return out;
     }
+    out = out.replace(/\bTEXT\b/i, "VARCHAR(255)");
     if (columnName) recordColumn(table, columnName, "text");
+    return out;
+  }
+  if (/\bTEXT\b/i.test(out) && columnName && STRING_INDEX_COLUMNS.has(columnName)) {
+    out = out.replace(/\bTEXT\b/i, "VARCHAR(512)");
+    recordColumn(table, columnName, "text");
+    return out;
+  }
+  if (/\bTEXT\b/i.test(out)) {
+    out = out.replace(/\bTEXT\b/i, "LONGTEXT");
+    if (columnName) recordColumn(table, columnName, "lob");
     return out;
   }
   if (/\bINTEGER\b/i.test(out)) {
@@ -7797,7 +7876,10 @@ function translateColumnDef(def, table) {
   }
   return out;
 }
-function translateCreateTable(sql) {
+function resizeText(colDef, size) {
+  return colDef.replace(/\bLONGTEXT\b/i, `VARCHAR(${size})`).replace(/\bVARCHAR\((?:2048|512|255)\)/i, `VARCHAR(${size})`);
+}
+function translateCreateTable(sql, literals = []) {
   const headerMatch = sql.match(/^(\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)([A-Za-z_"][A-Za-z0-9_"]*)\s*\(/i);
   if (!headerMatch) return sql;
   const table = headerMatch[2].replace(/"/g, "");
@@ -7838,18 +7920,18 @@ function translateCreateTable(sql) {
       }
       return part.replace(/PRIMARY\s+KEY\s*\(/i, "PRIMARY KEY (");
     }
-    const colDef = translateColumnDef(part, table);
-    const nameMatch = colDef.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
-    const colName = nameMatch ? nameMatch[1] : "";
-    if (colName && (/LONGTEXT/i.test(colDef) || /VARCHAR\(2048\)/i.test(colDef))) {
+    const colDef = translateColumnDef(part, table, literals);
+    const colNameMatch = colDef.match(/^\s*"?([A-Za-z_][A-Za-z0-9_]*)"?\s+/);
+    const colName = colNameMatch ? colNameMatch[1] : "";
+    if (colName && RESIZABLE_TEXT.test(colDef)) {
       if (pkCols.includes(colName)) {
         const size = pkCols.length === 1 || fkCols.has(colName) ? 512 : 255;
         recordColumn(table, colName, "text");
-        return colDef.replace(/\bLONGTEXT\b/i, `VARCHAR(${size})`).replace(/\bVARCHAR\(2048\)/i, `VARCHAR(${size})`);
+        return resizeText(colDef, size);
       }
       if (fkCols.has(colName)) {
         recordColumn(table, colName, "text");
-        return colDef.replace(/\bLONGTEXT\b/i, "VARCHAR(512)").replace(/\bVARCHAR\(2048\)/i, "VARCHAR(512)");
+        return resizeText(colDef, 512);
       }
     }
     return colDef;
@@ -7861,6 +7943,7 @@ function translateCreateTable(sql) {
   return translated;
 }
 function translateCreateIndex(sql) {
+  const isUnique = /^\s*CREATE\s+UNIQUE\s+INDEX\b/i.test(sql);
   let out = sql.replace(/\bIF\s+NOT\s+EXISTS\b/gi, "");
   out = out.replace(/(\bON\s+[A-Za-z_"][A-Za-z0-9_"]*\s*)\(([^)]*)\)/i, (full, head, cols) => {
     const tableMatch = head.match(/ON\s+([A-Za-z_"][A-Za-z0-9_"]*)/i);
@@ -7869,20 +7952,24 @@ function translateCreateIndex(sql) {
       const col = rawCol.trim();
       const plain = col.replace(/\s*\(\d+\)\s*$/, "");
       if (/\(\d+\)\s*$/.test(col)) return col;
-      if (columnIsText(table, plain)) return `${plain}(191)`;
+      const kind = columnKindOf(table, plain);
+      if (isUnique && kind === "text") return col;
+      if (kind === "text" || kind === "lob" || kind === void 0 && STRING_INDEX_COLUMNS.has(plain)) {
+        return `${plain}(191)`;
+      }
       return col;
     });
     return `${head}(${translatedCols.join(", ")})`;
   });
   return out;
 }
-function translateAlterTable(sql) {
+function translateAlterTable(sql, literals = []) {
   let out = sql;
   const addMatch = out.match(/(\bADD\s+COLUMN\s+)([A-Za-z_"][A-Za-z0-9_"]*\s+[\s\S]+)$/i);
   if (addMatch) {
     const tableNameMatch = out.match(/ALTER\s+TABLE\s+([A-Za-z_"][A-Za-z0-9_"]*)/i);
     const table = (tableNameMatch ? tableNameMatch[1] : "").replace(/"/g, "");
-    const colDef = translateColumnDef(addMatch[2], table);
+    const colDef = translateColumnDef(addMatch[2], table, literals);
     out = out.slice(0, addMatch.index) + addMatch[1] + colDef;
   }
   return out;
@@ -7925,17 +8012,18 @@ function translateSql(input) {
   out = rewriteOnConflict(out);
   out = out.replace(/\bINSERT\s+OR\s+IGNORE\b/gi, "INSERT IGNORE");
   out = out.replace(/\bINSERT\s+OR\s+REPLACE\b/gi, "REPLACE");
+  out = out.replace(/\bLIMIT\s+-1\b/gi, "LIMIT 18446744073709551615");
   if (/^\s*CREATE\s+TABLE\b/i.test(out)) {
-    out = translateCreateTable(out);
+    out = translateCreateTable(out, literals);
   } else if (/^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\b/i.test(out)) {
     out = translateCreateIndex(out);
   } else if (/^\s*ALTER\s+TABLE\b/i.test(out)) {
-    out = translateAlterTable(out);
+    out = translateAlterTable(out, literals);
   }
   out = quoteKeyIdentifier(out);
   return unmaskLiterals(rewriteSqliteCatalog(out, literals), literals);
 }
-var STRING_INDEX_COLUMNS, tableColumnKinds, KEY_COLUMN_TYPE_TOKENS;
+var STRING_INDEX_COLUMNS, tableColumnKinds, KEY_COLUMN_TYPE_TOKENS, RESIZABLE_TEXT;
 var init_mysql_dialect = __esm({
   "src/services/mysql-dialect.ts"() {
     "use strict";
@@ -8025,6 +8113,39 @@ var init_mysql_dialect = __esm({
       "set",
       "clob"
     ]);
+    RESIZABLE_TEXT = /\b(?:LONGTEXT|VARCHAR\((?:2048|512|255)\))/i;
+  }
+});
+
+// src/services/runtime-env.ts
+function nodeProcess() {
+  return globalThis.process;
+}
+function readEnv(name) {
+  const value = nodeProcess()?.env?.[name];
+  return value === void 0 ? void 0 : value;
+}
+function readEnvFlag(name) {
+  return readEnv(name) === "1";
+}
+async function readEnvFile(name, label) {
+  const filePath = readEnv(name);
+  if (!filePath) return void 0;
+  try {
+    const fsName = "node:fs";
+    const fs2 = await import(
+      /* @vite-ignore */
+      fsName
+    );
+    return fs2.readFileSync(filePath, "utf8");
+  } catch (error) {
+    console.error(`[runtime-env] failed to read ${label} (${filePath}):`, error);
+    return void 0;
+  }
+}
+var init_runtime_env = __esm({
+  "src/services/runtime-env.ts"() {
+    "use strict";
   }
 });
 
@@ -8037,8 +8158,16 @@ function normalizeParams(params) {
   });
 }
 function isDuplicateDdlError(error) {
-  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  return msg.includes("duplicate column name") || msg.includes("duplicate key name") || msg.includes("already exists") || msg.includes("duplicate entry");
+  const errno = Number(error?.errno ?? 0);
+  const code = String(error?.code ?? "");
+  if (IGNORABLE_DDL_ERRNOS.has(errno) || IGNORABLE_DDL_CODES.has(code)) return true;
+  if (errno === 1062 || code === "ER_DUP_ENTRY") {
+    console.error(
+      "[mysql] DDL rejected due to duplicate data \u2014 the index/constraint was NOT created:",
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+  return false;
 }
 function isDdlStatement(sql) {
   return /^\s*(CREATE|ALTER|DROP)\b/i.test(sql);
@@ -8057,11 +8186,20 @@ function toResult(rows, affectedRows, insertId) {
 function isMySqlDatabase(db) {
   return !!db && typeof db === "object" && db.dialect === "mysql";
 }
-var MySqlStatement, MySqlDatabase;
+var IGNORABLE_DDL_ERRNOS, IGNORABLE_DDL_CODES, RETRYABLE_CONN_CODES, MySqlStatement, MySqlDatabase;
 var init_storage_mysql = __esm({
   "src/services/storage-mysql.ts"() {
     "use strict";
     init_mysql_dialect();
+    init_runtime_env();
+    IGNORABLE_DDL_ERRNOS = /* @__PURE__ */ new Set([1050, 1060, 1061]);
+    IGNORABLE_DDL_CODES = /* @__PURE__ */ new Set(["ER_TABLE_EXISTS_ERROR", "ER_DUP_FIELDNAME", "ER_DUP_KEYNAME"]);
+    RETRYABLE_CONN_CODES = /* @__PURE__ */ new Set([
+      "ECONNRESET",
+      "EPIPE",
+      "PROTOCOL_CONNECTION_LOST",
+      "ER_CLIENT_INTERACTION_TIMEOUT"
+    ]);
     MySqlStatement = class {
       constructor(db, translatedSql, originalSql) {
         this.db = db;
@@ -8109,6 +8247,9 @@ var init_storage_mysql = __esm({
       getSql() {
         return this.translatedSql;
       }
+      getOriginalSql() {
+        return this.originalSql;
+      }
       getParams() {
         return this.params;
       }
@@ -8121,13 +8262,21 @@ var init_storage_mysql = __esm({
       dialect = "mysql";
       pool = null;
       poolPromise = null;
+      /** Bumped by close() so an in-flight getPool() cannot resurrect a dead pool. */
+      generation = 0;
       getConfig() {
         return this.config;
+      }
+      async sslOptions() {
+        if (!this.config.ssl) return void 0;
+        const ca = await readEnvFile("DB_SSL_CA", "DB_SSL_CA");
+        return { rejectUnauthorized: !readEnvFlag("DB_SSL_INSECURE"), ...ca ? { ca } : {} };
       }
       async getPool() {
         if (this.pool) return this.pool;
         if (!this.poolPromise) {
-          this.poolPromise = (async () => {
+          const generation = this.generation;
+          const pending = (async () => {
             const moduleName = "mysql2/promise";
             const mysql = await import(
               /* @vite-ignore */
@@ -8143,11 +8292,16 @@ var init_storage_mysql = __esm({
               connectionLimit: this.config.connectionLimit,
               connectTimeout: this.config.connectTimeoutMs,
               charset: "utf8mb4",
-              timezone: "+08:00",
+              timezone: readEnv("DB_TIMEZONE") || "Z",
               enableKeepAlive: true,
               keepAliveInitialDelay: 1e4,
               multipleStatements: false,
-              ssl: this.config.ssl ? { rejectUnauthorized: false } : void 0,
+              // SQLite/D1 report `changes` as MATCHED rows; MySQL reports CHANGED rows
+              // by default. Without FOUND_ROWS every `meta.changes > 0` guard (40+
+              // call sites) turns into a false "not found" when a column is set to a
+              // value it already had.
+              flags: ["FOUND_ROWS"],
+              ssl: await this.sslOptions(),
               typeCast: (field, next) => {
                 if (field.type === "LONGLONG" || field.type === "NEWDECIMAL") {
                   const raw = field.string();
@@ -8156,9 +8310,15 @@ var init_storage_mysql = __esm({
                 return next();
               }
             });
-            this.pool = pool;
+            if (generation === this.generation) this.pool = pool;
             return pool;
           })();
+          this.poolPromise = pending.catch((error) => {
+            this.poolPromise = null;
+            throw error;
+          }).finally(() => {
+            if (generation === this.generation) this.poolPromise = null;
+          });
         }
         return this.poolPromise;
       }
@@ -8168,11 +8328,10 @@ var init_storage_mysql = __esm({
         try {
           return await pool.query(sql, params);
         } catch (error) {
-          const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
-          if (msg.includes("connection") && (msg.includes("lost") || msg.includes("closed") || msg.includes("reset"))) {
+          const code = String(error?.code ?? "");
+          if (RETRYABLE_CONN_CODES.has(code)) {
             await this.close();
-            const fresh = await this.getPool();
-            return await fresh.query(sql, params);
+            return await (await this.getPool()).query(sql, params);
           }
           throw error;
         }
@@ -8199,7 +8358,7 @@ var init_storage_mysql = __esm({
                 results.push(toResult([], result?.affectedRows ?? 0, result?.insertId ?? 0));
               }
             } catch (error) {
-              const original = statement.originalSql ?? "";
+              const original = typeof stmt.getOriginalSql === "function" ? stmt.getOriginalSql() : "";
               if (isDdlStatement(original) && isDuplicateDdlError(error)) {
                 results.push(toResult([], 0, 0));
                 continue;
@@ -8219,16 +8378,25 @@ var init_storage_mysql = __esm({
           conn.release();
         }
       }
+      /**
+       * Retire the current pool.
+       *
+       * `end()` waits for open queries, so closing synchronously on a config change
+       * would fail every request that is mid-flight. Instead we bump the generation
+       * (so a concurrent getPool() cannot publish the pool we are dropping) and give
+       * in-flight statements a short grace period before the sockets are closed.
+       */
       async close() {
+        this.generation += 1;
         const pool = this.pool;
         this.pool = null;
         this.poolPromise = null;
-        if (pool) {
-          try {
-            await pool.end();
-          } catch {
-          }
-        }
+        if (!pool) return;
+        const timer = setTimeout(() => {
+          void pool.end().catch(() => {
+          });
+        }, 5e3);
+        timer.unref?.();
       }
     };
   }
@@ -28776,6 +28944,7 @@ import http from "node:http";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 // src/router.ts
@@ -35464,18 +35633,31 @@ async function writeStoredPayload(env, payload) {
   }
   return false;
 }
-async function loadRuntimeConfig(env) {
+var CONFIG_CACHE_TTL_MS = 3e4;
+var payloadCache = null;
+async function readStoredPayloadCached(env) {
+  const now = Date.now();
+  if (payloadCache && now - payloadCache.at < CONFIG_CACHE_TTL_MS) return payloadCache.payload;
   const payload = await readStoredPayload(env);
+  payloadCache = { payload, at: now };
+  return payload;
+}
+async function loadRuntimeConfig(env) {
+  const payload = await readStoredPayloadCached(env);
   if (!payload) return null;
   return decryptJson(env, payload);
 }
 async function saveRuntimeConfig(env, config) {
   const payload = await encryptJson(env, config);
   if (!payload) return false;
-  return writeStoredPayload(env, payload);
+  const saved = await writeStoredPayload(env, payload);
+  if (saved) payloadCache = { payload, at: Date.now() };
+  return saved;
 }
 async function clearRuntimeConfig(env) {
-  return writeStoredPayload(env, null);
+  const saved = await writeStoredPayload(env, null);
+  if (saved) payloadCache = { payload: null, at: Date.now() };
+  return saved;
 }
 function parsePort(raw, fallback) {
   const n = Number(raw);
@@ -35610,6 +35792,8 @@ async function getDatabaseStatus(env) {
 // src/handlers/admin-db-config.ts
 init_storage_mysql();
 init_storage();
+init_audit_events();
+init_runtime_env();
 async function readJsonBody3(request) {
   try {
     const body = await request.json();
@@ -35617,6 +35801,36 @@ async function readJsonBody3(request) {
   } catch {
     return {};
   }
+}
+function isPrivateIpv4(host) {
+  const parts = host.split(".");
+  if (parts.length !== 4) return false;
+  const octets = parts.map((part) => Number(part));
+  if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  const [a, b] = octets;
+  return a === 10 || a === 127 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 169 && b === 254;
+}
+function assertHostAllowed(host) {
+  const allowlist = (readEnv("DB_HOST_ALLOWLIST") || "").split(",").map((entry) => entry.trim()).filter(Boolean);
+  if (allowlist.includes(host)) return null;
+  const lowered = host.toLowerCase();
+  if (lowered === "localhost" || lowered.endsWith(".local") || lowered.endsWith(".internal")) {
+    return "host not allowed";
+  }
+  if (isPrivateIpv4(lowered)) return "host not allowed";
+  if (lowered.includes(":") && /^(::1$|::ffff:|fc|fd|fe80)/i.test(lowered)) return "host not allowed";
+  return null;
+}
+function classifyConnectionError(error) {
+  const code = String(error?.code ?? "");
+  const msg = error instanceof Error ? error.message : String(error);
+  if (code === "ECONNREFUSED" || /ECONNREFUSED/.test(msg)) return "refused";
+  if (code === "ETIMEDOUT" || /ETIMEDOUT|timeout/i.test(msg)) return "timeout";
+  if (code === "ENOTFOUND" || /ENOTFOUND/.test(msg)) return "dns";
+  if (/Access denied/i.test(msg)) return "auth";
+  if (/certificate|TLS|SSL|self[- ]signed/i.test(msg)) return "tls";
+  if (/Unknown database/i.test(msg)) return "database";
+  return "unknown";
 }
 function normalizeCandidate(body, fallback) {
   const host = String(body.host ?? fallback?.host ?? "").trim();
@@ -35648,6 +35862,10 @@ function normalizeCandidate(body, fallback) {
   };
 }
 async function testMySqlConnection(config) {
+  const blocked = assertHostAllowed(config.host || "");
+  if (blocked) {
+    return { ok: false, latencyMs: 0, error: blocked, errorKind: "blocked" };
+  }
   const startedAt = Date.now();
   const db = new MySqlDatabase({
     host: config.host || "",
@@ -35675,10 +35893,18 @@ async function testMySqlConnection(config) {
       schemaState
     };
   } catch (error) {
+    const kind = classifyConnectionError(error);
+    console.error("[db-config] connection test failed", {
+      host: config.host,
+      port: config.port,
+      kind,
+      message: error instanceof Error ? error.message : String(error)
+    });
     return {
       ok: false,
       latencyMs: Date.now() - startedAt,
-      error: error instanceof Error ? error.message : String(error)
+      error: `connection failed (${kind})`,
+      errorKind: kind
     };
   } finally {
     await db.close();
@@ -35717,19 +35943,19 @@ async function handleAdminTestDbConfig(request, env, actorUser) {
   return jsonResponse(result, result.ok ? 200 : 502);
 }
 async function handleAdminSaveDbConfig(request, env, actorUser) {
-  void actorUser;
   const body = await readJsonBody3(request);
   if (body.mode === "d1") {
     await clearRuntimeConfig(env);
     await resetDatabaseCache();
-    return jsonResponse({ ok: true, mode: "d1" });
+    await auditDbConfigChange(env, actorUser, "admin.db_config.cleared", null);
+    return jsonResponse({ ok: true, mode: "d1", effective: true });
   }
   const stored = await loadRuntimeConfig(env);
   const { config, error } = normalizeCandidate(body, stored);
   if (error) return errorResponse(error, 400);
   const test = await testMySqlConnection(config);
   if (!test.ok) {
-    return jsonResponse({ ok: false, error: test.error ?? "connection test failed" }, 502);
+    return jsonResponse({ ok: false, error: test.error ?? "connection test failed", errorKind: test.errorKind }, 502);
   }
   const saved = await saveRuntimeConfig(env, config);
   if (!saved && !hasConfigStore(env)) {
@@ -35745,15 +35971,51 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
   const db = await getDatabase(env);
   env.DB = db;
   const storage = new StorageService(db);
-  await storage.initializeDatabase();
-  return jsonResponse({ ok: true, mode: "mysql", schemaReady: true, latencyMs: test.latencyMs, version: test.version });
+  let schemaReady = false;
+  let schemaError;
+  try {
+    await storage.initializeDatabase();
+    schemaReady = true;
+  } catch (initError) {
+    schemaError = initError instanceof Error ? initError.message : String(initError);
+    console.error("[db-config] schema bootstrap failed after save:", initError);
+  }
+  const envOverride = !!resolveDbConfigFromEnv(env);
+  await auditDbConfigChange(env, actorUser, "admin.db_config.saved", config);
+  return jsonResponse({
+    ok: true,
+    mode: "mysql",
+    saved: true,
+    effective: !envOverride && schemaReady,
+    warning: envOverride ? "DB_* \u73AF\u5883\u53D8\u91CF\u4F18\u5148\u4E8E\u8FD0\u884C\u65F6\u914D\u7F6E\uFF1A\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5F53\u524D\u751F\u6548\u7684\u4ECD\u662F\u73AF\u5883\u53D8\u91CF\u6307\u5411\u7684\u6570\u636E\u5E93\u3002" : schemaError ? `\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5EFA\u8868\u5931\u8D25\uFF1A${schemaError}` : void 0,
+    schemaReady,
+    latencyMs: test.latencyMs,
+    version: test.version
+  });
 }
 async function handleAdminClearDbConfig(request, env, actorUser) {
   void request;
-  void actorUser;
   await clearRuntimeConfig(env);
   await resetDatabaseCache();
+  await auditDbConfigChange(env, actorUser, "admin.db_config.cleared", null);
   return jsonResponse({ ok: true, mode: "d1" });
+}
+async function auditDbConfigChange(env, actorUser, action, config) {
+  if (!env.DB) return;
+  const target = config ? `${config.host}:${config.port ?? 3306}/${config.database ?? ""}` : "d1";
+  try {
+    await writeAuditEvent(new StorageService(env.DB), {
+      actorUserId: actorUser.id,
+      action,
+      category: "system",
+      level: "security",
+      targetType: "database",
+      targetId: target,
+      metadata: { destinationName: target, destinationType: config ? "mysql" : "d1", status: "ok" }
+    });
+  } catch (error) {
+    console.error("[db-config] audit write failed:", error);
+  }
 }
 
 // src/router-admin.ts
@@ -46459,7 +46721,7 @@ async function handleRequest(request, env) {
 
 // src/services/db-lifecycle.ts
 init_storage();
-var dbInitialized = false;
+var initializedKey = null;
 var dbInitError = null;
 var dbInitPromise = null;
 function getDbInitError() {
@@ -46469,13 +46731,27 @@ function attachDatabase(env, db) {
   env.DB = db;
 }
 async function ensureDatabaseInitialized(env, resolve = getDatabase) {
-  if (!dbInitialized && !dbInitPromise) {
+  let db = null;
+  try {
+    db = await resolve(env);
+  } catch (error) {
+    dbInitError = error instanceof Error ? error.message : String(error);
+    console.error("Failed to resolve database for request env:", error);
+    return;
+  }
+  if (!db) {
+    dbInitError = "No database configured: set DB_* env vars or use /admin/database.";
+    console.error(dbInitError);
+    return;
+  }
+  attachDatabase(env, db);
+  const schemaKey = StorageService.schemaKeyFor(db);
+  if (initializedKey === schemaKey) return;
+  if (!dbInitPromise) {
     dbInitPromise = (async () => {
-      const db = await resolve(env);
-      attachDatabase(env, db);
-      const storage = new StorageService(db);
-      await storage.initializeDatabase();
-      dbInitialized = true;
+      await new StorageService(db).initializeDatabase();
+      initializedKey = schemaKey;
+      dbInitError = null;
     })().catch((error) => {
       dbInitError = error instanceof Error ? error.message : String(error);
       console.error("Database initialization failed:", error);
@@ -46483,16 +46759,7 @@ async function ensureDatabaseInitialized(env, resolve = getDatabase) {
       dbInitPromise = null;
     });
   }
-  if (dbInitPromise) await dbInitPromise;
-  if (dbInitialized) {
-    try {
-      attachDatabase(env, await resolve(env));
-      dbInitError = null;
-    } catch (error) {
-      dbInitError = error instanceof Error ? error.message : String(error);
-      console.error("Failed to resolve database for request env:", error);
-    }
-  }
+  await dbInitPromise;
 }
 
 // server/index.ts
@@ -46902,8 +47169,13 @@ var BackupTransferRunner = class {
 // server/local-durable-objects.ts
 init_notifications_hub();
 var MemoryDurableObjectStorage = class {
+  constructor(onAlarm) {
+    this.onAlarm = onAlarm;
+  }
+  onAlarm;
   values = /* @__PURE__ */ new Map();
   alarmAt = null;
+  alarmTimer = null;
   async get(key) {
     return this.values.get(key);
   }
@@ -46951,9 +47223,40 @@ var MemoryDurableObjectStorage = class {
   }
   async setAlarm(at) {
     this.alarmAt = typeof at === "number" ? at : at.getTime();
+    this.arm();
   }
   async deleteAlarm() {
     this.alarmAt = null;
+    this.disarm();
+  }
+  disarm() {
+    if (this.alarmTimer) {
+      clearTimeout(this.alarmTimer);
+      this.alarmTimer = null;
+    }
+  }
+  arm() {
+    this.disarm();
+    if (this.alarmAt === null) return;
+    const delay = Math.min(Math.max(this.alarmAt - Date.now(), 0), 2147483647);
+    this.alarmTimer = setTimeout(() => {
+      this.alarmTimer = null;
+      void this.fire();
+    }, delay);
+    this.alarmTimer.unref?.();
+  }
+  async fire() {
+    if (this.alarmAt === null) return;
+    if (this.alarmAt > Date.now()) {
+      this.arm();
+      return;
+    }
+    this.alarmAt = null;
+    try {
+      await this.onAlarm?.();
+    } catch (error) {
+      console.error("[local-do] alarm handler failed:", error);
+    }
   }
   async transaction(closure) {
     return closure(this);
@@ -46987,16 +47290,28 @@ function jsonError(message, status) {
 function createLocalDurableObjectNamespace(label, factory, getEnv) {
   const instances = /* @__PURE__ */ new Map();
   const storages = /* @__PURE__ */ new Map();
+  const instanceRefs = /* @__PURE__ */ new Map();
   const ensureInstance = (name) => {
     const cached2 = instances.get(name);
     if (cached2) return cached2;
+    let ref = instanceRefs.get(name);
+    if (!ref) {
+      ref = { current: null };
+      instanceRefs.set(name, ref);
+    }
     let storage = storages.get(name);
     if (!storage) {
-      storage = new MemoryDurableObjectStorage();
+      storage = new MemoryDurableObjectStorage(async () => {
+        const target = ref.current;
+        await target?.alarm?.();
+      });
       storages.set(name, storage);
     }
     const state = createState(name, storage);
-    const pending = (async () => factory(state, getEnv()))();
+    const pending = (async () => factory(state, getEnv()))().then((instance) => {
+      ref.current = instance;
+      return instance;
+    });
     instances.set(name, pending);
     void pending.catch(() => {
       if (instances.get(name) === pending) instances.delete(name);
@@ -47099,9 +47414,10 @@ var fileKv = {
   }
 };
 function safeObjectPath(key) {
-  const normalized = path.normalize(key).replace(/^([/\\.])+/, "");
-  const full = path.join(ATTACHMENTS_DIR, normalized);
-  if (!full.startsWith(ATTACHMENTS_DIR)) throw new Error("Invalid object key");
+  const normalized = key.replace(/^[/\\]+/, "");
+  const full = path.resolve(ATTACHMENTS_DIR, normalized);
+  const rel = path.relative(ATTACHMENTS_DIR, full);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error("Invalid object key");
   return full;
 }
 var fsR2 = {
@@ -47128,15 +47444,16 @@ var fsR2 = {
   async get(key) {
     const full = safeObjectPath(key);
     try {
-      const bytes = await fsp.readFile(full);
+      const stat = await fsp.stat(full);
       let meta = {};
       try {
         meta = JSON.parse(await fsp.readFile(`${full}.meta.json`, "utf8"));
       } catch {
       }
+      const stream = fs.createReadStream(full);
       return {
-        body: new Response(bytes).body,
-        size: bytes.byteLength,
+        body: Readable.toWeb(stream),
+        size: stat.size,
         httpMetadata: { contentType: meta.contentType || "application/octet-stream" },
         customMetadata: meta.customMetadata || {}
       };
@@ -47193,10 +47510,18 @@ var MIME = {
 };
 async function serveAssets(request) {
   const url = new URL(request.url);
-  let rel = decodeURIComponent(url.pathname);
+  let rel;
+  try {
+    rel = decodeURIComponent(url.pathname);
+  } catch {
+    return new Response("Bad Request", { status: 400, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  }
   if (rel === "/" || rel === "") rel = "/index.html";
-  const full = path.join(DIST_DIR, rel);
-  if (!full.startsWith(DIST_DIR)) return new Response("Forbidden", { status: 403 });
+  const full = path.resolve(DIST_DIR, rel.replace(/^[/\\]+/, ""));
+  const contained = path.relative(DIST_DIR, full);
+  if (!contained || contained.startsWith("..") || path.isAbsolute(contained)) {
+    return new Response("Forbidden", { status: 403 });
+  }
   try {
     const bytes = await fsp.readFile(full);
     const ext = path.extname(full).toLowerCase();
@@ -47251,16 +47576,11 @@ function toRequest(input) {
 }
 async function handleHealthz(env) {
   const status = await getDatabaseStatus(env);
+  if (status.error) {
+    console.error("[healthz] database unavailable:", status.error);
+  }
   return jsonResponse(
-    {
-      ok: status.ok,
-      db: status.ok ? "up" : "down",
-      mode: status.mode,
-      source: status.source,
-      runtime: "node",
-      ...status.version ? { version: status.version } : {},
-      ...status.error ? { error: status.error } : {}
-    },
+    { ok: status.ok, db: status.ok ? "up" : "down", mode: status.mode, source: status.source, runtime: "node" },
     status.ok ? 200 : 503
   );
 }
@@ -47268,6 +47588,9 @@ async function pipeline(request, env) {
   const url = new URL(request.url);
   let pathname = url.pathname;
   if (pathname.length > 1) pathname = pathname.replace(/\/+$/, "");
+  if (pathname === "/internal/cron/backup" && request.method === "POST") {
+    return handleCronTick(request, env);
+  }
   if (isWebVaultHidden(env) && !isBackendRequestPath(pathname)) {
     return webVaultNotFoundResponse(request);
   }
@@ -47313,23 +47636,40 @@ function nodeRequestToRequest(req, body) {
 async function writeResponse(res, response) {
   const headers = {};
   response.headers.forEach((value, key) => {
+    if (key === "content-length" || key === "transfer-encoding") return;
     const existing = headers[key];
     if (existing === void 0) headers[key] = value;
     else if (Array.isArray(existing)) existing.push(value);
     else headers[key] = [existing, value];
   });
   res.writeHead(response.status, headers);
-  if (response.body) {
-    const buffer = Buffer.from(await response.arrayBuffer());
-    res.end(buffer);
-  } else {
+  if (!response.body) {
     res.end();
+    return;
   }
+  const nodeStream = Readable.fromWeb(response.body);
+  nodeStream.on("error", () => res.destroy());
+  nodeStream.pipe(res);
 }
+var MAX_BODY_BYTES = Math.max(1, Number(process.env.MAX_BODY_MB || 100)) * 1024 * 1024;
 var server = http.createServer((req, res) => {
   const chunks = [];
-  req.on("data", (chunk) => chunks.push(chunk));
+  let received = 0;
+  let rejected = false;
+  req.on("data", (chunk) => {
+    if (rejected) return;
+    received += chunk.length;
+    if (received > MAX_BODY_BYTES) {
+      rejected = true;
+      res.writeHead(413, { "Content-Type": "application/json; charset=utf-8", Connection: "close" });
+      res.end(JSON.stringify({ error: "Payload too large" }));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
   req.on("end", () => {
+    if (rejected) return;
     void (async () => {
       try {
         const env = buildEnv();
@@ -47352,29 +47692,67 @@ var server = http.createServer((req, res) => {
     res.destroy();
   });
 });
+server.requestTimeout = Number(process.env.REQUEST_TIMEOUT_MS || 3e5);
+server.headersTimeout = Number(process.env.HEADERS_TIMEOUT_MS || 6e4);
+server.keepAliveTimeout = Number(process.env.KEEPALIVE_TIMEOUT_MS || 65e3);
+server.on("error", (error) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(`Port ${PORT} is already in use. Set PORT to a free port.`);
+  } else {
+    console.error("Server error:", error);
+  }
+  process.exitCode = 1;
+});
 server.on("upgrade", (_req, socket) => {
   socket.write("HTTP/1.1 501 Not Implemented\r\nConnection: close\r\n\r\n");
   socket.destroy();
 });
-var SCHEDULER_INTERVAL_MS = 5 * 60 * 1e3;
-setInterval(() => {
-  void (async () => {
-    try {
-      const env = buildEnv();
-      await ensureDatabaseInitialized(env);
-      const { runScheduledBackupIfDue: runScheduledBackupIfDue2 } = await Promise.resolve().then(() => (init_backup(), backup_exports));
-      await runScheduledBackupIfDue2(env);
-    } catch (error) {
-      console.error("Scheduled backup tick failed:", error);
-    }
-  })();
-}, SCHEDULER_INTERVAL_MS);
+var CRON_SECRET = process.env.CRON_SECRET || "";
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i2 = 0; i2 < a.length; i2 += 1) diff |= a.charCodeAt(i2) ^ b.charCodeAt(i2);
+  return diff === 0;
+}
+async function handleCronTick(request, env) {
+  if (!CRON_SECRET) {
+    return jsonResponse({ error: "cron trigger not configured (set CRON_SECRET)" }, 503);
+  }
+  const provided = request.headers.get("x-cron-secret") || "";
+  if (!timingSafeEqual(provided, CRON_SECRET)) {
+    return jsonResponse({ error: "Unauthorized" }, 401);
+  }
+  await ensureDatabaseInitialized(env);
+  const dbInitError2 = getDbInitError();
+  if (dbInitError2) {
+    console.error("Skipping scheduled backup because DB init failed:", dbInitError2);
+    return jsonResponse({ ok: false, error: "database unavailable" }, 503);
+  }
+  const { runScheduledBackupIfDue: runScheduledBackupIfDue2 } = await Promise.resolve().then(() => (init_backup(), backup_exports));
+  await runScheduledBackupIfDue2(env);
+  return jsonResponse({ ok: true });
+}
+if (process.env.INPROCESS_CRON === "1") {
+  const intervalMs = Number(process.env.INPROCESS_CRON_INTERVAL_MS || 5 * 60 * 1e3);
+  const timer = setInterval(() => {
+    void handleCronTick(
+      new Request(`http://localhost/internal/cron/backup`, {
+        method: "POST",
+        headers: { "x-cron-secret": CRON_SECRET }
+      }),
+      buildEnv()
+    ).catch((error) => console.error("Scheduled backup tick failed:", error));
+  }, intervalMs);
+  timer.unref?.();
+  console.log(`  cron:           in-process every ${Math.round(intervalMs / 1e3)}s (INPROCESS_CRON=1)`);
+}
 server.listen(PORT, () => {
   console.log(`NodeWarden (Node runtime / BYO-DB) listening on http://localhost:${PORT}`);
   console.log(`  data dir:       ${DATA_DIR}`);
   console.log(`  attachments:    ${ATTACHMENTS_DIR}`);
   console.log(`  web vault:      ${DIST_DIR}`);
   console.log(`  database:       ${process.env.DB_HOST ? `MySQL ${process.env.DB_HOST}:${process.env.DB_PORT || 3306}/${process.env.DB_NAME || ""}` : "configured via env DB_* or admin UI (/admin/database)"}`);
+  console.log(`  cron:           POST /internal/cron/backup (x-cron-secret)${CRON_SECRET ? "" : " \u2014 CRON_SECRET not set, endpoint disabled"}`);
 });
 /*! Bundled license information:
 

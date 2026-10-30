@@ -192,10 +192,14 @@ export async function pruneAuditLogs(db: D1Database, beforeIso: string): Promise
 
 export async function pruneAuditLogsToMax(db: D1Database, maxEntries: number): Promise<number> {
   const limit = Math.max(1, Math.floor(maxEntries));
+  // Portable across SQLite and MySQL:
+  // - `LIMIT -1` is SQLite-only (MySQL: syntax error 1064).
+  // - A subquery reading the same table must be wrapped in a derived table,
+  //   otherwise MySQL rejects it with ER_UPDATE_TABLE_USED (1093).
   const result = await db
     .prepare(
-      'DELETE FROM audit_logs WHERE id IN (' +
-        'SELECT id FROM audit_logs ORDER BY created_at DESC LIMIT -1 OFFSET ?' +
+      'DELETE FROM audit_logs WHERE id NOT IN (' +
+        'SELECT id FROM (SELECT id FROM audit_logs ORDER BY created_at DESC LIMIT ?) AS keep' +
       ')'
     )
     .bind(limit)
