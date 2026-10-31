@@ -9,6 +9,7 @@ import {
   parseBackupArchive,
   validateBackupPayloadContents,
 } from './backup-archive';
+import { isMySqlDatabase } from './storage-mysql';
 
 // CONTRACT:
 // Restore is intentionally whitelist-based. Old backups may contain retired
@@ -82,7 +83,96 @@ async function queryRows(db: D1Database, sql: string, ...values: unknown[]): Pro
   return (response.results || []).map((row) => ({ ...row }));
 }
 
+/**
+ * Rewrite MySQL backtick identifiers as double quotes — string literals,
+ * comments and escaped identifiers must survive untouched.
+ *
+ * A blanket `replace(/`([^`]+)`/g, '"$1"')` also rewrote backticks inside
+ * string literals (`DEFAULT 'a`b'`), corrupting the shadow-table DDL (S-1 in
+ * the review notes). This scanner only rewrites the identifier spans.
+ */
+export function normalizeMysqlIdentifiers(sql: string): string {
+  let out = '';
+  let i = 0;
+  while (i < sql.length) {
+    const ch = sql[i];
+    if (ch === "'" || ch === '"') {
+      // String literal: copy verbatim, honoring backslash escapes and the
+      // doubled-quote terminator form.
+      const quote = ch;
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (sql[j] === quote) {
+          if (sql[j + 1] === quote) {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      out += sql.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (ch === '`') {
+      // Identifier: a literal backtick inside is escaped by doubling it.
+      let ident = '';
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === '`') {
+          if (sql[j + 1] === '`') {
+            ident += '`';
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        ident += sql[j];
+        j += 1;
+      }
+      out += `"${ident}"`;
+      i = sql[j] === '`' ? j + 1 : j;
+      continue;
+    }
+    if (ch === '-' && sql[i + 1] === '-') {
+      // Line comment.
+      let j = sql.indexOf('\n', i);
+      if (j === -1) j = sql.length;
+      out += sql.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (ch === '/' && sql[i + 1] === '*') {
+      // Block comment.
+      let j = sql.indexOf('*/', i + 2);
+      if (j === -1) j = sql.length;
+      else j += 2;
+      out += sql.slice(i, j);
+      i = j;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
 async function getTableCreateSql(db: D1Database, table: BackupTableName): Promise<string> {
+  // MySQL keeps no SQLite catalog: read the live DDL instead. Backtick
+  // identifiers are normalized to double quotes so the shadow-table rewrite
+  // below (and the dialect translator) handle both dialects identically.
+  if (isMySqlDatabase(db)) {
+    const ddlRow = await db.prepare(`SHOW CREATE TABLE ${table}`).first<Record<string, unknown>>();
+    const ddl = String(ddlRow?.['Create Table'] ?? '').trim();
+    if (ddl) return normalizeMysqlIdentifiers(ddl);
+  }
+
   const row = await db
     .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
     .bind(table)
@@ -94,7 +184,7 @@ async function getTableCreateSql(db: D1Database, table: BackupTableName): Promis
   return sql;
 }
 
-function buildShadowTableCreateSql(createSql: string, table: BackupTableName): string {
+export function buildShadowTableCreateSql(createSql: string, table: BackupTableName, mysql: boolean): string {
   const tablePattern = new RegExp(`^CREATE TABLE(?:\\s+IF NOT EXISTS)?\\s+(?:\"${table}\"|${table})(?=\\s*\\()`, 'i');
   let next = createSql.replace(tablePattern, `CREATE TABLE "${shadowTableName(table)}"`);
   if (next === createSql) {
@@ -107,7 +197,66 @@ function buildShadowTableCreateSql(createSql: string, table: BackupTableName): s
       `REFERENCES "${shadowTableName(currentTable)}"`
     );
   }
+  if (mysql) {
+    next = stripMySqlForeignKeyConstraints(next);
+  }
   return next;
+}
+
+/**
+ * Remove named FOREIGN KEY constraints from a MySQL shadow-table DDL.
+ *
+ * Two MySQL behaviours make them unusable here:
+ *   1. Constraint names are scoped to the *schema*, not the table, so copying
+ *      `CONSTRAINT "domain_settings_ibfk_1"` from the live table makes
+ *      `CREATE TABLE` fail with "Duplicate foreign key constraint name".
+ *   2. Shadow tables are a scratch staging area loaded from an archive; the
+ *      SQLite/D1 path never enforced foreign keys during that load, so keeping
+ *      them would add ordering constraints the archived dump does not follow.
+ * The live tables keep their real constraints; only the throwaway copy drops
+ * them.
+ */
+function stripMySqlForeignKeyConstraints(createSql: string): string {
+  const openIndex = createSql.indexOf('(');
+  const closeIndex = createSql.lastIndexOf(')');
+  if (openIndex < 0 || closeIndex <= openIndex) return createSql;
+
+  const head = createSql.slice(0, openIndex + 1);
+  const body = createSql.slice(openIndex + 1, closeIndex);
+  const tail = createSql.slice(closeIndex);
+
+  const elements: string[] = [];
+  let depth = 0;
+  let current = '';
+  let quoteChar: string | null = null;
+  for (const char of body) {
+    if (quoteChar) {
+      current += char;
+      if (char === quoteChar) quoteChar = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quoteChar = char;
+      current += char;
+      continue;
+    }
+    if (char === '(') depth += 1;
+    else if (char === ')') depth -= 1;
+    if (char === ',' && depth === 0) {
+      elements.push(current);
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) elements.push(current);
+
+  const kept = elements.filter(
+    (element) => !/^\s*CONSTRAINT\s+(?:"[^"]+"|`[^`]+`|\w+)\s+FOREIGN\s+KEY\b/i.test(element)
+  );
+  if (kept.length === elements.length) return createSql;
+
+  return `${head}${kept.join(',')}${tail}`;
 }
 
 async function resetRestoreArtifacts(db: D1Database): Promise<void> {
@@ -121,10 +270,11 @@ async function resetRestoreArtifacts(db: D1Database): Promise<void> {
 }
 
 async function createShadowTables(db: D1Database): Promise<void> {
+  const mysql = isMySqlDatabase(db);
   const createStatements: D1PreparedStatement[] = [];
   for (const table of BACKUP_TABLES) {
     const createSql = await getTableCreateSql(db, table);
-    createStatements.push(db.prepare(buildShadowTableCreateSql(createSql, table)));
+    createStatements.push(db.prepare(buildShadowTableCreateSql(createSql, table, mysql)));
   }
   await db.batch(createStatements);
 }

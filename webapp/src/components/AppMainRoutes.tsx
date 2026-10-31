@@ -4,8 +4,10 @@ import { Link, Route, Switch } from 'wouter';
 import { ArrowUpDown, Cloud, FileClock, Globe2, LogOut, Settings as SettingsIcon, Shield, ShieldCheck, ShieldUser } from 'lucide-preact';
 import type { ImportAttachmentFile, ImportResultSummary } from '@/components/ImportPage';
 import LoadingState from '@/components/LoadingState';
+import NotFoundPage from '@/components/NotFoundPage';
 import type { AdminBackupImportResponse, AdminBackupRunResponse, AdminBackupSettings, RemoteBackupBrowserResponse } from '@/lib/api/backup';
 import type { AuditLogFilters } from '@/lib/api/admin';
+import type { AuthedFetch } from '@/lib/api/shared';
 import type { CiphersImportPayload } from '@/lib/api/vault';
 import { t } from '@/lib/i18n';
 import type { AccountPasskeyCredential, AdminInvite, AdminUser, AuditLogListResult, AuditLogSettings, AuthRequest, AuthorizedDevice, Cipher, CustomEquivalentDomain, DomainRules, Folder as VaultFolder, Profile, Send, SendDraft, SessionState, TwoFactorPasskeySettings, VaultDraft, YubiKeyOtpSettings } from '@/lib/types';
@@ -20,6 +22,7 @@ const SettingsPage = lazy(() => import('@/components/SettingsPage'));
 const DomainRulesPage = lazy(() => import('@/components/DomainRulesPage'));
 const SecurityDevicesPage = lazy(() => import('@/components/SecurityDevicesPage'));
 const AdminPage = lazy(() => import('@/components/AdminPage'));
+const DatabaseSettingsPage = lazy(() => import('@/components/DatabaseSettingsPage'));
 const LogCenterPage = lazy(() => import('@/components/LogCenterPage'));
 const BackupCenterPage = lazy(() => import('@/components/BackupCenterPage'));
 const ImportPage = lazy(() => import('@/components/ImportPage'));
@@ -174,6 +177,7 @@ export interface AppMainRoutesProps {
   onDeleteRemoteBackup: (masterPassword: string, destinationId: string, path: string) => Promise<void>;
   onRestoreRemoteBackup: (masterPassword: string, destinationId: string, path: string, replaceExisting?: boolean) => Promise<AdminBackupImportResponse>;
   onRestoreRemoteBackupAllowingChecksumMismatch: (masterPassword: string, destinationId: string, path: string, replaceExisting?: boolean) => Promise<AdminBackupImportResponse>;
+  authedFetch: AuthedFetch;
 }
 
 export default function AppMainRoutes(props: AppMainRoutesProps) {
@@ -459,6 +463,19 @@ export default function AppMainRoutes(props: AppMainRoutesProps) {
             />
           </Suspense>
         </div>
+      </Route>
+      <Route path="/admin/database">
+        {isAdmin ? (
+          <Suspense fallback={<RouteContentFallback />}>
+            <DatabaseSettingsPage authedFetch={props.authedFetch} mobileLayout={props.mobileLayout} onMobileBack={() => props.onNavigate('/admin')} />
+          </Suspense>
+        ) : props.profileLoading ? (
+          // On a hard load of /admin/database the profile is still in flight; an
+          // immediate 404 told admins the page did not exist.
+          <LoadingState card lines={5} />
+        ) : (
+          <NotFoundPage />
+        )}
       </Route>
       <Route path="/admin">
         <div className="stack">

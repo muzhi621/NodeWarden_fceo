@@ -140,6 +140,80 @@ npm run dev:kv
 ---
 
 
+## External database (BYO DB) & Node.js / EdgeOne deploy
+
+This fork adds **frontend-configurable external MySQL** (BYO DB) plus a plain Node.js server
+entry, so the vault no longer depends on Cloudflare D1. The database can live anywhere
+(TiDB Cloud free tier, self-hosted MySQL on a NAS, any cloud DB) and be swapped at any time.
+
+Quick start (Node + MySQL):
+
+```bash
+npm install && npm run build
+export JWT_SECRET="32+ chars"
+export DB_HOST=... DB_PORT=4000 DB_USER=... DB_PASSWORD=... DB_NAME=nodewarden DB_SSL=true
+export DB_CONFIG_KEY="passphrase-for-encrypted-admin-config"
+npm run start:node          # http://localhost:8787
+```
+
+Then open **Admin → Database settings** (`/admin/database`) to edit/test the connection
+(AES-256-GCM encrypted, password never echoed). `/healthz` reports DB mode and connectivity
+only — driver errors and the version string are no longer echoed to unauthenticated callers.
+Without `DB_HOST` the app falls back to D1 — `npm run deploy` works exactly like upstream.
+
+### Deploying to Aliyun FC / self-hosting Node
+
+A prebuilt, upload-ready package is attached to every
+[release](https://github.com/muzhi621/NodeWarden_fceo/releases) (`nodewarden-fc.zip`).
+Sizing that stays inside the free tier, the full env-var table, the scheduled-backup trigger
+and the manual SQL for upgrading older databases are in **[FC-DEPLOY.md](FC-DEPLOY.md)**.
+
+Three behaviours differ from upstream's Node story:
+
+- **TLS is verified by default.** For self-signed databases set `DB_SSL_INSECURE=1`, or preferably
+  point `DB_SSL_CA` at the PEM bundle. The admin "test connection" button refuses hosts that
+  resolve to loopback/private/link-local ranges unless they are listed in `DB_HOST_ALLOWLIST`.
+- **Scheduled backups are triggered by the platform**, not an in-process timer:
+  `POST /internal/cron/backup` with an `x-cron-secret` header (`CRON_SECRET`). This avoids
+  duplicate runs across instances and survives scale-to-zero. `INPROCESS_CRON=1` restores the
+  old timer for single-node self-hosting only.
+- **Request bodies are capped** at `MAX_BODY_MB` (default 100) and oversized uploads get a 413
+  instead of exhausting memory.
+
+Notes on the Node runtime: Durable Objects run in-process with in-memory state
+(`server/local-durable-objects.ts`), so the backup centre (manual/scheduled runs,
+remote restore, attachment sync) and notification tokens keep working; WebSocket
+upgrades still return 501, so realtime push degrades to client polling, and DO
+state is per-process (lost on cold start).
+See `README_ZH.md` (外接数据库部署教程) for the full tutorial: TiDB Serverless setup,
+D1→MySQL data migration, FC/SCF/EdgeOne deployment options, and Dockerfile.
+
+### Deploying to Tencent EdgeOne Pages
+
+`dist/` is served as static assets and the API runs as **Node Functions** — the repo already
+ships the adapter, no wrapper code to write: `server/edgeone.ts` (entry),
+`server/node-runtime.ts` (pipeline shared with FC), `edgeone.json` (build/cache headers/duration),
+`scripts/edgeone-postbuild.mjs` (emits `dist/404.html` so SPA deep links survive a refresh)
+and `node-functions/**` (one thin entry per backend path prefix, bundled into the committed
+`node-functions/_nodewarden/runtime.mjs`).
+
+Platform limits to know: request body ≤ 6 MB, one invocation ≤ 120 s, no persistent disk
+(only `/tmp`), KV is not available to Node Functions, WebSockets degrade to polling.
+Deployment steps, env vars, scheduled-backup options and troubleshooting: **[EDGEONE-DEPLOY.md](EDGEONE-DEPLOY.md)**.
+
+```bash
+npm run build:edgeone     # build the web vault + bundle the Node Functions runtime
+npm run test:edgeone      # 15 checks, no platform account needed
+npm run test:edgeone:db   # full register → login → sync flow against a real MySQL
+```
+
+> **Upgrading an existing MySQL database?** Read FC-DEPLOY.md §6 first — two schema fixes
+> (JSON columns back to `LONGTEXT`, and dropping the 191-byte prefix from the
+> `webauthn_credentials.credential_id` unique index) are applied by hand on old databases.
+
+---
+
+
 ## License
 
 LGPL-3.0 License

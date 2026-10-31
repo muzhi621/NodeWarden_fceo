@@ -106,6 +106,10 @@ const SETTINGS_HOME_ROUTE = '/settings';
 const SETTINGS_ACCOUNT_ROUTE = '/settings/account';
 const SETTINGS_DOMAIN_RULES_ROUTE = '/settings/domain-rules';
 const DEVICE_MANAGEMENT_ROUTE = '/settings/security/device-management';
+/** Admin → database settings (BYO-DB). Must stay in APP_ROUTE_PATHS: anything
+ *  outside that set is treated as an unknown route and rendered as a full-page
+ *  404 before the router ever sees it. */
+const ADMIN_DATABASE_ROUTE = '/admin/database';
 const LEGACY_DEVICE_MANAGEMENT_ROUTE = '/security/devices';
 const AUTH_ROUTE_PATHS = ['/', '/login', '/register', '/lock', '/recover-2fa'] as const;
 const APP_ROUTE_PATHS = [
@@ -116,6 +120,7 @@ const APP_ROUTE_PATHS = [
   '/generator',
   '/sends',
   '/admin',
+  ADMIN_DATABASE_ROUTE,
   '/logs',
   LEGACY_DEVICE_MANAGEMENT_ROUTE,
   DEVICE_MANAGEMENT_ROUTE,
@@ -2009,7 +2014,12 @@ export default function App() {
   }, [phase, isImportHashRoute, location, navigate]);
 
   useEffect(() => {
-    if (phase === 'app' && !isAdminProfile(profile) && (location === '/backup' || location === '/logs') && !profileQuery.isFetching) {
+    if (
+      phase === 'app' &&
+      !isAdminProfile(profile) &&
+      (location === '/backup' || location === '/logs' || location === ADMIN_DATABASE_ROUTE) &&
+      !profileQuery.isFetching
+    ) {
       navigate('/vault');
     }
   }, [phase, profile?.role, profileQuery.isFetching, location, navigate]);
@@ -2024,6 +2034,7 @@ export default function App() {
     profile,
     profileLoading: profileQuery.isFetching && !profile,
     session,
+    authedFetch,
     mobileLayout,
     mobileSidebarToggleKey,
     themePreference,

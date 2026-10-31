@@ -2,7 +2,8 @@ import { Env } from './types';
 import { NotificationsHub } from './durable/notifications-hub';
 import { BackupTransferRunner } from './durable/backup-transfer-runner';
 import { handleRequest } from './router';
-import { StorageService } from './services/storage';
+import { ensureDatabaseInitialized, getDbInitError } from './services/db-lifecycle';
+import { getDatabaseStatus } from './services/storage-factory';
 import { applyCors, jsonResponse } from './utils/response';
 import { runScheduledBackupIfDue } from './handlers/backup';
 import {
@@ -10,10 +11,6 @@ import {
   isWebVaultHidden,
   webVaultNotFoundResponse,
 } from './web-vault-visibility';
-
-let dbInitialized = false;
-let dbInitError: string | null = null;
-let dbInitPromise: Promise<void> | null = null;
 
 function normalizeRequestUrl(request: Request): Request {
   const url = new URL(request.url);
@@ -53,26 +50,17 @@ async function maybeServeAsset(request: Request, env: Env): Promise<Response | n
   return addSearchIndexHeaders(request, response);
 }
 
-async function ensureDatabaseInitialized(env: Env): Promise<void> {
-  if (dbInitialized) return;
-
-  if (!dbInitPromise) {
-    dbInitPromise = (async () => {
-      const storage = new StorageService(env.DB);
-      await storage.initializeDatabase();
-      dbInitialized = true;
-      dbInitError = null;
-    })()
-      .catch((error: unknown) => {
-        console.error('Failed to initialize database:', error);
-        dbInitError = error instanceof Error ? error.message : 'Unknown database initialization error';
-      })
-      .finally(() => {
-        dbInitPromise = null;
-      });
+async function handleHealthz(env: Env): Promise<Response> {
+  const status = await getDatabaseStatus(env);
+  if (status.error) {
+    // Unauthenticated endpoint: raw MySQL errors leak the DB user, egress IP and
+    // schema names. Keep the detail in the logs, expose only the shape.
+    console.error('[healthz] database unavailable:', status.error);
   }
-
-  await dbInitPromise;
+  return jsonResponse(
+    { ok: status.ok, db: status.ok ? 'up' : 'down', mode: status.mode, source: status.source },
+    status.ok ? 200 : 503
+  );
 }
 
 export default {
@@ -90,7 +78,12 @@ export default {
       return applyCors(normalizedRequest, assetResponse, env);
     }
 
+    if (requestPath === '/healthz' || requestPath === '/api/healthz') {
+      return applyCors(normalizedRequest, await handleHealthz(env), env);
+    }
+
     await ensureDatabaseInitialized(env);
+    const dbInitError = getDbInitError();
     if (dbInitError) {
       // Log full error server-side, return generic message to client.
       console.error('DB init error (not forwarded to client):', dbInitError);
@@ -115,6 +108,7 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     void controller;
     await ensureDatabaseInitialized(env);
+    const dbInitError = getDbInitError();
     if (dbInitError) {
       console.error('Skipping scheduled backup because DB init failed:', dbInitError);
       return;

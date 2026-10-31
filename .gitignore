@@ -41,7 +41,13 @@ npm-debug.log*
 
 tmp/
 .tmp/
+.smoke-db.json
 .tmp-bitwarden-clients/
+
+# Local runtime data of the Node entry (server/index.ts): kv-store.json holds
+# the AES-GCM encrypted DB config, attachments/ holds user files.
+/data/
+/node-functions/data/
 
 nodewarden-wiki/
 nodewarden.wiki/

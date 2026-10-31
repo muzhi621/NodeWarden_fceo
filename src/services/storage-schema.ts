@@ -9,7 +9,7 @@
 // - If the new table stores persistent data, update the backup export/import
 //   contract in src/services/backup-archive.ts and backup-import.ts.
 // - Keep statements idempotent; D1 may execute them again on later requests.
-const SCHEMA_STATEMENTS: readonly string[] = [
+export const SCHEMA_STATEMENTS: readonly string[] = [
   'CREATE TABLE IF NOT EXISTS users (' +
   'id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT, master_password_hint TEXT, master_password_hash TEXT NOT NULL, ' +
   'key TEXT NOT NULL, private_key TEXT, public_key TEXT, kdf_type INTEGER NOT NULL, ' +

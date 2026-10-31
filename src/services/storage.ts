@@ -177,7 +177,11 @@ const REQUIRED_SCHEMA_TABLES = ['webauthn_credentials', 'webauthn_challenges', '
 
 export class StorageService {
   private static attachmentTokenTableReady = false;
-  private static schemaVerified = false;
+  // Schema readiness is a property of a *database*, not of the process: the
+  // BYO-DB feature can point the app at a different MySQL at runtime, and a
+  // process-wide boolean made `initializeDatabase()` return early so the new
+  // database never got its tables (while the admin UI was told "ready").
+  private static verifiedSchemaKeys = new Set<string>();
   private static lastRefreshTokenCleanupAt = 0;
   private static lastAttachmentTokenCleanupAt = 0;
   private static lastTotpReplayCleanupAt = 0;
@@ -201,14 +205,30 @@ export class StorageService {
     return stmt.bind(...values.map(v => v === undefined ? null : v));
   }
 
+  /**
+   * Schema self-check: are all REQUIRED_SCHEMA_TABLES present?
+   *
+   * The query goes through the dialect layer, which rewrites the SQLite
+   * `sqlite_master` catalog to information_schema for MySQL. A metadata failure
+   * must never take the whole instance down — an unreadable catalog is treated
+   * as "tables missing" so the idempotent schema statements run again.
+   */
   private async hasRequiredSchemaTables(): Promise<boolean> {
     const placeholders = REQUIRED_SCHEMA_TABLES.map(() => '?').join(', ');
-    const result = await this.db
-      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})`)
-      .bind(...REQUIRED_SCHEMA_TABLES)
-      .all<{ name: string }>();
-    const found = new Set((result.results || []).map((row) => row.name));
-    return REQUIRED_SCHEMA_TABLES.every((table) => found.has(table));
+    try {
+      const result = await this.db
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})`)
+        .bind(...REQUIRED_SCHEMA_TABLES)
+        .all<{ name: string }>();
+      const found = new Set((result.results || []).map((row) => row.name));
+      return REQUIRED_SCHEMA_TABLES.every((table) => found.has(table));
+    } catch (error) {
+      console.warn(
+        'Schema table probe failed; re-running idempotent schema statements:',
+        error instanceof Error ? error.message : String(error)
+      );
+      return false;
+    }
   }
 
   private sqlChunkSize(fixedBindCount: number, bindCountPerItem = 1): number {
@@ -251,11 +271,24 @@ export class StorageService {
 
   // --- Database initialization ---
   // Strategy:
-  // - Run only once per isolate.
-  // - Execute idempotent schema SQL on first request in each isolate.
+  // - Run once per database target (D1 or a given MySQL host/db).
+  // - Execute idempotent schema SQL on first request for that target.
   // - Keep statements idempotent so updates are safe.
+  static schemaKeyFor(db: D1Database | null | undefined): string {
+    if (!db) return 'none';
+    const config = (db as unknown as { getConfig?: () => { host?: string; port?: number; database?: string } })
+      .getConfig?.();
+    return config ? `mysql:${config.host}:${config.port}/${config.database}` : 'd1';
+  }
+
+  /** Test hook / runtime switch: forget which databases have been verified. */
+  static invalidateSchemaCache(): void {
+    StorageService.verifiedSchemaKeys.clear();
+  }
+
   async initializeDatabase(): Promise<void> {
-    if (StorageService.schemaVerified) return;
+    const schemaKey = StorageService.schemaKeyFor(this.db);
+    if (StorageService.verifiedSchemaKeys.has(schemaKey)) return;
 
     await this.db.prepare('CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL)').run();
     const schemaVersion = await getStoredConfigValue(this.db, STORAGE_SCHEMA_VERSION_KEY);
@@ -268,7 +301,7 @@ export class StorageService {
     }
     await ensurePushInstallationCredentials(this.db);
 
-    StorageService.schemaVerified = true;
+    StorageService.verifiedSchemaKeys.add(schemaKey);
   }
 
   // --- Config / setup ---

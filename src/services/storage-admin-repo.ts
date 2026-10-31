@@ -192,13 +192,25 @@ export async function pruneAuditLogs(db: D1Database, beforeIso: string): Promise
 
 export async function pruneAuditLogsToMax(db: D1Database, maxEntries: number): Promise<number> {
   const limit = Math.max(1, Math.floor(maxEntries));
+  // Portable across SQLite and MySQL, and index-friendly on large tables:
+  // the previous `NOT IN (SELECT id ... LIMIT ?)` materialized the whole
+  // keep-set on every prune, which is expensive once audit_logs reaches a few
+  // hundred thousand rows. Instead, delete everything strictly older than the
+  // Nth-newest created_at — a range scan the index can use. Rows tied with
+  // the boundary timestamp are kept, so the table may briefly exceed `limit`
+  // but never drops below it. The derived-table wrapper is still required
+  // because MySQL rejects a subquery on the table being deleted from
+  // (ER_UPDATE_TABLE_USED, 1093). An OFFSET past the end yields an empty
+  // subquery → NULL → nothing is deleted.
   const result = await db
     .prepare(
-      'DELETE FROM audit_logs WHERE id IN (' +
-        'SELECT id FROM audit_logs ORDER BY created_at DESC LIMIT -1 OFFSET ?' +
+      'DELETE FROM audit_logs WHERE created_at < (' +
+        'SELECT boundary FROM (' +
+          'SELECT created_at AS boundary FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT 1 OFFSET ?' +
+        ') AS keep' +
       ')'
     )
-    .bind(limit)
+    .bind(limit - 1)
     .run();
   return Number(result.meta.changes ?? 0);
 }
