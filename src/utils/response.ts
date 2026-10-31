@@ -176,6 +176,22 @@ export function isDuplicateKeyError(error: unknown): boolean {
   return /UNIQUE constraint failed|Duplicate entry .* for key/i.test(message);
 }
 
+/**
+ * Which unique key lost the race decides what the user is told. Every 1062
+ * used to be answered with "an account or record with these details already
+ * exists", which is actively wrong when the collision is a cipher or a
+ * passkey credential id (S-2 in the review notes).
+ */
+export function conflictMessageFor(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  // MySQL: "Duplicate entry 'x' for key 'users.email_UNIQUE'";
+  // SQLite/D1: "UNIQUE constraint failed: users.email".
+  const match = /for key\s+'?([\w.$]+)|UNIQUE constraint failed:\s*([\w.]+)/i.exec(message);
+  const key = (match?.[1] || match?.[2] || '').toLowerCase();
+  if (key.startsWith('users.')) return 'An account with these details already exists.';
+  return 'A record with these details already exists.';
+}
+
 /** 409 — the request was well formed but collides with existing data. */
 export function conflictResponse(
   message: string = 'An account or record with these details already exists.'

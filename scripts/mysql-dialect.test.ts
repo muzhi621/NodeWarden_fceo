@@ -361,13 +361,19 @@ test('LIMIT -1 inside a string literal is untouched', () => {
 // --- regression: portable audit prune (C-3, MySQL error 1093) --------------
 
 test('audit prune SQL is executable on both dialects', () => {
-  // Mirrors pruneAuditLogsToMax: no LIMIT -1, and the same-table subquery is
-  // wrapped in a derived table so MySQL accepts it (ER_UPDATE_TABLE_USED).
+  // Mirrors pruneAuditLogsToMax: no LIMIT -1, no same-table NOT IN keep-set
+  // (replaced by a created_at boundary for index-friendly pruning on large
+  // tables, S-3), and the subquery is wrapped in a derived table so MySQL
+  // accepts it (ER_UPDATE_TABLE_USED, 1093).
   const out = translateSql(
-    'DELETE FROM audit_logs WHERE id NOT IN (' +
-      'SELECT id FROM (SELECT id FROM audit_logs ORDER BY created_at DESC LIMIT ?) AS keep)'
+    'DELETE FROM audit_logs WHERE created_at < (' +
+      'SELECT boundary FROM (' +
+        'SELECT created_at AS boundary FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT 1 OFFSET ?' +
+      ') AS keep' +
+    ')'
   );
   assert.doesNotMatch(out, /LIMIT -1/);
+  assert.doesNotMatch(out, /NOT IN \(/);
   assert.match(out, /AS keep\)/);
 });
 

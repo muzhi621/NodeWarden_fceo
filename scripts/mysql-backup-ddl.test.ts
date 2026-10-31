@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildShadowTableCreateSql } from '../src/services/backup-import';
+import { buildShadowTableCreateSql, normalizeMysqlIdentifiers } from '../src/services/backup-import';
 
 const LIVE_DDL =
   'CREATE TABLE "domain_settings" (\n' +
@@ -57,4 +57,43 @@ test('removing a middle constraint keeps the other index clauses', () => {
   assert.match(out, /UNIQUE KEY "idx_cred"/);
   assert.match(out, /KEY "user_id" \("user_id"\)/);
   assert.doesNotMatch(out, /CONSTRAINT/i, out);
+});
+
+// --- regression: identifier translation must not touch string literals (S-1) ---
+
+test('S-1: backticks inside string literals survive identifier normalization', () => {
+  const ddl =
+    'CREATE TABLE `users` (\n' +
+    '  `id` varchar(32) NOT NULL,\n' +
+    "  `note` varchar(16) DEFAULT 'a`b',\n" +
+    '  PRIMARY KEY (`id`)\n' +
+    ') ENGINE=InnoDB';
+  const out = normalizeMysqlIdentifiers(ddl);
+  assert.match(out, /CREATE TABLE "users"/);
+  assert.match(out, /"note" varchar\(16\)/);
+  assert.match(out, /DEFAULT 'a`b'/, 'a backtick inside a string literal must stay byte for byte');
+});
+
+test('S-1: escaped identifiers and comments are handled', () => {
+  const ddl =
+    'CREATE TABLE `we``ird` (\n' +
+    '  -- keep `this` comment as is\n' +
+    '  `id` int NOT NULL,\n' +
+    '  PRIMARY KEY (`id`)\n' +
+    ')';
+  const out = normalizeMysqlIdentifiers(ddl);
+  assert.match(out, /CREATE TABLE "we`ird"/, 'a doubled backtick is one literal backtick');
+  assert.match(out, /-- keep `this` comment as is/, 'line comments are copied verbatim');
+});
+
+test('S-1: normalized DDL feeds the shadow-table rewrite', () => {
+  const ddl =
+    'CREATE TABLE `domain_settings` (\n' +
+    '  `user_id` varchar(512) NOT NULL,\n' +
+    "  `note` longtext DEFAULT 'x`y',\n" +
+    '  PRIMARY KEY (`user_id`)\n' +
+    ') ENGINE=InnoDB';
+  const out = buildShadowTableCreateSql(normalizeMysqlIdentifiers(ddl), 'domain_settings', true);
+  assert.match(out, /^CREATE TABLE "domain_settings__restore"/);
+  assert.match(out, /'x`y'/);
 });

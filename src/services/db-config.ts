@@ -186,14 +186,40 @@ async function writeStoredPayload(env: Env, payload: string | null): Promise<boo
 // resolveDbConfig() runs on EVERY request (db-lifecycle re-attaches env.DB per
 // request). Caching it means steady state costs one read per TTL instead of one
 // per request; write paths refresh the cache so a save takes effect immediately.
+//
+// The cache is keyed by the *store object itself* (SETTINGS_KV /
+// ATTACHMENTS_KV / ATTACHMENTS): a module-level singleton would let two
+// environments — consecutive test cases, or a self-hosted process serving more
+// than one env — read each other's encrypted payload within the TTL window
+// (C-6 in the review notes). Entries are invalidated wholesale by bumping the
+// epoch; a WeakMap cannot be cleared, and dropping the ref is not enough
+// because the same env object outlives a reset in tests.
 const CONFIG_CACHE_TTL_MS = 30_000;
-let payloadCache: { payload: string | null; at: number } | null = null;
+const payloadCache = new WeakMap<object, { epoch: number; payload: string | null; at: number }>();
+let cacheEpoch = 0;
+
+/** Test/reset hook: invalidate every cached payload without touching the stores. */
+export function clearDbConfigCache(): void {
+  cacheEpoch += 1;
+}
+
+function cacheStoreRef(env: Env): object | null {
+  const store = getConfigStore(env);
+  if (store === 'kv') return (env.SETTINGS_KV as unknown as object | undefined) ?? null;
+  if (store === 'attachment-kv') return (env.ATTACHMENTS_KV as unknown as object | undefined) ?? null;
+  if (store === 'r2') return (env.ATTACHMENTS as unknown as object | undefined) ?? null;
+  return null;
+}
 
 async function readStoredPayloadCached(env: Env): Promise<string | null> {
+  const ref = cacheStoreRef(env);
   const now = Date.now();
-  if (payloadCache && now - payloadCache.at < CONFIG_CACHE_TTL_MS) return payloadCache.payload;
+  if (ref) {
+    const hit = payloadCache.get(ref);
+    if (hit && hit.epoch === cacheEpoch && now - hit.at < CONFIG_CACHE_TTL_MS) return hit.payload;
+  }
   const payload = await readStoredPayload(env);
-  payloadCache = { payload, at: now };
+  if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: now });
   return payload;
 }
 
@@ -207,13 +233,19 @@ export async function saveRuntimeConfig(env: Env, config: DbRuntimeConfig): Prom
   const payload = await encryptJson(env, config);
   if (!payload) return false;
   const saved = await writeStoredPayload(env, payload);
-  if (saved) payloadCache = { payload, at: Date.now() };
+  if (saved) {
+    const ref = cacheStoreRef(env);
+    if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: Date.now() });
+  }
   return saved;
 }
 
 export async function clearRuntimeConfig(env: Env): Promise<boolean> {
   const saved = await writeStoredPayload(env, null);
-  if (saved) payloadCache = { payload: null, at: Date.now() };
+  if (saved) {
+    const ref = cacheStoreRef(env);
+    if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload: null, at: Date.now() });
+  }
   return saved;
 }
 

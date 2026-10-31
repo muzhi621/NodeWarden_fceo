@@ -131,20 +131,8 @@ npx esbuild server/index.ts --bundle --platform=node --format=esm \
   --target=node22 --outfile=server/index.mjs --external:cloudflare:workers --external:mysql2
 ```
 
-启动入口 `fc-entry.mjs`（FC 代码目录只读，仅 `/tmp` 可写，故把可写目录默认指到 `/tmp`）：
-
-```js
-process.env.NODE_ENV = process.env.NODE_ENV || 'production';
-process.env.DATA_DIR = process.env.DATA_DIR || '/tmp/nodewarden';
-process.env.ATTACHMENTS_DIR = process.env.ATTACHMENTS_DIR || `${process.env.DATA_DIR}/attachments`;
-process.env.PORT = process.env.PORT || '9000';
-
-// 1) 注册 cloudflare:workers 桩（打包产物里仍有该 import，运行时映射为桩）
-await import('./server/register-cf-stub.mjs');
-
-// 2) 启动打包好的服务（纯 JS）
-await import('./server/index.mjs');
-```
+启动入口直接用**仓库根的 `fc-entry.mjs`**（FC 代码目录只读，仅 `/tmp` 可写，故把可写目录默认指到
+`/tmp`；该文件与发布 ZIP 内的完全一致，无需手抄）。组包时把它原样复制到包根即可。
 
 然后按下面的结构组包，`node_modules/` 只放 mysql2 及其依赖（`aws-ssl-profiles`、`generate-function`、
 `iconv-lite`、`is-property`、`long`、`lru.min`、`named-placeholders`、`safer-buffer`、`sql-escaper` 等）：

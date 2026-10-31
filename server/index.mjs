@@ -379,6 +379,13 @@ function isDuplicateKeyError(error) {
   const message = error instanceof Error ? error.message : String(error ?? "");
   return /UNIQUE constraint failed|Duplicate entry .* for key/i.test(message);
 }
+function conflictMessageFor(error) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const match = /for key\s+'?([\w.$]+)|UNIQUE constraint failed:\s*([\w.]+)/i.exec(message);
+  const key = (match?.[1] || match?.[2] || "").toLowerCase();
+  if (key.startsWith("users.")) return "An account with these details already exists.";
+  return "A record with these details already exists.";
+}
 function conflictResponse(message = "An account or record with these details already exists.") {
   return errorResponse(message, 409);
 }
@@ -1365,8 +1372,8 @@ async function pruneAuditLogs(db, beforeIso) {
 async function pruneAuditLogsToMax(db, maxEntries) {
   const limit = Math.max(1, Math.floor(maxEntries));
   const result = await db.prepare(
-    "DELETE FROM audit_logs WHERE id NOT IN (SELECT id FROM (SELECT id FROM audit_logs ORDER BY created_at DESC LIMIT ?) AS keep)"
-  ).bind(limit).run();
+    "DELETE FROM audit_logs WHERE created_at < (SELECT boundary FROM (SELECT created_at AS boundary FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT 1 OFFSET ?) AS keep)"
+  ).bind(limit - 1).run();
   return Number(result.meta.changes ?? 0);
 }
 async function clearAuditLogs(db) {
@@ -8269,7 +8276,7 @@ function toResult(rows, affectedRows, insertId) {
 function isMySqlDatabase(db) {
   return !!db && typeof db === "object" && db.dialect === "mysql";
 }
-var IGNORABLE_DDL_ERRNOS, IGNORABLE_DDL_CODES, RETRYABLE_CONN_CODES, RETRYABLE_PRECONNECT_CODES, READ_ONLY_SQL, MySqlStatement, MySqlDatabase;
+var IGNORABLE_DDL_ERRNOS, IGNORABLE_DDL_CODES, RETRYABLE_CONN_CODES, RETRYABLE_PRECONNECT_CODES, CON_CAP_RETRY_DELAY_MS, READ_ONLY_SQL, MySqlStatement, MySqlDatabase;
 var init_storage_mysql = __esm({
   "src/services/storage-mysql.ts"() {
     "use strict";
@@ -8291,9 +8298,13 @@ var init_storage_mysql = __esm({
       "EHOSTUNREACH",
       "ENETUNREACH",
       "ENOTFOUND",
-      "ETIMEDOUT",
-      "ER_CON_COUNT_ERROR"
+      "ETIMEDOUT"
+      // 'ER_CON_COUNT_ERROR' is handled separately in query(): the server refused
+      // a new connection because of its max_connections cap — the pool itself is
+      // healthy, so the generic path (destroy + rebuild) would kill every
+      // in-flight query just to free one slot.
     ]);
+    CON_CAP_RETRY_DELAY_MS = 200;
     READ_ONLY_SQL = /^\s*(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i;
     MySqlStatement = class {
       constructor(db, translatedSql, originalSql) {
@@ -8431,6 +8442,10 @@ var init_storage_mysql = __esm({
           return await pool.query(sql, params);
         } catch (error) {
           const code = String(error?.code ?? "");
+          if (code === "ER_CON_COUNT_ERROR") {
+            await new Promise((resolve) => setTimeout(resolve, CON_CAP_RETRY_DELAY_MS));
+            return await pool.query(sql, params);
+          }
           const retryable = RETRYABLE_PRECONNECT_CODES.has(code) || RETRYABLE_CONN_CODES.has(code) && READ_ONLY_SQL.test(sql);
           if (retryable) {
             await this.close();
@@ -8536,11 +8551,77 @@ async function queryRows2(db, sql, ...values) {
   const response = await db.prepare(sql).bind(...values).all();
   return (response.results || []).map((row) => ({ ...row }));
 }
+function normalizeMysqlIdentifiers(sql) {
+  let out = "";
+  let i2 = 0;
+  while (i2 < sql.length) {
+    const ch = sql[i2];
+    if (ch === "'" || ch === '"') {
+      const quote = ch;
+      let j = i2 + 1;
+      while (j < sql.length) {
+        if (sql[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (sql[j] === quote) {
+          if (sql[j + 1] === quote) {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      out += sql.slice(i2, j);
+      i2 = j;
+      continue;
+    }
+    if (ch === "`") {
+      let ident = "";
+      let j = i2 + 1;
+      while (j < sql.length) {
+        if (sql[j] === "`") {
+          if (sql[j + 1] === "`") {
+            ident += "`";
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        ident += sql[j];
+        j += 1;
+      }
+      out += `"${ident}"`;
+      i2 = sql[j] === "`" ? j + 1 : j;
+      continue;
+    }
+    if (ch === "-" && sql[i2 + 1] === "-") {
+      let j = sql.indexOf("\n", i2);
+      if (j === -1) j = sql.length;
+      out += sql.slice(i2, j);
+      i2 = j;
+      continue;
+    }
+    if (ch === "/" && sql[i2 + 1] === "*") {
+      let j = sql.indexOf("*/", i2 + 2);
+      if (j === -1) j = sql.length;
+      else j += 2;
+      out += sql.slice(i2, j);
+      i2 = j;
+      continue;
+    }
+    out += ch;
+    i2 += 1;
+  }
+  return out;
+}
 async function getTableCreateSql(db, table) {
   if (isMySqlDatabase(db)) {
     const ddlRow = await db.prepare(`SHOW CREATE TABLE ${table}`).first();
     const ddl = String(ddlRow?.["Create Table"] ?? "").trim();
-    if (ddl) return ddl.replace(/`([^`]+)`/g, '"$1"');
+    if (ddl) return normalizeMysqlIdentifiers(ddl);
   }
   const row = await db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").bind(table).first();
   const sql = String(row?.sql || "").trim();
@@ -35765,12 +35846,24 @@ async function writeStoredPayload(env, payload) {
   return false;
 }
 var CONFIG_CACHE_TTL_MS = 3e4;
-var payloadCache = null;
+var payloadCache = /* @__PURE__ */ new WeakMap();
+var cacheEpoch = 0;
+function cacheStoreRef(env) {
+  const store = getConfigStore(env);
+  if (store === "kv") return env.SETTINGS_KV ?? null;
+  if (store === "attachment-kv") return env.ATTACHMENTS_KV ?? null;
+  if (store === "r2") return env.ATTACHMENTS ?? null;
+  return null;
+}
 async function readStoredPayloadCached(env) {
+  const ref = cacheStoreRef(env);
   const now = Date.now();
-  if (payloadCache && now - payloadCache.at < CONFIG_CACHE_TTL_MS) return payloadCache.payload;
+  if (ref) {
+    const hit = payloadCache.get(ref);
+    if (hit && hit.epoch === cacheEpoch && now - hit.at < CONFIG_CACHE_TTL_MS) return hit.payload;
+  }
   const payload = await readStoredPayload(env);
-  payloadCache = { payload, at: now };
+  if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: now });
   return payload;
 }
 async function loadRuntimeConfig(env) {
@@ -35782,12 +35875,18 @@ async function saveRuntimeConfig(env, config) {
   const payload = await encryptJson(env, config);
   if (!payload) return false;
   const saved = await writeStoredPayload(env, payload);
-  if (saved) payloadCache = { payload, at: Date.now() };
+  if (saved) {
+    const ref = cacheStoreRef(env);
+    if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: Date.now() });
+  }
   return saved;
 }
 async function clearRuntimeConfig(env) {
   const saved = await writeStoredPayload(env, null);
-  if (saved) payloadCache = { payload: null, at: Date.now() };
+  if (saved) {
+    const ref = cacheStoreRef(env);
+    if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload: null, at: Date.now() });
+  }
   return saved;
 }
 function parsePort(raw, fallback) {
@@ -35859,7 +35958,16 @@ function hasConfigStore(env) {
 init_storage_mysql();
 var cached = null;
 function cacheKeyFor(config) {
-  return [config.mode, config.host, config.port, config.user, config.database, config.ssl].join("|");
+  return JSON.stringify([
+    config.mode,
+    config.host,
+    config.port,
+    config.user,
+    config.database,
+    config.ssl,
+    config.connectionLimit,
+    config.password
+  ]);
 }
 async function getDatabase(env) {
   const config = await resolveDbConfig(env);
@@ -35936,6 +36044,62 @@ async function getDatabaseStatus(env) {
       error: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+// src/services/db-lifecycle.ts
+init_storage();
+var initializedKey = null;
+var dbInitError = null;
+var initPromises = /* @__PURE__ */ new Map();
+function getDbInitError() {
+  return dbInitError;
+}
+function resetDbLifecycle() {
+  initializedKey = null;
+  dbInitError = null;
+  initPromises.clear();
+}
+function attachDatabase(env, db) {
+  env.DB = db;
+}
+async function ensureDatabaseInitialized(env, resolve = getDatabase) {
+  let db = null;
+  try {
+    db = await resolve(env);
+  } catch (error) {
+    dbInitError = error instanceof Error ? error.message : String(error);
+    console.error("Failed to resolve database for request env:", error);
+    return;
+  }
+  if (!db) {
+    dbInitError = "No database configured: set DB_* env vars or use /admin/database.";
+    console.error(dbInitError);
+    return;
+  }
+  attachDatabase(env, db);
+  const schemaKey = StorageService.schemaKeyFor(db);
+  if (initializedKey === schemaKey) {
+    if (dbInitError) {
+      dbInitError = null;
+      console.warn("[db-lifecycle] cleared a stale database init error: the same database resolved successfully again.");
+    }
+    return;
+  }
+  let pending = initPromises.get(schemaKey);
+  if (!pending) {
+    pending = (async () => {
+      await new StorageService(db).initializeDatabase();
+      initializedKey = schemaKey;
+      dbInitError = null;
+    })().catch((error) => {
+      dbInitError = error instanceof Error ? error.message : String(error);
+      console.error("Database initialization failed:", error);
+    }).finally(() => {
+      initPromises.delete(schemaKey);
+    });
+    initPromises.set(schemaKey, pending);
+  }
+  await pending;
 }
 
 // src/handlers/admin-db-config.ts
@@ -36075,7 +36239,8 @@ function normalizeCandidate(body, fallback) {
   const user = String(body.user ?? fallback?.user ?? "").trim();
   const database = String(body.database ?? fallback?.database ?? "").trim();
   const passwordRaw = body.password;
-  const password = typeof passwordRaw === "string" && passwordRaw.length > 0 ? passwordRaw : fallback?.password ?? "";
+  const clearPassword = body.clearPassword === true;
+  const password = clearPassword ? "" : typeof passwordRaw === "string" && passwordRaw.length > 0 ? passwordRaw : fallback?.password ?? "";
   const port = Number(body.port ?? fallback?.port ?? 3306);
   const connectionLimit = Number(body.connectionLimit ?? fallback?.connectionLimit ?? 5);
   const ssl = body.ssl === void 0 ? fallback?.ssl !== false : !!body.ssl;
@@ -36229,6 +36394,7 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
     }
     await clearRuntimeConfig(env);
     await resetDatabaseCache();
+    resetDbLifecycle();
     await auditDbConfigChange(env, actorUser, "admin.db_config.cleared", null);
     return jsonResponse({ ok: true, mode: "d1", effective: true });
   }
@@ -36265,6 +36431,7 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
     return errorResponse("Failed to persist database config", 500);
   }
   await resetDatabaseCache();
+  resetDbLifecycle();
   const db = await getDatabase(env);
   env.DB = db;
   const storage = new StorageService(db);
@@ -36299,6 +36466,7 @@ async function handleAdminClearDbConfig(request, env, actorUser) {
   }
   await clearRuntimeConfig(env);
   await resetDatabaseCache();
+  resetDbLifecycle();
   await auditDbConfigChange(env, actorUser, "admin.db_config.cleared", null);
   return jsonResponse({ ok: true, mode: "d1" });
 }
@@ -47018,56 +47186,11 @@ async function handleRequest(request, env) {
   } catch (error) {
     if (isDuplicateKeyError(error)) {
       console.warn("Request rejected: duplicate key", error instanceof Error ? error.message : error);
-      return conflictResponse();
+      return conflictResponse(conflictMessageFor(error));
     }
     console.error("Request error:", error);
     return errorResponse("Internal server error", 500);
   }
-}
-
-// src/services/db-lifecycle.ts
-init_storage();
-var initializedKey = null;
-var dbInitError = null;
-var initPromises = /* @__PURE__ */ new Map();
-function getDbInitError() {
-  return dbInitError;
-}
-function attachDatabase(env, db) {
-  env.DB = db;
-}
-async function ensureDatabaseInitialized(env, resolve = getDatabase) {
-  let db = null;
-  try {
-    db = await resolve(env);
-  } catch (error) {
-    dbInitError = error instanceof Error ? error.message : String(error);
-    console.error("Failed to resolve database for request env:", error);
-    return;
-  }
-  if (!db) {
-    dbInitError = "No database configured: set DB_* env vars or use /admin/database.";
-    console.error(dbInitError);
-    return;
-  }
-  attachDatabase(env, db);
-  const schemaKey = StorageService.schemaKeyFor(db);
-  if (initializedKey === schemaKey) return;
-  let pending = initPromises.get(schemaKey);
-  if (!pending) {
-    pending = (async () => {
-      await new StorageService(db).initializeDatabase();
-      initializedKey = schemaKey;
-      dbInitError = null;
-    })().catch((error) => {
-      dbInitError = error instanceof Error ? error.message : String(error);
-      console.error("Database initialization failed:", error);
-    }).finally(() => {
-      initPromises.delete(schemaKey);
-    });
-    initPromises.set(schemaKey, pending);
-  }
-  await pending;
 }
 
 // server/node-runtime.ts
@@ -47567,7 +47690,17 @@ var MemoryDurableObjectStorage = class {
     }
   }
   async transaction(closure) {
-    return closure(this);
+    const snapshot = new Map(this.values);
+    const alarmBefore = this.alarmAt;
+    try {
+      return await closure(this);
+    } catch (error) {
+      this.values.clear();
+      for (const [key, value] of snapshot) this.values.set(key, value);
+      this.alarmAt = alarmBefore;
+      this.arm();
+      throw error;
+    }
   }
 };
 function createState(name, storage) {
@@ -47596,9 +47729,19 @@ function jsonError(message, status) {
   });
 }
 function createLocalDurableObjectNamespace(label, factory, getEnv) {
+  const MAX_INSTANCES = 512;
   const instances = /* @__PURE__ */ new Map();
   const storages = /* @__PURE__ */ new Map();
   const instanceRefs = /* @__PURE__ */ new Map();
+  const trimInstances = (keep) => {
+    while (instances.size > MAX_INSTANCES) {
+      const oldest = instances.keys().next().value;
+      if (oldest === void 0 || oldest === keep) break;
+      instances.delete(oldest);
+      storages.delete(oldest);
+      instanceRefs.delete(oldest);
+    }
+  };
   const ensureInstance = (name) => {
     const cached2 = instances.get(name);
     if (cached2) return cached2;
@@ -47624,6 +47767,7 @@ function createLocalDurableObjectNamespace(label, factory, getEnv) {
     void pending.catch(() => {
       if (instances.get(name) === pending) instances.delete(name);
     });
+    trimInstances(name);
     return pending;
   };
   const toStub = (name) => ({
@@ -47689,12 +47833,20 @@ function createLocalBackupRunnerNamespace(getEnv) {
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
 var state = null;
 var sharedEnv = null;
+function isInsideDirectory(child, parent) {
+  const rel = path.relative(parent, child);
+  return !rel.startsWith("..") && !path.isAbsolute(rel);
+}
 function resolveState(options) {
-  const dataDir = path.resolve(
-    options.dataDir || process.env.DATA_DIR || defaultDataDir(options.assets)
+  const assets = options.assets || "disk";
+  let dataDir = path.resolve(
+    options.dataDir || process.env.DATA_DIR || defaultDataDir(assets)
   );
+  if (assets === "stub" && !isInsideDirectory(dataDir, os.tmpdir())) {
+    dataDir = path.join(os.tmpdir(), "nodewarden");
+  }
   return {
-    assets: options.assets || "disk",
+    assets,
     dataDir,
     attachmentsDir: path.resolve(process.env.ATTACHMENTS_DIR || path.join(dataDir, "attachments")),
     distDir: path.resolve(process.env.DIST_DIR || path.join(__dirname, "..", "dist"))
@@ -47705,7 +47857,14 @@ function defaultDataDir(assets) {
   return path.join(__dirname, "..", "data");
 }
 function configureNodeRuntime(options = {}) {
-  if (state) return state;
+  if (state) {
+    if (options.assets && options.assets !== state.assets) {
+      console.warn(
+        `[node-runtime] ignored late configureNodeRuntime({ assets: '${options.assets}' }): the runtime was already configured with assets: '${state.assets}' by an earlier call.`
+      );
+    }
+    return state;
+  }
   state = resolveState(options);
   fs.mkdirSync(state.dataDir, { recursive: true });
   fs.mkdirSync(state.attachmentsDir, { recursive: true });

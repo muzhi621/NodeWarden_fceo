@@ -16,6 +16,7 @@
 // Re-attaching per request is cheap: getDatabase() returns the cached pool.
 
 import type { Env } from '../types';
+import { clearDbConfigCache } from './db-config';
 import { StorageService } from './storage';
 import { getDatabase } from './storage-factory';
 
@@ -44,6 +45,9 @@ export function resetDbLifecycle(): void {
 /** Test hook: clear module state between test cases. */
 export function resetDbLifecycleForTests(): void {
   resetDbLifecycle();
+  // The DB-config payload cache is keyed per store object; consecutive test
+  // cases swap stores, so a stale entry would leak the previous config.
+  clearDbConfigCache();
   // StorageService caches verified databases; clear it so tests can observe
   // initialization independently.
   StorageService.invalidateSchemaCache();
@@ -92,7 +96,19 @@ export async function ensureDatabaseInitialized(
   attachDatabase(env, db);
 
   const schemaKey = StorageService.schemaKeyFor(db);
-  if (initializedKey === schemaKey) return;
+  if (initializedKey === schemaKey) {
+    // This database was fully initialized at some point, but a later request
+    // hit a transient failure (KV/R2 read timeout, pool creation error) that
+    // latched dbInitError. This request resolved and attached the same
+    // database fine, so the error is stale: clear it instead of failing every
+    // request until the process is recycled (C-1 in the review notes — the
+    // admin "save config" path only resets the storage cache, not this latch).
+    if (dbInitError) {
+      dbInitError = null;
+      console.warn('[db-lifecycle] cleared a stale database init error: the same database resolved successfully again.');
+    }
+    return;
+  }
 
   // One promise *per database*, not one per process: while the schema for the
   // old database is still being created, a request that already sees the new

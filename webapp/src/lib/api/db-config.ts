@@ -34,6 +34,8 @@ export interface DbConfigInput {
   port?: number;
   user?: string;
   password?: string;
+  /** Explicitly store an empty password (the input field never echoes the saved one). */
+  clearPassword?: boolean;
   database?: string;
   ssl?: boolean;
   connectionLimit?: number;

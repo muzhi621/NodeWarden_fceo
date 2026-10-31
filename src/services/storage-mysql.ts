@@ -111,8 +111,18 @@ const RETRYABLE_PRECONNECT_CODES = new Set([
   'ENETUNREACH',
   'ENOTFOUND',
   'ETIMEDOUT',
-  'ER_CON_COUNT_ERROR',
+  // 'ER_CON_COUNT_ERROR' is handled separately in query(): the server refused
+  // a new connection because of its max_connections cap — the pool itself is
+  // healthy, so the generic path (destroy + rebuild) would kill every
+  // in-flight query just to free one slot.
 ]);
+
+/**
+ * How long to wait before replaying a statement that ran into the server's
+ * connection cap: another connection may free up within that window, and the
+ * statement never reached the server, so even writes can be replayed safely.
+ */
+const CON_CAP_RETRY_DELAY_MS = 200;
 
 /** Statements with no side effects — the only ones worth replaying after a reset. */
 const READ_ONLY_SQL = /^\s*(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i;
@@ -290,6 +300,14 @@ export class MySqlDatabase implements D1LikeDatabase {
       return await pool.query(sql, params);
     } catch (error) {
       const code = String((error as { code?: string })?.code ?? '');
+      // The server refused a NEW connection because of its max_connections
+      // cap: the pool is healthy and in-flight queries must not be torn down
+      // (S-4). The statement never reached the server, so replaying it — even
+      // a write — is safe; a second failure propagates to the caller.
+      if (code === 'ER_CON_COUNT_ERROR') {
+        await new Promise((resolve) => setTimeout(resolve, CON_CAP_RETRY_DELAY_MS));
+        return await pool.query(sql, params);
+      }
       // A dead socket is only replayable when the statement had no side effects;
       // otherwise the retry can insert a second row. "Never connected" failures
       // are safe for anything.

@@ -20,8 +20,24 @@ function cacheKeyFor(config: {
   user: string;
   database: string;
   ssl: boolean;
+  connectionLimit: number;
+  password: string;
 }): string {
-  return [config.mode, config.host, config.port, config.user, config.database, config.ssl].join('|');
+  // JSON.stringify (not a '|' join): the password may contain those
+  // characters, making a joined key ambiguous. The credentials and pool size
+  // are part of the key: a config change that bypasses the admin save path
+  // (KV written directly) must produce a fresh pool, not a stale one that
+  // keeps the old password (S-11 in the review notes).
+  return JSON.stringify([
+    config.mode,
+    config.host,
+    config.port,
+    config.user,
+    config.database,
+    config.ssl,
+    config.connectionLimit,
+    config.password,
+  ]);
 }
 
 export async function getDatabase(env: Env): Promise<D1Database> {

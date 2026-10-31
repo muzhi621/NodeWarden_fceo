@@ -83,6 +83,86 @@ async function queryRows(db: D1Database, sql: string, ...values: unknown[]): Pro
   return (response.results || []).map((row) => ({ ...row }));
 }
 
+/**
+ * Rewrite MySQL backtick identifiers as double quotes — string literals,
+ * comments and escaped identifiers must survive untouched.
+ *
+ * A blanket `replace(/`([^`]+)`/g, '"$1"')` also rewrote backticks inside
+ * string literals (`DEFAULT 'a`b'`), corrupting the shadow-table DDL (S-1 in
+ * the review notes). This scanner only rewrites the identifier spans.
+ */
+export function normalizeMysqlIdentifiers(sql: string): string {
+  let out = '';
+  let i = 0;
+  while (i < sql.length) {
+    const ch = sql[i];
+    if (ch === "'" || ch === '"') {
+      // String literal: copy verbatim, honoring backslash escapes and the
+      // doubled-quote terminator form.
+      const quote = ch;
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (sql[j] === quote) {
+          if (sql[j + 1] === quote) {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      out += sql.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (ch === '`') {
+      // Identifier: a literal backtick inside is escaped by doubling it.
+      let ident = '';
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === '`') {
+          if (sql[j + 1] === '`') {
+            ident += '`';
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        ident += sql[j];
+        j += 1;
+      }
+      out += `"${ident}"`;
+      i = sql[j] === '`' ? j + 1 : j;
+      continue;
+    }
+    if (ch === '-' && sql[i + 1] === '-') {
+      // Line comment.
+      let j = sql.indexOf('\n', i);
+      if (j === -1) j = sql.length;
+      out += sql.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (ch === '/' && sql[i + 1] === '*') {
+      // Block comment.
+      let j = sql.indexOf('*/', i + 2);
+      if (j === -1) j = sql.length;
+      else j += 2;
+      out += sql.slice(i, j);
+      i = j;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
 async function getTableCreateSql(db: D1Database, table: BackupTableName): Promise<string> {
   // MySQL keeps no SQLite catalog: read the live DDL instead. Backtick
   // identifiers are normalized to double quotes so the shadow-table rewrite
@@ -90,7 +170,7 @@ async function getTableCreateSql(db: D1Database, table: BackupTableName): Promis
   if (isMySqlDatabase(db)) {
     const ddlRow = await db.prepare(`SHOW CREATE TABLE ${table}`).first<Record<string, unknown>>();
     const ddl = String(ddlRow?.['Create Table'] ?? '').trim();
-    if (ddl) return ddl.replace(/`([^`]+)`/g, '"$1"');
+    if (ddl) return normalizeMysqlIdentifiers(ddl);
   }
 
   const row = await db

@@ -72,7 +72,7 @@ async function run() {
   // Imported after the environment is in place: this is the bundle the platform
   // runs, not the TypeScript sources.
   const runtimePath = path.join(rootDir, 'node-functions', '_nodewarden', 'runtime.mjs');
-  const { handleEdgeOneRequest } = await import(pathToFileURL(runtimePath).href);
+  const { handleEdgeOneRequest, getRuntimeInfo, __testing } = await import(pathToFileURL(runtimePath).href);
 
   let baseUrl = `http://127.0.0.1:8080`;
   const request = (pathname, init = {}) => new Request(new URL(pathname, baseUrl), init);
@@ -108,8 +108,10 @@ async function run() {
       '/accounts/kdf': 'accounts/kdf.js',
       '/settings/domains': 'settings/domains.js',
       '/v1/assetlinks:check': 'v1/[id].js',
-      // Intentionally not mapped: Chrome devtools JSON probe; the SPA fallback
-      // answers it instead of spending a function invocation.
+      // Intentionally not mapped: the backend route behind this prefix only
+      // serves the Chrome devtools JSON probe
+      // (/.well-known/appspecific/com.chrome.devtools.json); on EdgeOne the
+      // SPA fallback answers it instead of spending a function invocation.
       '/.well-known': null,
     };
     const missing = [];
@@ -200,9 +202,29 @@ async function run() {
     assert.ok(!text.includes('Cannot read properties of null'), text);
   });
 
+  check('asset layer runs in stub mode (body text, not just the status code)', async () => {
+    // Two different 404s land here: the stub branch answers plain "Not Found",
+    // the disk branch answers "Web vault not built..." — a status-only check
+    // passed while the disk branch (dataDir/distDir inside the read-only code
+    // directory) was silently active. Assert the stub text itself.
+    const res = await call('/vault');
+    assert.equal(res.status, 404);
+    assert.equal(await res.text(), 'Not Found');
+  });
+
+  check('runtime resolves assets=stub and a data dir under os.tmpdir()', () => {
+    const info = getRuntimeInfo();
+    assert.equal(info.assets, 'stub', `assets=${info.assets} — the entry did not pass { assets: "stub" }`);
+    assert.ok(
+      info.dataDir.toLowerCase().startsWith(os.tmpdir().toLowerCase()),
+      `dataDir=${info.dataDir} must live under ${os.tmpdir()} (EdgeOne only mounts /tmp writable)`
+    );
+  });
+
   check('static/Spa paths are NOT served by the function (asset layer stubbed)', async () => {
     const res = await call('/_nodewarden/runtime.mjs');
     assert.equal(res.status, 404);
+    assert.equal(await res.text(), 'Not Found');
   });
 
   check('cron endpoint refuses an unauthenticated trigger', async () => {
@@ -241,6 +263,86 @@ async function run() {
       env: {},
     });
     expectBackendOk(res, await res.clone().text());
+  });
+
+  check('a spoofed X-Forwarded-Host cannot forge the origin of a public URL', () => {
+    // C-2: with a public request.url the forwarding headers must be ignored,
+    // otherwise `Origin: https://evil.example` + `X-Forwarded-Host: evil.example`
+    // walks straight through the same-origin write gate. Asserted on the
+    // adapter directly: without a database the pipeline answers the DB gate
+    // (500) before the route-level origin check runs.
+    const adapted = __testing.adaptRequest(
+      new Request(`https://${PUBLIC_HOST}/api/accounts/password-hint`, {
+        method: 'POST',
+        headers: { 'x-forwarded-host': 'evil.example', 'x-forwarded-proto': 'https' },
+      }),
+      { clientIp: '203.0.113.7' }
+    );
+    assert.equal(new URL(adapted.url).origin, `https://${PUBLIC_HOST}`);
+
+    // ...while a recognizable internal origin (here RFC1918) still adopts it,
+    // which is the shape the platform actually uses.
+    const behindProxy = __testing.adaptRequest(
+      new Request('http://10.0.0.7:8080/api/accounts/password-hint', {
+        headers: { 'x-forwarded-host': PUBLIC_HOST, 'x-forwarded-proto': 'https' },
+      }),
+      { clientIp: '203.0.113.7' }
+    );
+    assert.equal(new URL(behindProxy.url).origin, `https://${PUBLIC_HOST}`);
+  });
+
+  check('x-forwarded-proto upgrades an internal http origin to https', async () => {
+    // C-3: public host + internal http protocol (no forwarded host) used to
+    // stay on http:// and reject every browser write with 403.
+    const res = await handleEdgeOneRequest({
+      request: new Request(`http://${PUBLIC_HOST}/api/accounts/password-hint`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          Origin: `https://${PUBLIC_HOST}`,
+          'x-forwarded-proto': 'https',
+        },
+        body: JSON.stringify({ email: 'nobody@example.com' }),
+      }),
+      clientIp: '203.0.113.7',
+      env: {},
+    });
+    const text = await res.text();
+    assert.ok(res.status !== 403, `protocol rewrite missing: ${res.status} ${text}`);
+    assert.ok(!/Forbidden origin/.test(text), text);
+  });
+
+  check('the platform clientIp overrides client-supplied ip headers', () => {
+    // C-2 (rate limiting): a forged X-Real-IP / X-Forwarded-For /
+    // CF-Connecting-IP used to survive when the platform provided its own
+    // value, letting login brute-force rotate identities. adaptRequest is
+    // asserted directly because the pipeline does not echo the identifier.
+    const adapted = __testing.adaptRequest(
+      new Request('http://localhost:8080/api/config', {
+        headers: {
+          'x-real-ip': '1.2.3.4',
+          'x-forwarded-for': '1.2.3.4',
+          'cf-connecting-ip': '1.2.3.4',
+        },
+      }),
+      { clientIp: '203.0.113.7' }
+    );
+    assert.equal(adapted.headers.get('x-real-ip'), '203.0.113.7');
+    assert.equal(adapted.headers.get('x-forwarded-for'), '203.0.113.7');
+    assert.equal(adapted.headers.get('cf-connecting-ip'), null);
+  });
+
+  check('isPrivateHost recognizes CGNAT and IPv6 unique-local origins', () => {
+    // C-3/S-7: platform-internal addresses that are not RFC1918.
+    assert.ok(__testing.isPrivateHost('100.64.0.7'));
+    assert.ok(__testing.isPrivateHost('fd00::1'));
+    assert.ok(__testing.isPrivateHost('fe80::1'));
+    assert.ok(__testing.isPrivateHost('[fc00::1]'));
+    assert.ok(__testing.isPrivateHost('169.254.169.254'));
+    assert.ok(__testing.isPrivateHost('::ffff:10.0.0.5'));
+    assert.ok(!__testing.isPrivateHost(PUBLIC_HOST));
+    assert.ok(!__testing.isPrivateHost('8.8.8.8'));
+    assert.ok(!__testing.isPrivateHost('203.0.113.9'));
   });
 
   check('variables arrive through context.env (EdgeOne injection path)', async () => {
@@ -293,6 +395,26 @@ async function run() {
       });
       const body = await res.text();
       assert.equal(res.status, 200, `${res.status} ${body}`);
+    });
+
+    check('spoofed Origin + X-Forwarded-Host is rejected with 403 (CSRF gate)', async () => {
+      // End-to-end companion of the adapter check above: with a database the
+      // public route is reached, so the gate itself answers.
+      const res = await handleEdgeOneRequest({
+        request: new Request(`https://${PUBLIC_HOST}/api/accounts/password-hint`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            Origin: 'https://evil.example',
+            'x-forwarded-host': 'evil.example',
+          },
+          body: JSON.stringify({ email: 'nobody@example.com' }),
+        }),
+        clientIp: '203.0.113.7',
+        env: {},
+      });
+      assert.equal(res.status, 403, `spoofed origin was accepted (status ${res.status})`);
+      assert.match(await res.text(), /Forbidden origin/);
     });
 
     check('POST /identity/accounts/prelogin reports the KDF parameters', async () => {

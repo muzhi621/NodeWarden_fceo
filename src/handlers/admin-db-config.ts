@@ -18,6 +18,7 @@ import {
   type DbRuntimeConfig,
 } from '../services/db-config';
 import { resetDatabaseCache, getDatabase } from '../services/storage-factory';
+import { resetDbLifecycle } from '../services/db-lifecycle';
 import { MySqlDatabase } from '../services/storage-mysql';
 import { StorageService } from '../services/storage';
 import { writeAuditEvent } from '../services/audit-events';
@@ -233,9 +234,15 @@ function normalizeCandidate(body: Record<string, unknown>, fallback?: DbRuntimeC
   const user = String(body.user ?? fallback?.user ?? '').trim();
   const database = String(body.database ?? fallback?.database ?? '').trim();
   const passwordRaw = body.password;
-  const password = typeof passwordRaw === 'string' && passwordRaw.length > 0
-    ? passwordRaw
-    : (fallback?.password ?? '');
+  // The admin UI never echoes the stored password, so an empty input normally
+  // means "keep the saved one". Clearing it must be an explicit flag (S-9):
+  // without one, an empty MySQL password can never be configured.
+  const clearPassword = body.clearPassword === true;
+  const password = clearPassword
+    ? ''
+    : typeof passwordRaw === 'string' && passwordRaw.length > 0
+      ? passwordRaw
+      : (fallback?.password ?? '');
   const port = Number(body.port ?? fallback?.port ?? 3306);
   const connectionLimit = Number(body.connectionLimit ?? fallback?.connectionLimit ?? 5);
   const ssl = body.ssl === undefined ? (fallback?.ssl !== false) : !!body.ssl;
@@ -430,6 +437,9 @@ export async function handleAdminSaveDbConfig(request: Request, env: Env, actorU
     }
     await clearRuntimeConfig(env);
     await resetDatabaseCache();
+    // Drop a possibly latched dbInitError with the config: the next request
+    // re-resolves from env/D1 and must not inherit the old failure (C-1).
+    resetDbLifecycle();
     await auditDbConfigChange(env, actorUser, 'admin.db_config.cleared', null);
     return jsonResponse({ ok: true, mode: 'd1', effective: true });
   }
@@ -479,6 +489,9 @@ export async function handleAdminSaveDbConfig(request: Request, env: Env, actorU
   // really gets its tables (a process-wide "already initialized" flag used to
   // skip it). The candidate bootstrap above normally made this a no-op.
   await resetDatabaseCache();
+  // Clear any latched init error (and the per-target keys) so a previously
+  // failing deployment heals on save instead of 500-ing until recycle (C-1).
+  resetDbLifecycle();
   const db = await getDatabase(env);
   (env as { DB: D1Database }).DB = db;
   const storage = new StorageService(db);
@@ -523,6 +536,9 @@ export async function handleAdminClearDbConfig(request: Request, env: Env, actor
   }
   await clearRuntimeConfig(env);
   await resetDatabaseCache();
+  // Same as in the save path: a latched init error must not survive the
+  // operator's "go back to D1/env" action (C-1).
+  resetDbLifecycle();
   await auditDbConfigChange(env, actorUser, 'admin.db_config.cleared', null);
   return jsonResponse({ ok: true, mode: 'd1' });
 }

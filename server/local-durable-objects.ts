@@ -153,9 +153,25 @@ class MemoryDurableObjectStorage {
   }
 
   async transaction<T>(closure: (txn: MemoryDurableObjectStorage) => Promise<T>): Promise<T> {
-    // Single-threaded Node + no await inside the closures used by the Worker
-    // code, so running the closure directly is already atomic per instance.
-    return closure(this);
+    // Workers semantics: a closure that throws discards every write made
+    // inside the transaction. Single-threaded Node keeps the closure atomic
+    // per instance, but "atomic and half-applied" is not what the callers
+    // (backup lease, ticket purge) expect — snapshot and roll back instead.
+    // Values are treated as immutable (the Worker code never mutates stored
+    // objects in place), so a shallow snapshot restores enough.
+    const snapshot = new Map(this.values);
+    const alarmBefore = this.alarmAt;
+    try {
+      return await closure(this);
+    } catch (error) {
+      this.values.clear();
+      for (const [key, value] of snapshot) this.values.set(key, value);
+      // An alarm scheduled inside the failed closure is rolled back too; arm()
+      // re-arms (or disarms) the timer to match the restored value.
+      this.alarmAt = alarmBefore;
+      this.arm();
+      throw error;
+    }
   }
 }
 
@@ -199,11 +215,25 @@ export function createLocalDurableObjectNamespace(
   factory: DurableObjectFactory,
   getEnv: () => Env
 ): LocalDurableObjectNamespace {
+  // Instance names come from user ids, so on a long-lived self-hosted process
+  // the tables would grow forever. Evicting the oldest entries only drops
+  // re-creatable in-memory state (the same loss a cold start already causes).
+  const MAX_INSTANCES = 512;
   const instances = new Map<string, Promise<DurableObjectLike>>();
   const storages = new Map<string, MemoryDurableObjectStorage>();
   // Alarm callbacks need to reach the live instance; a holder survives instance
   // restarts (a failed constructor retries) without rebinding the storage.
   const instanceRefs = new Map<string, { current: DurableObjectLike | null }>();
+
+  const trimInstances = (keep: string): void => {
+    while (instances.size > MAX_INSTANCES) {
+      const oldest = instances.keys().next().value as string | undefined;
+      if (oldest === undefined || oldest === keep) break;
+      instances.delete(oldest);
+      storages.delete(oldest);
+      instanceRefs.delete(oldest);
+    }
+  };
 
   const ensureInstance = (name: string): Promise<DurableObjectLike> => {
     const cached = instances.get(name);
@@ -235,6 +265,7 @@ export function createLocalDurableObjectNamespace(
     void pending.catch(() => {
       if (instances.get(name) === pending) instances.delete(name);
     });
+    trimInstances(name);
     return pending;
   };
 

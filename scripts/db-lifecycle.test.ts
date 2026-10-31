@@ -190,3 +190,32 @@ test('missing database binding reports an init error instead of crashing', async
   assert.ok(getDbInitError(), 'must surface a controlled error');
   assert.ok(!isDbInitialized());
 });
+
+// --- regression: a transient failure must not latch (C-1) -------------------
+
+test('C-1: a transient resolve failure does not stay latched once the database answers again', async () => {
+  resetDbLifecycleForTests();
+  const mock = mockD1();
+
+  // Steady state: the database is initialized once.
+  await ensureDatabaseInitialized(freshEnv(), async () => mock.db);
+  assert.equal(getDbInitError(), null);
+
+  // One request hits a transient failure while resolving (KV/R2 read timeout,
+  // pool creation). The error is latched for the caller.
+  await ensureDatabaseInitialized(freshEnv(), async () => {
+    throw new Error('read SETTINGS_KV: ETIMEDOUT');
+  });
+  assert.ok(getDbInitError(), 'the failing request must be told about the error');
+
+  // The same, still-initialized database resolves fine again. Before the fix
+  // the early return for `initializedKey === schemaKey` kept the stale error
+  // and every request answered 500 until the process was recycled (on FC /
+  // EdgeOne: the rest of the instance's lifetime). The admin "save config"
+  // action only resets the storage cache, so it could not heal this either.
+  const env = freshEnv();
+  await ensureDatabaseInitialized(env, async () => mock.db);
+  assert.equal(getDbInitError(), null, 'the stale error must be cleared');
+  assert.equal(env.DB, mock.db);
+  assert.equal(countInitRuns(mock.sqls), 1, 'the known database must not re-run the DDL');
+});

@@ -36,6 +36,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
   const [database, setDatabase] = useState('');
   const [ssl, setSsl] = useState(true);
   const [connectionLimit, setConnectionLimit] = useState('5');
+  const [clearPassword, setClearPassword] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -70,6 +71,9 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
     ssl,
     connectionLimit: Number(connectionLimit) || 5,
     ...(password ? { password } : {}),
+    // The backend treats an empty password field as "keep the stored one";
+    // clearing it must be explicit or an empty MySQL password is impossible.
+    ...(clearPassword && !password ? { clearPassword: true } : {}),
   });
 
   const onTest = async () => {
@@ -206,6 +210,17 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
               <input type="checkbox" checked={ssl} onChange={(e) => setSsl((e.target as HTMLInputElement).checked)} />
               <span>启用 TLS（TiDB Serverless 必须开启）</span>
             </label>
+            {status?.config.passwordSet && (
+              <label className="field checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={clearPassword}
+                  disabled={!!password}
+                  onChange={(e) => setClearPassword((e.target as HTMLInputElement).checked)}
+                />
+                <span>清除已保存的密码（保存时把密码置为空；输入新密码时无效）</span>
+              </label>
+            )}
           </div>
 
           <div className="row-actions">

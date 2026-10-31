@@ -59,6 +59,20 @@ function createProbeNamespace() {
             });
             return new Response(JSON.stringify({ value }));
           }
+          if (url.pathname === '/transaction-fail') {
+            try {
+              await state.storage.transaction(async (txn) => {
+                const typed = txn as { put<T>(key: string, v: T): Promise<void> };
+                await typed.put('txn-partial', 'written');
+                throw new Error('closure failed');
+              });
+            } catch {
+              // Fall through and report what actually survived.
+            }
+            return new Response(
+              JSON.stringify({ value: (await state.storage.get('txn-partial')) ?? null })
+            );
+          }
           if (url.pathname === '/alarm') {
             await state.storage.setAlarm(1234);
             return new Response(JSON.stringify({ alarm: await state.storage.getAlarm() }));
@@ -119,6 +133,16 @@ test('memory storage supports list, transactions and alarms', async () => {
 
   const alarm = await stub.fetch('https://probe/alarm');
   assert.deepEqual(await alarm.json(), { alarm: 1234 });
+});
+
+test('C-7: a throwing transaction rolls back the writes made inside it', async () => {
+  const { namespace } = createProbeNamespace();
+  const stub = namespace.get(namespace.idFromName('txn-rollback'));
+  // Workers semantics: a failed transaction discards every write made inside
+  // it. The in-memory stand-in used to keep the partial writes, which left the
+  // backup lease / ticket purge half-applied.
+  const res = await stub.fetch('https://probe/transaction-fail');
+  assert.deepEqual(await res.json(), { value: null });
 });
 
 test('websocket upgrades degrade with a clear 501 instead of throwing', async () => {

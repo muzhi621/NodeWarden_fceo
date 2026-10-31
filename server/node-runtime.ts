@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { handleRequest } from '../src/router';
 import { ensureDatabaseInitialized, getDbInitError } from '../src/services/db-lifecycle';
 import { getDatabaseStatus } from '../src/services/storage-factory';
+import { clearDbConfigCache } from '../src/services/db-config';
 import { applyCors, jsonResponse } from '../src/utils/response';
 import { isBackendRequestPath, isWebVaultHidden, webVaultNotFoundResponse } from '../src/web-vault-visibility';
 import type { Env } from '../src/types';
@@ -89,12 +90,25 @@ export function applyEnvFromRecord(source: Record<string, unknown> | undefined |
   }
 }
 
+function isInsideDirectory(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child);
+  return !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
 function resolveState(options: NodeRuntimeOptions): RuntimeState {
-  const dataDir = path.resolve(
-    options.dataDir || process.env.DATA_DIR || defaultDataDir(options.assets)
+  const assets = options.assets || 'disk';
+  let dataDir = path.resolve(
+    options.dataDir || process.env.DATA_DIR || defaultDataDir(assets)
   );
+  if (assets === 'stub' && !isInsideDirectory(dataDir, os.tmpdir())) {
+    // EdgeOne Node Functions only mount /tmp writable; the code directory is
+    // read-only and recycled with the instance. A DATA_DIR override pointing
+    // elsewhere would fail every request at mkdirSync (EROFS/EACCES) or lose
+    // the stored config on the next cold start, so stub mode forces /tmp.
+    dataDir = path.join(os.tmpdir(), 'nodewarden');
+  }
   return {
-    assets: options.assets || 'disk',
+    assets,
     dataDir,
     attachmentsDir: path.resolve(process.env.ATTACHMENTS_DIR || path.join(dataDir, 'attachments')),
     distDir: path.resolve(process.env.DIST_DIR || path.join(__dirname, '..', 'dist')),
@@ -113,9 +127,25 @@ function defaultDataDir(assets: AssetsMode | undefined): string {
 /**
  * Idempotent, lazily executed setup: directories, `caches` shim, Durable
  * Object globals. Safe to call from every request.
+ *
+ * First call wins by design: the host entry must be the first to configure
+ * the runtime — `server/index.ts` passes `{ assets: 'disk' }` at module
+ * scope, and `server/edgeone.ts` reaches here first through
+ * `handleNodeFetch(request, { assets: 'stub' })`. Any later call that tries
+ * to change the mode means something raced ahead of the entry (the review
+ * notes call this the structural cause of the EdgeOne stub bug), so make the
+ * mismatch visible in the logs instead of silently ignoring it.
  */
 export function configureNodeRuntime(options: NodeRuntimeOptions = {}): RuntimeState {
-  if (state) return state;
+  if (state) {
+    if (options.assets && options.assets !== state.assets) {
+      console.warn(
+        `[node-runtime] ignored late configureNodeRuntime({ assets: '${options.assets}' }): ` +
+          `the runtime was already configured with assets: '${state.assets}' by an earlier call.`
+      );
+    }
+    return state;
+  }
   state = resolveState(options);
   fs.mkdirSync(state.dataDir, { recursive: true });
   fs.mkdirSync(state.attachmentsDir, { recursive: true });
@@ -377,6 +407,9 @@ export function buildNodeEnv(): Env {
 /** Test hook: forget the cached env (used by scripts/edgeone-smoke.mjs). */
 export function resetNodeEnvForTests(): void {
   sharedEnv = null;
+  // The DB-config payload cache is keyed per store object; consecutive test
+  // cases swap stores, so a stale entry would leak the previous config.
+  clearDbConfigCache();
 }
 
 // ---------------------------------------------------------------------------
@@ -441,10 +474,38 @@ export async function pipeline(request: Request, env: Env): Promise<Response> {
 /**
  * Single entry point for hosts that hand over a WHATWG `Request`
  * (EdgeOne Pages Node Functions). Sets the runtime up on first use.
+ *
+ * `options` MUST come from the host entry (not from defaults): the EdgeOne
+ * entry passes `{ assets: 'stub' }` so the asset layer is stubbed and the
+ * data dir lands under /tmp (see NodeRuntimeOptions). Throwing from an
+ * unexpected place would otherwise surface as the platform's own HTML error
+ * page — no CORS headers, no JSON body — which the web vault can only show
+ * as an opaque network error, so it is caught and translated here.
  */
-export async function handleNodeFetch(request: Request): Promise<Response> {
-  configureNodeRuntime();
-  return pipeline(request, buildNodeEnv());
+export async function handleNodeFetch(
+  request: Request,
+  options: NodeRuntimeOptions = {}
+): Promise<Response> {
+  try {
+    configureNodeRuntime(options);
+    return await pipeline(request, buildNodeEnv());
+  } catch (error) {
+    console.error('Unhandled request error:', error);
+    return new Response(
+      JSON.stringify({
+        error: 'Internal server error',
+        ErrorModel: { Message: 'Internal server error', Object: 'error' },
+      }),
+      {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Access-Control-Allow-Origin': '*',
+        },
+      }
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

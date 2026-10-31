@@ -125,7 +125,8 @@ EdgeOne 按 `node-functions/` 的目录结构生成路由。因为后端路径�
 | `HIDE_WEB_VAULT` / `WEBAUTHN_*` / `YUBICO_VALIDATION_URLS` | — | 与 Workers / FC 版一致 |
 
 > ⚠️ 平台限制：**变量值最长 1000 字节**，改动**只对新部署生效**（改完要重新部署一次）。
-> ⚠️ 不用设 `DATA_DIR`：本分支在函数模式下默认用 `/tmp/nodewarden`。
+> ⚠️ 不用设 `DATA_DIR`：函数模式（`assets: 'stub'`）下**强制**使用 `/tmp/nodewarden`，
+> 即使填了指向代码目录的值也会被改写——`node-functions/` 是只读的，写进去会让每个请求 500。
 > ⚠️ `DB_SSL_CA`（PEM 文件路径）在 EdgeOne 上没法用——没有可上传持久文件的位置；
 > 自签库请用 `DB_SSL_INSECURE=1`，TiDB 的公信 CA 无需配置。
 > ⚠️ `INPROCESS_CRON` **不要开**：多实例会各跑一遍备份，而且会让实例无法休眠。
@@ -154,6 +155,10 @@ curl https://<你的域名>/healthz
 - `runtime:"node"` 表示请求确实进了 Node Functions（不是静态资源）；
 - `/healthz` 是**函数路径**，会消耗一次调用；静态页 `/`、`/assets/*` 不会。
 - 前端深链（直接刷新 `/admin/database`）应返回 Web 界面（静态层回退到 index.html / 404.html 兜底）。
+  若走的是 `404.html` 兜底，**HTTP 状态码是 404**（页面能正常启动、功能不受影响）——用监控/SEO
+  工具扫站时会看到这些 404，属预期行为，不是故障。
+- **部署后必查**：`curl -s https://<域名>/vault` 返回的应是 HTML（静态层回退），而不是
+  `Not Found` 或 `Web vault not built`（后两者说明前端的 `index.html`/`404.html` 没上传成功）。
 - Bitwarden 网页端 / 桌面端 / 浏览器扩展能登录并同步即算通过。
 
 ---
@@ -210,7 +215,8 @@ curl -X POST https://<你的域名>/internal/cron/backup -H "x-cron-secret: <CRO
 ```bash
 npm ci
 npm run build:edgeone      # = npm run build + 打 node-functions/_nodewarden/runtime.mjs
-npm run test:edgeone       # 15 项：路由映射、CORS、cron 鉴权、公网 URL/IP 修正、静态层隔离
+npm run test:edgeone       # 21 项：路由映射、CORS、cron 鉴权、公网 URL/IP 修正、
+                           # stub 模式（含 body 文案与 /tmp 数据目录断言）、CSRF 伪造拦截
 ```
 
 接一个**真实 MySQL** 跑完整链路（注册 → 登录 → 同步 → 写入条目 → healthz）：
@@ -245,7 +251,7 @@ npm run check:edgeone      # CI/本地校验：提交的 bundle 是否与源码�
 | `/healthz` 502/超时 | 函数起来了但连不上库 | 检查 `DB_*`、`DB_SSL`；函数出口是公网，自建库别只监听内网 |
 | 全站 500 `Database not initialized` | 建表失败 | 看 Pages → 函数日志；常见是账号没有 CREATE 权限、或 `DB_NAME` 写错 |
 | 浏览器刷新子页面出现 404 白屏 | 静态层没有回退到 index.html，且 `dist/404.html` 也丢了 | 确认构建命令是 `npm run build:edgeone:pages`（会产出 `404.html`）；**不要**用 `rewrites: /* → /index.html` 硬修，那条规则会连 `/assets/*` 一起重写 |
-| 注册报 `403 Forbidden origin` | 请求的 `Origin` 与服务器识别的站点域名不一致 | 本分支已用 `x-forwarded-host` 修正；若仍报，检查是否套了一层 CDN/反代改了 Host |
+| 注册报 `403 Forbidden origin` | 请求的 `Origin` 与服务器识别的站点域名不一致 | 本分支会：①仅在**内网回源**形态下采纳 `x-forwarded-host`（公网 URL 不再信任该头，防伪造）；②按 `x-forwarded-proto` 无条件修正协议；③host+port 整体赋值避免内部端口泄漏。若仍报，检查是否套了一层 CDN/反代改了 Host |
 | 注册/登录报 `403 Client IP is required` | 平台没把客户端 IP 传进来 | 本分支已用 `context.clientIp` 补 `X-Forwarded-For`；若仍报，说明平台字段变了，需同步适配 |
 | 上传附件失败 | 超过 6 MB 平台上限 | 换小文件或用 FC |
 | 修改环境变量后没变化 | 平台规则：只对新部署生效 | 改完重新部署一次 |
@@ -266,10 +272,23 @@ npm run check:edgeone      # CI/本地校验：提交的 bundle 是否与源码�
 ## 十、分支与合并
 
 - 本分支 `edgeone` 从 `test` 拉出，只新增/最小改动上述文件，**未合并任何分支**。
-- 自测结论（本地，2026-10-31，提交前重跑）：
-  - `npm run test:edgeone` → 15/15；
-  - `npm run test:edgeone:db`（真实 MySQL 8.0.30）→ 22/22（注册/登录/同步/写条目/cron/healthz）；
-  - FC 入口回归（`node server/index.mjs` 真实 HTTP + 同一 MySQL）→ 8/8（含 `/notifications/hub/negotiate`）；
-  - 既有单测：node-runtime 4、db-lifecycle 7、db-policy 7、db-config-save 4、app-routes 2、
-    mysql-dialect 52、webauthn-connectors 3，全绿；`tsc --noEmit` 干净。
+- 自测结论（本地，2026-10-31 第三轮审查修复后重跑）：
+  - `npm run test:edgeone` → **21/21**（无库）；
+  - `npm run test:edgeone:db`（真实 MySQL 8.0.30，新建空库）→ **29/29**
+    （注册/登录/同步/写条目/cron/healthz + CSRF 伪造拦截）；
+  - FC 入口回归（仓库根 `fc-entry.mjs`，真实 HTTP + 同一 MySQL）→ `/healthz` 200 `db:up`、
+    `/api/config` 200、preflight 204、cron 401；
+  - 既有单测：node-runtime 5、db-lifecycle 8、db-policy 7、db-config-save 4、app-routes 2、
+    mysql-dialect 55（含 mysql-catalog、mysql-backup-ddl），全绿；`tsc --noEmit` 干净。
+- 第三轮审查（`代码审查报告-第三轮-FC与EdgeOne.md`）问题已修：
+  - **O-1/C-5**（阻断）：`handleNodeFetch` 现在要求入口显式传 `assets`，`edgeone.ts` 传 `'stub'`；
+    stub 模式下 `dataDir` 强制 `/tmp`，不会再往只读的代码目录写；
+  - **O-2**：smoke 的静态层断言改为校验 `Not Found` 文案 + `dataDir` 位于 `os.tmpdir()`；
+  - **C-2/C-3/S-7**：不再无条件信任 `X-Forwarded-Host`（仅内网回源形态采纳），
+    `X-Real-IP`/`X-Forwarded-For`/`CF-Connecting-IP` 一律用平台 `clientIp` 覆盖，
+    `x-forwarded-proto` 无条件修正协议，`isPrivateHost` 补 CGNAT 与 IPv6 ULA；
+  - 顺带修掉一个同源门禁的隐藏 bug：`url.host` 赋值会保留原端口，内部 `:8080` 会泄漏进公网
+    origin 导致 403（已改为 host+port 整体赋值，并有断言覆盖）；
+  - **C-4/C-6/C-7**：`.gitignore` 补 `data/`、`node-functions/data/`；DB 配置缓存按存储对象键控
+    并可清除；进程内 DO 的 `transaction` 增加快照回滚。
 - 你确认 EdgeOne 上真机跑通后，再把 `edgeone` 合并进 `main`（合并动作由你执行，我不代劳）。
