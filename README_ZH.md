@@ -241,8 +241,9 @@ CMD ["npm", "run", "start:node"]
   （`context.env` 注入 `DB_*` / `JWT_SECRET`，`onRequest(context)` 入口）；
 - 仓库里已经适配好，**不需要自己写包装代码**：`server/edgeone.ts` 是入口适配层，
   `server/node-runtime.ts` 是与 FC 共用的请求管线，`edgeone.json` 声明构建命令 / 输出目录 /
-  SPA fallback / 函数时长，函数入口由 `scripts/build-edgeone.mjs` 打包成
-  `node-functions/_nodewarden/runtime.mjs`（已提交）；
+  缓存与安全头 / 函数时长，`scripts/edgeone-postbuild.mjs` 产出 `dist/404.html` 兜底 SPA 深链，
+  函数入口由 `scripts/build-edgeone.mjs` 打包成 `node-functions/_nodewarden/runtime.mjs`（已提交）；
+  注意 EdgeOne 的 `rewrites` **不支持** SPA 路由回退，也不读 `_redirects`，别用 `/* → /index.html` 硬修；
 - 页面上**不要**绑定 KV：EdgeOne 的 KV 只给 Edge Functions，Node Functions 用不了；本分支改成
   「环境变量 + MySQL」，也不依赖平台的持久磁盘（后台保存的配置在 `/tmp`，冷启动会丢）；
 - 平台限制：请求体 ≤6 MB、单次执行 ≤120s、WebSocket 走轮询降级 —— 明细、部署步骤、排错见

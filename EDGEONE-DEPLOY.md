@@ -40,7 +40,8 @@ server/edgeone.ts             ← 新增：EdgeOne 入口适配层（onRequest �
 server/cf-workers-stub.mjs    ← 新增：cloudflare:workers 桩，供 EdgeOne 打包时内联
 node-functions/**             ← 新增：15 个薄入口，把后端路径映射成 Node Functions
 node-functions/_nodewarden/runtime.mjs  ← 新增：打包产物（已提交，与 FC 的 server/index.mjs 同理）
-edgeone.json                  ← 新增：构建配置、SPA fallback、缓存头、函数时长
+edgeone.json                  ← 新增：构建配置、缓存/安全头、函数时长、mysql2 外置
+scripts/edgeone-postbuild.mjs ← 新增：构建后产出 dist/404.html（SPA 深链兜底）
 scripts/build-edgeone.mjs     ← 新增：打包 + 漂移检查
 scripts/edgeone-smoke.mjs     ← 新增：本地模拟平台调用的自测（可接真实 MySQL）
 ```
@@ -67,8 +68,25 @@ EdgeOne 按 `node-functions/` 的目录结构生成路由。因为后端路径�
 | `node-functions/internal/cron/backup.js` | 计划备份触发端点 |
 
 静态资源（`/`、`/assets/*`、`/favicon.ico`、`/webauthn-connector.html`…）由 Pages 直接托管，
-不消耗函数调用；前端路由（`/admin/database`、`/vault`…）靠 `edgeone.json` 的 SPA fallback 交回前端。
-`/.well-known/*`（Chrome 开发者工具探针）没有单独映射，交给 SPA fallback 即可，不影响任何客户端。
+不消耗函数调用。
+
+### 前端深链（刷新 `/vault`、`/admin/database`）怎么兜底
+
+这一版**没有**在 `edgeone.json` 里写 `rewrites: [{ "source": "/*", "destination": "/index.html" }]`，
+原因有两个：
+
+1. 官方文档对该项写得很明确——**重写只作用于静态资源，不支持 SPA 前端路由重写**；
+2. `/*` 这种写法不带 `:splat`，一旦平台真的按字面执行，会把 `/assets/*.js` 也重写成 index.html，
+   直接白屏。**这是个容易踩的坑，别加回去。**
+
+实际做法：
+- EdgeOne Pages 静态托管对「找不到的路径」默认回退到 `index.html`（腾讯云官方答复也是这个行为），
+  深链刷新直接可用；
+- 构建时额外产出 `dist/404.html`（= `index.html` 的副本，见 `scripts/edgeone-postbuild.mjs`）作为兜底：
+  万一某次部署用的是「自定义 404 页」而不是回退到 index.html，页面照样能起来、由前端路由接管
+  （此时 HTTP 状态码是 404，功能不受影响）。
+
+> `dist/_redirects` 是 Cloudflare Pages 的约定，**EdgeOne Pages 不读**，不要指望它。
 
 ---
 
@@ -86,13 +104,13 @@ EdgeOne 按 `node-functions/` 的目录结构生成路由。因为后端路径�
    | 项 | 值 |
    |---|---|
    | 安装命令 | `npm install --no-audit --no-fund` |
-   | 构建命令 | `npm run build` |
+   | 构建命令 | `npm run build:edgeone:pages`（= Vite 构建 + 产出 `404.html`） |
    | 输出目录 | `dist` |
    | Node 版本（构建） | `22.11.0` |
 
-> `node-functions/_nodewarden/runtime.mjs` 是**已提交的打包产物**，构建阶段不需要再跑 esbuild，
-> 因此构建命令只有 `npm run build`（前端 Vite）。若你改了 `src/` 或 `server/`，记得先在本地
-> `npm run build:edgeone` 重新打包并提交（见第七节）。
+> `node-functions/_nodewarden/runtime.mjs` 是**已提交的打包产物**，构建阶段不需要跑 esbuild，
+> 因此构建命令只有前端 Vite 构建（外加一个零依赖的 404 页复制）。若你改了 `src/` 或 `server/`，
+> 记得先在本地 `npm run build:edgeone` 重新打包并提交（见第七节）。
 
 ### 2. 环境变量（项目设置 → 环境变量）
 
@@ -135,7 +153,7 @@ curl https://<你的域名>/healthz
 
 - `runtime:"node"` 表示请求确实进了 Node Functions（不是静态资源）；
 - `/healthz` 是**函数路径**，会消耗一次调用；静态页 `/`、`/assets/*` 不会。
-- 前端深链（直接刷新 `/admin/database`）应返回 Web 界面（SPA fallback 生效）。
+- 前端深链（直接刷新 `/admin/database`）应返回 Web 界面（静态层回退到 index.html / 404.html 兜底）。
 - Bitwarden 网页端 / 桌面端 / 浏览器扩展能登录并同步即算通过。
 
 ---
@@ -226,7 +244,7 @@ npm run check:edgeone      # CI/本地校验：提交的 bundle 是否与源码�
 | 打开域名 404，`/healthz` 也 404 | 函数未部署（只有静态资源） | 确认分支是 `edgeone`、`node-functions/` 已提交；重新部署看构建日志 |
 | `/healthz` 502/超时 | 函数起来了但连不上库 | 检查 `DB_*`、`DB_SSL`；函数出口是公网，自建库别只监听内网 |
 | 全站 500 `Database not initialized` | 建表失败 | 看 Pages → 函数日志；常见是账号没有 CREATE 权限、或 `DB_NAME` 写错 |
-| 浏览器刷新子页面出现 404 | SPA fallback 没生效 | 确认 `edgeone.json` 里的 `rewrites: [{ "source": "/*", "destination": "/index.html" }]` 没被改动/被控制台覆盖 |
+| 浏览器刷新子页面出现 404 白屏 | 静态层没有回退到 index.html，且 `dist/404.html` 也丢了 | 确认构建命令是 `npm run build:edgeone:pages`（会产出 `404.html`）；**不要**用 `rewrites: /* → /index.html` 硬修，那条规则会连 `/assets/*` 一起重写 |
 | 注册报 `403 Forbidden origin` | 请求的 `Origin` 与服务器识别的站点域名不一致 | 本分支已用 `x-forwarded-host` 修正；若仍报，检查是否套了一层 CDN/反代改了 Host |
 | 注册/登录报 `403 Client IP is required` | 平台没把客户端 IP 传进来 | 本分支已用 `context.clientIp` 补 `X-Forwarded-For`；若仍报，说明平台字段变了，需同步适配 |
 | 上传附件失败 | 超过 6 MB 平台上限 | 换小文件或用 FC |

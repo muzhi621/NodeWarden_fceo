@@ -192,7 +192,8 @@ D1→MySQL data migration, FC/SCF/EdgeOne deployment options, and Dockerfile.
 
 `dist/` is served as static assets and the API runs as **Node Functions** — the repo already
 ships the adapter, no wrapper code to write: `server/edgeone.ts` (entry),
-`server/node-runtime.ts` (pipeline shared with FC), `edgeone.json` (build/SPA fallback/duration)
+`server/node-runtime.ts` (pipeline shared with FC), `edgeone.json` (build/cache headers/duration),
+`scripts/edgeone-postbuild.mjs` (emits `dist/404.html` so SPA deep links survive a refresh)
 and `node-functions/**` (one thin entry per backend path prefix, bundled into the committed
 `node-functions/_nodewarden/runtime.mjs`).
 
