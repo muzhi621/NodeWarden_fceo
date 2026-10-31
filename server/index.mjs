@@ -223,6 +223,211 @@ var init_limits = __esm({
   }
 });
 
+// src/utils/origins.ts
+function normalizeOrigin(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (!url.protocol || !url.host) return null;
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return null;
+  }
+}
+function isBrowserExtensionOrigin(origin) {
+  const normalized = normalizeOrigin(origin);
+  return !!normalized && (normalized.startsWith("chrome-extension://") || normalized.startsWith("moz-extension://") || normalized.startsWith("safari-web-extension://"));
+}
+function isOfficialBitwardenDesktopOrigin(origin) {
+  const normalized = normalizeOrigin(origin);
+  return !!normalized && OFFICIAL_BITWARDEN_DESKTOP_ORIGINS.includes(
+    normalized
+  );
+}
+function getConfiguredWebAuthnAllowedOrigins(env) {
+  const seen = /* @__PURE__ */ new Set([
+    ...OFFICIAL_BITWARDEN_BROWSER_EXTENSION_ORIGINS,
+    ...OFFICIAL_BITWARDEN_DESKTOP_ORIGINS
+  ]);
+  for (const item of String(env.WEBAUTHN_ALLOWED_ORIGINS || "").split(",")) {
+    const origin = normalizeOrigin(item);
+    if (origin) seen.add(origin);
+  }
+  return Array.from(seen);
+}
+function isConfiguredWebAuthnAllowedOrigin(env, origin) {
+  const normalized = normalizeOrigin(origin);
+  return !!normalized && getConfiguredWebAuthnAllowedOrigins(env).includes(normalized);
+}
+var OFFICIAL_BITWARDEN_BROWSER_EXTENSION_ORIGINS, OFFICIAL_BITWARDEN_DESKTOP_ORIGINS;
+var init_origins = __esm({
+  "src/utils/origins.ts"() {
+    "use strict";
+    OFFICIAL_BITWARDEN_BROWSER_EXTENSION_ORIGINS = [
+      "chrome-extension://nngceckbapebfimnlniiiahkandclblb",
+      "chrome-extension://jbkfoedolllekgbhcbcoahefnbanhhlh",
+      "chrome-extension://ccnckbpmaceehanjmeomladnmlffdjgn"
+    ];
+    OFFICIAL_BITWARDEN_DESKTOP_ORIGINS = [
+      "bw-desktop-file://bundle"
+    ];
+  }
+});
+
+// src/utils/response.ts
+function isWildcardCorsPath(path2) {
+  return path2.startsWith("/icons/") || path2.startsWith("/fill-assist/") || path2 === "/v1/assetlinks:check" || path2 === "/api/v1/assetlinks:check" || path2 === "/config" || path2 === "/api/config" || path2 === "/api/version";
+}
+function getCorsPolicy(request, env) {
+  const url = new URL(request.url);
+  const originHeader = request.headers.get("Origin");
+  if (!originHeader) {
+    return isWildcardCorsPath(url.pathname) ? { allowOrigin: "*", allowCredentials: false } : { allowOrigin: null, allowCredentials: false };
+  }
+  const origin = normalizeOrigin(originHeader);
+  if (origin === url.origin) {
+    return { allowOrigin: origin, allowCredentials: true };
+  }
+  if ((isBrowserExtensionOrigin(origin) || isOfficialBitwardenDesktopOrigin(origin)) && isConfiguredWebAuthnAllowedOrigin(env, origin)) {
+    return { allowOrigin: origin, allowCredentials: true };
+  }
+  if (isWildcardCorsPath(url.pathname)) {
+    return { allowOrigin: "*", allowCredentials: false };
+  }
+  return { allowOrigin: null, allowCredentials: false };
+}
+function buildCorsHeaders(request, env) {
+  const requestedHeaders = String(request.headers.get("Access-Control-Request-Headers") || "").split(",").map((value) => value.trim()).filter(Boolean);
+  const allowHeaders = Array.from(/* @__PURE__ */ new Set([...DEFAULT_CORS_HEADERS, ...requestedHeaders]));
+  const headers = {
+    "Access-Control-Allow-Methods": CORS_METHODS,
+    "Access-Control-Allow-Headers": allowHeaders.join(", "),
+    "Access-Control-Expose-Headers": "*",
+    "Access-Control-Max-Age": String(LIMITS.cors.preflightMaxAgeSeconds)
+  };
+  const corsPolicy = getCorsPolicy(request, env);
+  if (corsPolicy.allowOrigin) {
+    headers["Access-Control-Allow-Origin"] = corsPolicy.allowOrigin;
+    if (corsPolicy.allowCredentials) {
+      headers["Access-Control-Allow-Credentials"] = "true";
+    }
+    headers["Vary"] = "Origin, Access-Control-Request-Headers";
+  }
+  return headers;
+}
+function applyCors(request, response, env) {
+  const webSocket = response.webSocket;
+  if (response.status === 101 || webSocket) {
+    return response;
+  }
+  const headers = new Headers(response.headers);
+  const corsHeaders = buildCorsHeaders(request, env);
+  for (const [k, v] of Object.entries(corsHeaders)) {
+    headers.set(k, v);
+  }
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  const isWebAuthnFrameConnector = new URL(request.url).pathname === "/webauthn-connector.html";
+  if (isWebAuthnFrameConnector) {
+    headers.delete("X-Frame-Options");
+    headers.set(
+      "Content-Security-Policy",
+      "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'"
+    );
+  } else {
+    headers.set("X-Frame-Options", "DENY");
+  }
+  if (!isWebAuthnFrameConnector && !headers.has("Content-Security-Policy")) {
+    headers.set("Content-Security-Policy", "frame-ancestors 'none'; img-src 'self' data:");
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+function jsonResponse(data, status = 200, headers = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      ...headers
+    }
+  });
+}
+function errorResponse(message, status = 400) {
+  return jsonResponse(
+    {
+      error: message,
+      error_description: message,
+      ErrorModel: {
+        Message: message,
+        Object: "error"
+      }
+    },
+    status
+  );
+}
+function unsupportedResponse(message = "This feature is not supported by this server.") {
+  return errorResponse(message, 501);
+}
+function isDuplicateKeyError(error) {
+  const errno = Number(error?.errno ?? 0);
+  const code = String(error?.code ?? "");
+  if (errno === 1062 || code === "ER_DUP_ENTRY") return true;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /UNIQUE constraint failed|Duplicate entry .* for key/i.test(message);
+}
+function conflictResponse(message = "An account or record with these details already exists.") {
+  return errorResponse(message, 409);
+}
+function identityErrorResponse(message, error = "invalid_grant", status = 400, headers = {}) {
+  return jsonResponse(
+    {
+      error,
+      error_description: message,
+      ErrorModel: {
+        Message: message,
+        Object: "error"
+      }
+    },
+    status,
+    { "Cache-Control": "no-store", Pragma: "no-cache", ...headers }
+  );
+}
+function handleCors(request, env) {
+  return new Response(null, {
+    status: 204,
+    headers: buildCorsHeaders(request, env)
+  });
+}
+var CORS_METHODS, DEFAULT_CORS_HEADERS;
+var init_response = __esm({
+  "src/utils/response.ts"() {
+    "use strict";
+    init_limits();
+    init_origins();
+    CORS_METHODS = "GET, POST, PUT, DELETE, PATCH, OPTIONS";
+    DEFAULT_CORS_HEADERS = [
+      "Content-Type",
+      "Authorization",
+      "Accept",
+      "Device-Type",
+      "Device-Identifier",
+      "Device-Name",
+      "Bitwarden-Client-Name",
+      "Bitwarden-Client-Version",
+      "Bitwarden-Package-Type",
+      "Is-Prerelease",
+      "X-Request-Email",
+      "X-Device-Identifier",
+      "X-Device-Name",
+      "X-NodeWarden-Web-Session"
+    ];
+  }
+});
+
 // src/utils/jwt.ts
 function base64UrlEncode(data) {
   const base643 = btoa(String.fromCharCode(...data));
@@ -3861,211 +4066,6 @@ var init_auth = __esm({
   }
 });
 
-// src/utils/origins.ts
-function normalizeOrigin(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    if (!url.protocol || !url.host) return null;
-    return `${url.protocol}//${url.host}`;
-  } catch {
-    return null;
-  }
-}
-function isBrowserExtensionOrigin(origin) {
-  const normalized = normalizeOrigin(origin);
-  return !!normalized && (normalized.startsWith("chrome-extension://") || normalized.startsWith("moz-extension://") || normalized.startsWith("safari-web-extension://"));
-}
-function isOfficialBitwardenDesktopOrigin(origin) {
-  const normalized = normalizeOrigin(origin);
-  return !!normalized && OFFICIAL_BITWARDEN_DESKTOP_ORIGINS.includes(
-    normalized
-  );
-}
-function getConfiguredWebAuthnAllowedOrigins(env) {
-  const seen = /* @__PURE__ */ new Set([
-    ...OFFICIAL_BITWARDEN_BROWSER_EXTENSION_ORIGINS,
-    ...OFFICIAL_BITWARDEN_DESKTOP_ORIGINS
-  ]);
-  for (const item of String(env.WEBAUTHN_ALLOWED_ORIGINS || "").split(",")) {
-    const origin = normalizeOrigin(item);
-    if (origin) seen.add(origin);
-  }
-  return Array.from(seen);
-}
-function isConfiguredWebAuthnAllowedOrigin(env, origin) {
-  const normalized = normalizeOrigin(origin);
-  return !!normalized && getConfiguredWebAuthnAllowedOrigins(env).includes(normalized);
-}
-var OFFICIAL_BITWARDEN_BROWSER_EXTENSION_ORIGINS, OFFICIAL_BITWARDEN_DESKTOP_ORIGINS;
-var init_origins = __esm({
-  "src/utils/origins.ts"() {
-    "use strict";
-    OFFICIAL_BITWARDEN_BROWSER_EXTENSION_ORIGINS = [
-      "chrome-extension://nngceckbapebfimnlniiiahkandclblb",
-      "chrome-extension://jbkfoedolllekgbhcbcoahefnbanhhlh",
-      "chrome-extension://ccnckbpmaceehanjmeomladnmlffdjgn"
-    ];
-    OFFICIAL_BITWARDEN_DESKTOP_ORIGINS = [
-      "bw-desktop-file://bundle"
-    ];
-  }
-});
-
-// src/utils/response.ts
-function isWildcardCorsPath(path2) {
-  return path2.startsWith("/icons/") || path2.startsWith("/fill-assist/") || path2 === "/v1/assetlinks:check" || path2 === "/api/v1/assetlinks:check" || path2 === "/config" || path2 === "/api/config" || path2 === "/api/version";
-}
-function getCorsPolicy(request, env) {
-  const url = new URL(request.url);
-  const originHeader = request.headers.get("Origin");
-  if (!originHeader) {
-    return isWildcardCorsPath(url.pathname) ? { allowOrigin: "*", allowCredentials: false } : { allowOrigin: null, allowCredentials: false };
-  }
-  const origin = normalizeOrigin(originHeader);
-  if (origin === url.origin) {
-    return { allowOrigin: origin, allowCredentials: true };
-  }
-  if ((isBrowserExtensionOrigin(origin) || isOfficialBitwardenDesktopOrigin(origin)) && isConfiguredWebAuthnAllowedOrigin(env, origin)) {
-    return { allowOrigin: origin, allowCredentials: true };
-  }
-  if (isWildcardCorsPath(url.pathname)) {
-    return { allowOrigin: "*", allowCredentials: false };
-  }
-  return { allowOrigin: null, allowCredentials: false };
-}
-function buildCorsHeaders(request, env) {
-  const requestedHeaders = String(request.headers.get("Access-Control-Request-Headers") || "").split(",").map((value) => value.trim()).filter(Boolean);
-  const allowHeaders = Array.from(/* @__PURE__ */ new Set([...DEFAULT_CORS_HEADERS, ...requestedHeaders]));
-  const headers = {
-    "Access-Control-Allow-Methods": CORS_METHODS,
-    "Access-Control-Allow-Headers": allowHeaders.join(", "),
-    "Access-Control-Expose-Headers": "*",
-    "Access-Control-Max-Age": String(LIMITS.cors.preflightMaxAgeSeconds)
-  };
-  const corsPolicy = getCorsPolicy(request, env);
-  if (corsPolicy.allowOrigin) {
-    headers["Access-Control-Allow-Origin"] = corsPolicy.allowOrigin;
-    if (corsPolicy.allowCredentials) {
-      headers["Access-Control-Allow-Credentials"] = "true";
-    }
-    headers["Vary"] = "Origin, Access-Control-Request-Headers";
-  }
-  return headers;
-}
-function applyCors(request, response, env) {
-  const webSocket = response.webSocket;
-  if (response.status === 101 || webSocket) {
-    return response;
-  }
-  const headers = new Headers(response.headers);
-  const corsHeaders = buildCorsHeaders(request, env);
-  for (const [k, v] of Object.entries(corsHeaders)) {
-    headers.set(k, v);
-  }
-  headers.set("X-Content-Type-Options", "nosniff");
-  headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
-  const isWebAuthnFrameConnector = new URL(request.url).pathname === "/webauthn-connector.html";
-  if (isWebAuthnFrameConnector) {
-    headers.delete("X-Frame-Options");
-    headers.set(
-      "Content-Security-Policy",
-      "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'"
-    );
-  } else {
-    headers.set("X-Frame-Options", "DENY");
-  }
-  if (!isWebAuthnFrameConnector && !headers.has("Content-Security-Policy")) {
-    headers.set("Content-Security-Policy", "frame-ancestors 'none'; img-src 'self' data:");
-  }
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers
-  });
-}
-function jsonResponse(data, status = 200, headers = {}) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      ...headers
-    }
-  });
-}
-function errorResponse(message, status = 400) {
-  return jsonResponse(
-    {
-      error: message,
-      error_description: message,
-      ErrorModel: {
-        Message: message,
-        Object: "error"
-      }
-    },
-    status
-  );
-}
-function unsupportedResponse(message = "This feature is not supported by this server.") {
-  return errorResponse(message, 501);
-}
-function isDuplicateKeyError(error) {
-  const errno = Number(error?.errno ?? 0);
-  const code = String(error?.code ?? "");
-  if (errno === 1062 || code === "ER_DUP_ENTRY") return true;
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  return /UNIQUE constraint failed|Duplicate entry .* for key/i.test(message);
-}
-function conflictResponse(message = "An account or record with these details already exists.") {
-  return errorResponse(message, 409);
-}
-function identityErrorResponse(message, error = "invalid_grant", status = 400, headers = {}) {
-  return jsonResponse(
-    {
-      error,
-      error_description: message,
-      ErrorModel: {
-        Message: message,
-        Object: "error"
-      }
-    },
-    status,
-    { "Cache-Control": "no-store", Pragma: "no-cache", ...headers }
-  );
-}
-function handleCors(request, env) {
-  return new Response(null, {
-    status: 204,
-    headers: buildCorsHeaders(request, env)
-  });
-}
-var CORS_METHODS, DEFAULT_CORS_HEADERS;
-var init_response = __esm({
-  "src/utils/response.ts"() {
-    "use strict";
-    init_limits();
-    init_origins();
-    CORS_METHODS = "GET, POST, PUT, DELETE, PATCH, OPTIONS";
-    DEFAULT_CORS_HEADERS = [
-      "Content-Type",
-      "Authorization",
-      "Accept",
-      "Device-Type",
-      "Device-Identifier",
-      "Device-Name",
-      "Bitwarden-Client-Name",
-      "Bitwarden-Client-Version",
-      "Bitwarden-Package-Type",
-      "Is-Prerelease",
-      "X-Request-Email",
-      "X-Device-Identifier",
-      "X-Device-Name",
-      "X-NodeWarden-Web-Session"
-    ];
-  }
-});
-
 // src/services/audit-events.ts
 function normalizePositiveInteger(value, allowed) {
   if (value === null || value === 0 || value === "0" || value === "forever" || value === "unlimited") return null;
@@ -6403,17 +6403,17 @@ function parseBackupSettingsEnvelope(raw) {
   try {
     const parsed = JSON.parse(raw);
     if (!isPlainObject(parsed) || Number(parsed.version) !== 2) return null;
-    const runtime = parsed.runtime;
+    const runtime2 = parsed.runtime;
     const portable = parsed.portable;
-    if (!isPlainObject(runtime) || !isPlainObject(portable)) return null;
+    if (!isPlainObject(runtime2) || !isPlainObject(portable)) return null;
     if (!Array.isArray(portable.wraps)) return null;
-    if (typeof runtime.iv !== "string" || typeof runtime.ciphertext !== "string") return null;
+    if (typeof runtime2.iv !== "string" || typeof runtime2.ciphertext !== "string") return null;
     if (typeof portable.iv !== "string" || typeof portable.ciphertext !== "string") return null;
     return {
       version: 2,
       runtime: {
-        iv: runtime.iv,
-        ciphertext: runtime.ciphertext
+        iv: runtime2.iv,
+        ciphertext: runtime2.ciphertext
       },
       portable: {
         iv: portable.iv,
@@ -6445,7 +6445,7 @@ async function encryptBackupSettingsEnvelope(plaintext, env, users) {
   const encoder = new TextEncoder();
   const eligibleUsers = getEligiblePortableUsers(users);
   const runtimeKey = await deriveRuntimeKey(env.JWT_SECRET);
-  const runtime = await encryptAesGcm(encoder.encode(plaintext), runtimeKey);
+  const runtime2 = await encryptAesGcm(encoder.encode(plaintext), runtimeKey);
   const portableDek = crypto.getRandomValues(new Uint8Array(PORTABLE_DEK_BYTES));
   const portableKey = await crypto.subtle.importKey(
     "raw",
@@ -6476,8 +6476,8 @@ async function encryptBackupSettingsEnvelope(plaintext, env, users) {
   const envelope = {
     version: 2,
     runtime: {
-      iv: bytesToBase642(runtime.iv),
-      ciphertext: bytesToBase642(runtime.ciphertext)
+      iv: bytesToBase642(runtime2.iv),
+      ciphertext: bytesToBase642(runtime2.ciphertext)
     },
     portable: {
       iv: bytesToBase642(portableCipher.iv),
@@ -6866,7 +6866,7 @@ function normalizeDestinationRecord(input, previousById, index, fallbackTimezone
   const id = asTrimmedString(input.id) || createBackupRandomId();
   const type = getDestinationType(input.type);
   const previous = previousById.get(id);
-  const runtime = previous?.runtime ? normalizeRuntime(previous.runtime) : normalizeRuntime(input.runtime);
+  const runtime2 = previous?.runtime ? normalizeRuntime(previous.runtime) : normalizeRuntime(input.runtime);
   const name = asTrimmedString(input.name) || previous?.name || defaultDestinationName(type, index + 1);
   const scheduleSource = isPlainObject2(input.schedule) ? input.schedule : {};
   const previousSchedule = previous?.schedule || defaultScheduleConfig(fallbackTimezone);
@@ -6896,7 +6896,7 @@ function normalizeDestinationRecord(input, previousById, index, fallbackTimezone
     includeAttachments: typeof input.includeAttachments === "boolean" ? input.includeAttachments : previous?.includeAttachments ?? false,
     destination,
     schedule,
-    runtime
+    runtime: runtime2
   };
 }
 function parseLegacyBackupSettings(rawValue, fallbackTimezone) {
@@ -6964,7 +6964,7 @@ async function loadBackupRuntimeStates(storage) {
   if (!raw) return /* @__PURE__ */ new Map();
   try {
     const parsed = JSON.parse(raw);
-    const entries = Object.entries(parsed.destinations || {}).filter(([id]) => !!asTrimmedString(id)).map(([id, runtime]) => [id, normalizeRuntime(runtime)]);
+    const entries = Object.entries(parsed.destinations || {}).filter(([id]) => !!asTrimmedString(id)).map(([id, runtime2]) => [id, normalizeRuntime(runtime2)]);
     return new Map(entries);
   } catch {
     return /* @__PURE__ */ new Map();
@@ -10262,8 +10262,8 @@ async function executeConfiguredBackup(env, storage, actorUserId, trigger, desti
   const destination = requireBackupDestination(currentSettings, destinationId);
   const now = /* @__PURE__ */ new Date();
   await touchLease();
-  destination.runtime = await updateBackupDestinationRuntime(storage, destination.id, (runtime) => ({
-    ...runtime,
+  destination.runtime = await updateBackupDestinationRuntime(storage, destination.id, (runtime2) => ({
+    ...runtime2,
     lastAttemptAt: now.toISOString(),
     lastAttemptLocalDate: getBackupLocalDateKey(now, destination.schedule.timezone),
     lastErrorAt: null,
@@ -10371,8 +10371,8 @@ async function executeConfiguredBackup(env, storage, actorUserId, trigger, desti
       pruneErrorMessage = error instanceof Error ? error.message : "Old backup cleanup failed";
     }
     await touchLease();
-    destination.runtime = await updateBackupDestinationRuntime(storage, destination.id, (runtime) => ({
-      ...runtime,
+    destination.runtime = await updateBackupDestinationRuntime(storage, destination.id, (runtime2) => ({
+      ...runtime2,
       lastSuccessAt: (/* @__PURE__ */ new Date()).toISOString(),
       lastErrorAt: null,
       lastErrorMessage: null,
@@ -10411,8 +10411,8 @@ async function executeConfiguredBackup(env, storage, actorUserId, trigger, desti
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Backup upload failed";
     await touchLease();
-    destination.runtime = await updateBackupDestinationRuntime(storage, destination.id, (runtime) => ({
-      ...runtime,
+    destination.runtime = await updateBackupDestinationRuntime(storage, destination.id, (runtime2) => ({
+      ...runtime2,
       lastErrorAt: (/* @__PURE__ */ new Date()).toISOString(),
       lastErrorMessage: errorMessage
     }));
@@ -10743,11 +10743,11 @@ async function handleGetAdminBackupSettingsRepairState(request, env, actorUser) 
   if (!isAdmin2(actorUser)) return errorResponse("Forbidden", 403);
   const storage = new StorageService(env.DB);
   try {
-    const state = await getBackupSettingsRepairState(storage, env, "UTC");
+    const state2 = await getBackupSettingsRepairState(storage, env, "UTC");
     return jsonResponse({
       object: "backup-settings-repair",
-      needsRepair: state.needsRepair,
-      portable: state.portable
+      needsRepair: state2.needsRepair,
+      portable: state2.portable
     });
   } catch (error) {
     return errorResponse(error instanceof Error ? error.message : "Backup settings repair state could not be loaded", 409);
@@ -15333,20 +15333,20 @@ function __importStar(mod) {
 function __importDefault(mod) {
   return mod && mod.__esModule ? mod : { default: mod };
 }
-function __classPrivateFieldGet(receiver, state, kind, f) {
+function __classPrivateFieldGet(receiver, state2, kind, f) {
   if (kind === "a" && !f) throw new TypeError("Private accessor was defined without a getter");
-  if (typeof state === "function" ? receiver !== state || !f : !state.has(receiver)) throw new TypeError("Cannot read private member from an object whose class did not declare it");
-  return kind === "m" ? f : kind === "a" ? f.call(receiver) : f ? f.value : state.get(receiver);
+  if (typeof state2 === "function" ? receiver !== state2 || !f : !state2.has(receiver)) throw new TypeError("Cannot read private member from an object whose class did not declare it");
+  return kind === "m" ? f : kind === "a" ? f.call(receiver) : f ? f.value : state2.get(receiver);
 }
-function __classPrivateFieldSet(receiver, state, value, kind, f) {
+function __classPrivateFieldSet(receiver, state2, value, kind, f) {
   if (kind === "m") throw new TypeError("Private method is not writable");
   if (kind === "a" && !f) throw new TypeError("Private accessor was defined without a setter");
-  if (typeof state === "function" ? receiver !== state || !f : !state.has(receiver)) throw new TypeError("Cannot write private member to an object whose class did not declare it");
-  return kind === "a" ? f.call(receiver, value) : f ? f.value = value : state.set(receiver, value), value;
+  if (typeof state2 === "function" ? receiver !== state2 || !f : !state2.has(receiver)) throw new TypeError("Cannot write private member to an object whose class did not declare it");
+  return kind === "a" ? f.call(receiver, value) : f ? f.value = value : state2.set(receiver, value), value;
 }
-function __classPrivateFieldIn(state, receiver) {
+function __classPrivateFieldIn(state2, receiver) {
   if (receiver === null || typeof receiver !== "object" && typeof receiver !== "function") throw new TypeError("Cannot use 'in' operator on non-object");
-  return typeof state === "function" ? receiver === state : state.has(receiver);
+  return typeof state2 === "function" ? receiver === state2 : state2.has(receiver);
 }
 function __addDisposableResource(env, value, async) {
   if (value !== null && value !== void 0) {
@@ -29066,9 +29066,14 @@ var require_x509_cjs = __commonJS({
 });
 
 // server/index.ts
+init_response();
 import http from "node:http";
+import { Readable as Readable2 } from "node:stream";
+
+// server/node-runtime.ts
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -35807,18 +35812,18 @@ function resolveDbConfigFromEnv(env) {
 async function resolveDbConfig(env) {
   const fromEnv = resolveDbConfigFromEnv(env);
   if (fromEnv) return fromEnv;
-  const runtime = await loadRuntimeConfig(env);
-  if (runtime && runtime.mode === "mysql" && runtime.host) {
+  const runtime2 = await loadRuntimeConfig(env);
+  if (runtime2 && runtime2.mode === "mysql" && runtime2.host) {
     return {
       mode: "mysql",
       source: "runtime",
-      host: runtime.host,
-      port: runtime.port || 3306,
-      user: runtime.user || "",
-      password: runtime.password || "",
-      database: runtime.database || "",
-      ssl: runtime.ssl !== false,
-      connectionLimit: runtime.connectionLimit || 5
+      host: runtime2.host,
+      port: runtime2.port || 3306,
+      user: runtime2.user || "",
+      password: runtime2.password || "",
+      database: runtime2.database || "",
+      ssl: runtime2.ssl !== false,
+      connectionLimit: runtime2.connectionLimit || 5
     };
   }
   return {
@@ -47065,7 +47070,7 @@ async function ensureDatabaseInitialized(env, resolve = getDatabase) {
   await pending;
 }
 
-// server/index.ts
+// server/node-runtime.ts
 init_response();
 
 // src/web-vault-visibility.ts
@@ -47130,8 +47135,8 @@ function badRequest(message, status = 400) {
   });
 }
 var BackupTransferRunner = class {
-  constructor(state, env) {
-    this.state = state;
+  constructor(state2, env) {
+    this.state = state2;
     this.env = env;
   }
   state;
@@ -47610,8 +47615,8 @@ function createLocalDurableObjectNamespace(label, factory, getEnv) {
       });
       storages.set(name, storage);
     }
-    const state = createState(name, storage);
-    const pending = (async () => factory(state, getEnv()))().then((instance) => {
+    const state2 = createState(name, storage);
+    const pending = (async () => factory(state2, getEnv()))().then((instance) => {
       ref.current = instance;
       return instance;
     });
@@ -47680,96 +47685,119 @@ function createLocalBackupRunnerNamespace(getEnv) {
   );
 }
 
-// server/index.ts
+// server/node-runtime.ts
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
-var ROOT_DIR = path.resolve(__dirname, "..");
-var DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT_DIR, "data"));
-var ATTACHMENTS_DIR = path.resolve(process.env.ATTACHMENTS_DIR || path.join(DATA_DIR, "attachments"));
-var DIST_DIR = path.resolve(process.env.DIST_DIR || path.join(ROOT_DIR, "dist"));
-var PORT = Number(process.env.PORT || 8787);
-fs.mkdirSync(DATA_DIR, { recursive: true });
-fs.mkdirSync(ATTACHMENTS_DIR, { recursive: true });
-var KV_FILE = path.join(DATA_DIR, "kv-store.json");
-function readKvFile() {
+var state = null;
+var sharedEnv = null;
+function resolveState(options) {
+  const dataDir = path.resolve(
+    options.dataDir || process.env.DATA_DIR || defaultDataDir(options.assets)
+  );
+  return {
+    assets: options.assets || "disk",
+    dataDir,
+    attachmentsDir: path.resolve(process.env.ATTACHMENTS_DIR || path.join(dataDir, "attachments")),
+    distDir: path.resolve(process.env.DIST_DIR || path.join(__dirname, "..", "dist"))
+  };
+}
+function defaultDataDir(assets) {
+  if (assets === "stub") return path.join(os.tmpdir(), "nodewarden");
+  return path.join(__dirname, "..", "data");
+}
+function configureNodeRuntime(options = {}) {
+  if (state) return state;
+  state = resolveState(options);
+  fs.mkdirSync(state.dataDir, { recursive: true });
+  fs.mkdirSync(state.attachmentsDir, { recursive: true });
+  globalThis.caches = cachesShim;
+  installDurableObjectGlobals();
+  return state;
+}
+function readKvFile(kvFile) {
   try {
-    return JSON.parse(fs.readFileSync(KV_FILE, "utf8"));
+    return JSON.parse(fs.readFileSync(kvFile, "utf8"));
   } catch {
     return {};
   }
 }
-function writeKvFile(data) {
-  fs.writeFileSync(KV_FILE, JSON.stringify(data), "utf8");
+function writeKvFile(kvFile, data) {
+  fs.writeFileSync(kvFile, JSON.stringify(data), "utf8");
 }
-var fileKv = {
-  async get(key) {
-    const data = readKvFile();
-    return data[key] ?? null;
-  },
-  async put(key, value) {
-    const data = readKvFile();
-    data[key] = value;
-    writeKvFile(data);
-  },
-  async delete(key) {
-    const data = readKvFile();
-    delete data[key];
-    writeKvFile(data);
-  }
-};
-function safeObjectPath(key) {
+function createFileKv(dataDir) {
+  const kvFile = path.join(dataDir, "kv-store.json");
+  return {
+    async get(key) {
+      const data = readKvFile(kvFile);
+      return data[key] ?? null;
+    },
+    async put(key, value) {
+      const data = readKvFile(kvFile);
+      data[key] = value;
+      writeKvFile(kvFile, data);
+    },
+    async delete(key) {
+      const data = readKvFile(kvFile);
+      delete data[key];
+      writeKvFile(kvFile, data);
+    }
+  };
+}
+function safeObjectPath(attachmentsDir, key) {
   const normalized = key.replace(/^[/\\]+/, "");
-  const full = path.resolve(ATTACHMENTS_DIR, normalized);
-  const rel = path.relative(ATTACHMENTS_DIR, full);
+  const full = path.resolve(attachmentsDir, normalized);
+  const rel = path.relative(attachmentsDir, full);
   if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error("Invalid object key");
   return full;
 }
-var fsR2 = {
-  async put(key, value, options) {
-    const full = safeObjectPath(key);
-    fs.mkdirSync(path.dirname(full), { recursive: true });
-    let bytes;
-    if (typeof value === "string") bytes = new TextEncoder().encode(value);
-    else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
-    else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-    else if (value instanceof ReadableStream) {
-      const buf = await new Response(value).arrayBuffer();
-      bytes = new Uint8Array(buf);
-    } else {
-      bytes = new Uint8Array(0);
-    }
-    await fsp.writeFile(full, bytes);
-    const meta = {
-      contentType: options?.httpMetadata?.contentType || "application/octet-stream",
-      customMetadata: options?.customMetadata || {}
-    };
-    await fsp.writeFile(`${full}.meta.json`, JSON.stringify(meta));
-  },
-  async get(key) {
-    const full = safeObjectPath(key);
-    try {
-      const stat = await fsp.stat(full);
-      let meta = {};
-      try {
-        meta = JSON.parse(await fsp.readFile(`${full}.meta.json`, "utf8"));
-      } catch {
+function createFsR2(attachmentsDir) {
+  return {
+    async put(key, value, options) {
+      const full = safeObjectPath(attachmentsDir, key);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      let bytes;
+      if (typeof value === "string") bytes = new TextEncoder().encode(value);
+      else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
+      else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      else if (value instanceof ReadableStream) {
+        const buf = await new Response(value).arrayBuffer();
+        bytes = new Uint8Array(buf);
+      } else {
+        bytes = new Uint8Array(0);
       }
-      const stream = fs.createReadStream(full);
-      return {
-        body: Readable.toWeb(stream),
-        size: stat.size,
-        httpMetadata: { contentType: meta.contentType || "application/octet-stream" },
-        customMetadata: meta.customMetadata || {}
+      await fsp.writeFile(full, bytes);
+      const meta = {
+        contentType: options?.httpMetadata?.contentType || "application/octet-stream",
+        customMetadata: options?.customMetadata || {}
       };
-    } catch {
-      return null;
+      await fsp.writeFile(`${full}.meta.json`, JSON.stringify(meta));
+    },
+    async get(key) {
+      const full = safeObjectPath(attachmentsDir, key);
+      try {
+        const stat = await fsp.stat(full);
+        let meta = {};
+        try {
+          meta = JSON.parse(await fsp.readFile(`${full}.meta.json`, "utf8"));
+        } catch {
+        }
+        const stream = fs.createReadStream(full);
+        return {
+          body: Readable.toWeb(stream),
+          size: stat.size,
+          httpMetadata: { contentType: meta.contentType || "application/octet-stream" },
+          customMetadata: meta.customMetadata || {}
+        };
+      } catch {
+        return null;
+      }
+    },
+    async delete(key) {
+      const full = safeObjectPath(attachmentsDir, key);
+      await fsp.rm(full, { force: true });
+      await fsp.rm(`${full}.meta.json`, { force: true });
     }
-  },
-  async delete(key) {
-    const full = safeObjectPath(key);
-    await fsp.rm(full, { force: true });
-    await fsp.rm(`${full}.meta.json`, { force: true });
-  }
-};
+  };
+}
 var memoryCache = /* @__PURE__ */ new Map();
 function cacheKey(request) {
   const url = typeof request === "string" ? request : request instanceof URL ? request.href : request.url;
@@ -47797,8 +47825,6 @@ var cachesShim = {
     return cachesShim.default;
   }
 };
-globalThis.caches = cachesShim;
-installDurableObjectGlobals();
 var MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -47811,7 +47837,17 @@ var MIME = {
   ".woff2": "font/woff2",
   ".txt": "text/plain; charset=utf-8"
 };
+function notFoundAssetResponse(reason) {
+  return new Response(reason, {
+    status: 404,
+    headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }
+  });
+}
 async function serveAssets(request) {
+  const runtime2 = configureNodeRuntime();
+  if (runtime2.assets === "stub") {
+    return notFoundAssetResponse("Not Found");
+  }
   const url = new URL(request.url);
   let rel;
   try {
@@ -47820,8 +47856,8 @@ async function serveAssets(request) {
     return new Response("Bad Request", { status: 400, headers: { "Content-Type": "text/plain; charset=utf-8" } });
   }
   if (rel === "/" || rel === "") rel = "/index.html";
-  const full = path.resolve(DIST_DIR, rel.replace(/^[/\\]+/, ""));
-  const contained = path.relative(DIST_DIR, full);
+  const full = path.resolve(runtime2.distDir, rel.replace(/^[/\\]+/, ""));
+  const contained = path.relative(runtime2.distDir, full);
   if (!contained || contained.startsWith("..") || path.isAbsolute(contained)) {
     return new Response("Forbidden", { status: 403 });
   }
@@ -47834,27 +47870,31 @@ async function serveAssets(request) {
     });
   } catch {
     try {
-      const index = await fsp.readFile(path.join(DIST_DIR, "index.html"));
+      const index = await fsp.readFile(path.join(runtime2.distDir, "index.html"));
       return new Response(index, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" } });
     } catch {
       return new Response("Web vault not built. Run `npm run build` first.", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } });
     }
   }
 }
-var sharedEnv = null;
-function buildEnv() {
+function toRequest(input) {
+  if (input instanceof Request) return input;
+  return new Request(typeof input === "string" ? input : input.href);
+}
+function buildNodeEnv() {
+  const runtime2 = configureNodeRuntime();
   if (sharedEnv) return sharedEnv;
   const env = {
     DB: null,
     NOTIFICATIONS_HUB: createLocalNotificationsHubNamespace(
-      () => buildEnv()
+      () => buildNodeEnv()
     ),
     BACKUP_TRANSFER_RUNNER: createLocalBackupRunnerNamespace(
-      () => buildEnv()
+      () => buildNodeEnv()
     ),
     ASSETS: { fetch: (input) => serveAssets(toRequest(input)) },
-    ATTACHMENTS: fsR2,
-    SETTINGS_KV: fileKv,
+    ATTACHMENTS: createFsR2(runtime2.attachmentsDir),
+    SETTINGS_KV: createFileKv(runtime2.dataDir),
     JWT_SECRET: process.env.JWT_SECRET || "",
     HIDE_WEB_VAULT: process.env.HIDE_WEB_VAULT,
     WEBAUTHN_RP_ID: process.env.WEBAUTHN_RP_ID,
@@ -47872,10 +47912,6 @@ function buildEnv() {
   };
   sharedEnv = env;
   return sharedEnv;
-}
-function toRequest(input) {
-  if (input instanceof Request) return input;
-  return new Request(typeof input === "string" ? input : input.href);
 }
 async function handleHealthz(env) {
   const status = await getDatabaseStatus(env);
@@ -47919,6 +47955,38 @@ async function pipeline(request, env) {
   const resp = await handleRequest(request, env);
   return applyCors(request, resp, env);
 }
+function getCronSecret() {
+  return process.env.CRON_SECRET || "";
+}
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i2 = 0; i2 < a.length; i2 += 1) diff |= a.charCodeAt(i2) ^ b.charCodeAt(i2);
+  return diff === 0;
+}
+async function handleCronTick(request, env) {
+  const cronSecret = getCronSecret();
+  if (!cronSecret) {
+    return jsonResponse({ error: "cron trigger not configured (set CRON_SECRET)" }, 503);
+  }
+  const provided = request.headers.get("x-cron-secret") || "";
+  if (!timingSafeEqual(provided, cronSecret)) {
+    return jsonResponse({ error: "Unauthorized" }, 401);
+  }
+  await ensureDatabaseInitialized(env);
+  const dbInitError2 = getDbInitError();
+  if (dbInitError2) {
+    console.error("Skipping scheduled backup because DB init failed:", dbInitError2);
+    return jsonResponse({ ok: false, error: "database unavailable" }, 503);
+  }
+  const { runScheduledBackupIfDue: runScheduledBackupIfDue2 } = await Promise.resolve().then(() => (init_backup(), backup_exports));
+  await runScheduledBackupIfDue2(env);
+  return jsonResponse({ ok: true });
+}
+
+// server/index.ts
+var runtime = configureNodeRuntime({ assets: "disk" });
+var PORT = Number(process.env.PORT || 8787);
 function nodeRequestToRequest(req, body) {
   const protocol = req.headers["x-forwarded-proto"] || "http";
   const host = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${PORT}`;
@@ -47952,7 +48020,7 @@ async function writeResponse(res, response, requestMethod = "GET") {
     res.end();
     return;
   }
-  const nodeStream = Readable.fromWeb(response.body);
+  const nodeStream = Readable2.fromWeb(response.body);
   nodeStream.on("error", () => res.destroy());
   res.on("close", () => nodeStream.destroy());
   nodeStream.pipe(res);
@@ -47987,7 +48055,7 @@ var server = http.createServer((req, res) => {
     if (rejected) return;
     void (async () => {
       try {
-        const env = buildEnv();
+        const env = buildNodeEnv();
         const body = Buffer.concat(chunks);
         const request = nodeRequestToRequest(req, body);
         const response = await pipeline(request, env);
@@ -48022,52 +48090,28 @@ server.on("upgrade", (_req, socket) => {
   socket.write("HTTP/1.1 501 Not Implemented\r\nConnection: close\r\n\r\n");
   socket.destroy();
 });
-var CRON_SECRET = process.env.CRON_SECRET || "";
-function timingSafeEqual(a, b) {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i2 = 0; i2 < a.length; i2 += 1) diff |= a.charCodeAt(i2) ^ b.charCodeAt(i2);
-  return diff === 0;
-}
-async function handleCronTick(request, env) {
-  if (!CRON_SECRET) {
-    return jsonResponse({ error: "cron trigger not configured (set CRON_SECRET)" }, 503);
-  }
-  const provided = request.headers.get("x-cron-secret") || "";
-  if (!timingSafeEqual(provided, CRON_SECRET)) {
-    return jsonResponse({ error: "Unauthorized" }, 401);
-  }
-  await ensureDatabaseInitialized(env);
-  const dbInitError2 = getDbInitError();
-  if (dbInitError2) {
-    console.error("Skipping scheduled backup because DB init failed:", dbInitError2);
-    return jsonResponse({ ok: false, error: "database unavailable" }, 503);
-  }
-  const { runScheduledBackupIfDue: runScheduledBackupIfDue2 } = await Promise.resolve().then(() => (init_backup(), backup_exports));
-  await runScheduledBackupIfDue2(env);
-  return jsonResponse({ ok: true });
-}
 if (process.env.INPROCESS_CRON === "1") {
   const intervalMs = Number(process.env.INPROCESS_CRON_INTERVAL_MS || 5 * 60 * 1e3);
   const timer = setInterval(() => {
     void handleCronTick(
       new Request(`http://localhost/internal/cron/backup`, {
         method: "POST",
-        headers: { "x-cron-secret": CRON_SECRET }
+        headers: { "x-cron-secret": getCronSecret() }
       }),
-      buildEnv()
+      buildNodeEnv()
     ).catch((error) => console.error("Scheduled backup tick failed:", error));
   }, intervalMs);
   timer.unref?.();
   console.log(`  cron:           in-process every ${Math.round(intervalMs / 1e3)}s (INPROCESS_CRON=1)`);
 }
 server.listen(PORT, () => {
+  const cronSecret = getCronSecret();
   console.log(`NodeWarden (Node runtime / BYO-DB) listening on http://localhost:${PORT}`);
-  console.log(`  data dir:       ${DATA_DIR}`);
-  console.log(`  attachments:    ${ATTACHMENTS_DIR}`);
-  console.log(`  web vault:      ${DIST_DIR}`);
+  console.log(`  data dir:       ${runtime.dataDir}`);
+  console.log(`  attachments:    ${runtime.attachmentsDir}`);
+  console.log(`  web vault:      ${runtime.distDir}`);
   console.log(`  database:       ${process.env.DB_HOST ? `MySQL ${process.env.DB_HOST}:${process.env.DB_PORT || 3306}/${process.env.DB_NAME || ""}` : "configured via env DB_* or admin UI (/admin/database)"}`);
-  console.log(`  cron:           POST /internal/cron/backup (x-cron-secret)${CRON_SECRET ? "" : " \u2014 CRON_SECRET not set, endpoint disabled"}`);
+  console.log(`  cron:           POST /internal/cron/backup (x-cron-secret)${cronSecret ? "" : " \u2014 CRON_SECRET not set, endpoint disabled"}`);
 });
 /*! Bundled license information:
 

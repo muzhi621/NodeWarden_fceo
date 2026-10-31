@@ -41,6 +41,7 @@ npm-debug.log*
 
 tmp/
 .tmp/
+.smoke-db.json
 .tmp-bitwarden-clients/
 
 nodewarden-wiki/

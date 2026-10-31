@@ -33,6 +33,10 @@
     "test:db-lifecycle": "tsx --test scripts/db-lifecycle.test.ts",
     "migrate:d1-to-mysql": "tsx scripts/migrate-d1-to-mysql.ts",
     "start:node": "node --import ./server/register-cf-stub.mjs --import tsx server/index.ts",
+    "build:edgeone": "npm run build && node scripts/build-edgeone.mjs",
+    "check:edgeone": "node scripts/build-edgeone.mjs --check",
+    "test:edgeone": "node scripts/edgeone-smoke.mjs",
+    "test:edgeone:db": "node scripts/edgeone-smoke.mjs --db",
     "deploy": "wrangler deploy",
     "deploy:kv": "node scripts/ensure-kv.cjs && wrangler deploy -c wrangler.kv.toml",
     "deploy:demo": "npm run build:demo && wrangler pages deploy dist --project-name nw-demo"

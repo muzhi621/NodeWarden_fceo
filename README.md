@@ -188,6 +188,24 @@ state is per-process (lost on cold start).
 See `README_ZH.md` (外接数据库部署教程) for the full tutorial: TiDB Serverless setup,
 D1→MySQL data migration, FC/SCF/EdgeOne deployment options, and Dockerfile.
 
+### Deploying to Tencent EdgeOne Pages
+
+`dist/` is served as static assets and the API runs as **Node Functions** — the repo already
+ships the adapter, no wrapper code to write: `server/edgeone.ts` (entry),
+`server/node-runtime.ts` (pipeline shared with FC), `edgeone.json` (build/SPA fallback/duration)
+and `node-functions/**` (one thin entry per backend path prefix, bundled into the committed
+`node-functions/_nodewarden/runtime.mjs`).
+
+Platform limits to know: request body ≤ 6 MB, one invocation ≤ 120 s, no persistent disk
+(only `/tmp`), KV is not available to Node Functions, WebSockets degrade to polling.
+Deployment steps, env vars, scheduled-backup options and troubleshooting: **[EDGEONE-DEPLOY.md](EDGEONE-DEPLOY.md)**.
+
+```bash
+npm run build:edgeone     # build the web vault + bundle the Node Functions runtime
+npm run test:edgeone      # 15 checks, no platform account needed
+npm run test:edgeone:db   # full register → login → sync flow against a real MySQL
+```
+
 > **Upgrading an existing MySQL database?** Read FC-DEPLOY.md §6 first — two schema fixes
 > (JSON columns back to `LONGTEXT`, and dropping the 191-byte prefix from the
 > `webauthn_credentials.credential_id` unique index) are applied by hand on old databases.
