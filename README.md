@@ -161,6 +161,24 @@ Then open **Admin → Database settings** (`/admin/database`) to edit/test the c
 only — driver errors and the version string are no longer echoed to unauthenticated callers.
 Without `DB_HOST` the app falls back to D1 — `npm run deploy` works exactly like upstream.
 
+### Multiple databases: primary + standby
+
+`/admin/database` manages a list of nodes (one primary, up to seven standbys) instead of a single
+connection; priority decides the takeover order.
+
+| Policy | Effect |
+|---|---|
+| Sync `native` (default) | The database replicates itself (MySQL binlog / managed replica). The app only fails over and never writes to the standby. |
+| Sync `write-through` | Every committed write is replayed on the other nodes, so two independent servers become live copies. Cross-server writes are not atomic: if a standby rejects the replay, the primary write stands and the error is recorded in the node health panel. |
+| Failover | Only connection-level failures (refused / timeout / reset / pool full) move traffic to the next healthy node. SQL errors never do — retrying a mistyped statement elsewhere would apply it twice. |
+| Read split | Read-only statements may go to standbys, falling back to the primary. |
+| Circuit breaker | N consecutive failures take a node out for a cooldown, then it is retried half-open. |
+
+A standby attached to a deployment that already holds data needs one backfill: save the cluster,
+then press **Sync data to standbys** (write-through only). It walks every table with a chunked,
+capped, idempotent upsert — safe to re-run after an interruption or to repair a node that fell
+behind. Per-node replay errors are visible on the admin page and in `/healthz`.
+
 ### Deploying to Aliyun FC / self-hosting Node
 
 A prebuilt, upload-ready package is attached to every

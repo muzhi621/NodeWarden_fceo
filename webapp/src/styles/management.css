@@ -2266,3 +2266,310 @@
     padding-top: 0;
   }
 }
+
+/* ── Database settings (multi-node external MySQL) ─────────────────────────
+   Same visual language as the rest of the admin pages: panel surfaces, the
+   shared --line/--muted/--primary tokens, pill badges for state. Everything is
+   token-based so light and dark themes need no separate rules. */
+
+.db-status-strip {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin-bottom: 12px;
+}
+
+.db-status-item {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  background: var(--panel-soft);
+}
+
+.db-status-item strong {
+  overflow-wrap: anywhere;
+  font-size: var(--font-sm);
+  color: var(--text);
+}
+
+.db-status-label {
+  font-size: var(--font-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.db-node-list {
+  display: grid;
+  gap: 10px;
+}
+
+.db-node-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  background: var(--panel-soft);
+  transition: border-color var(--dur-fast) var(--ease-smooth), box-shadow var(--dur-fast) var(--ease-smooth);
+}
+
+.db-node-card.is-primary {
+  border-color: color-mix(in srgb, var(--primary) 42%, var(--line));
+  background: color-mix(in srgb, var(--primary) 5%, var(--panel));
+  box-shadow: var(--shadow-sm);
+}
+
+.db-node-card.is-disabled {
+  opacity: 0.68;
+}
+
+.db-node-card.is-down {
+  border-color: color-mix(in srgb, var(--danger) 46%, var(--line));
+}
+
+.db-node-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.db-node-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.db-node-title strong {
+  overflow-wrap: anywhere;
+  font-size: var(--font-sm);
+  color: var(--text);
+}
+
+.db-node-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: var(--font-xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.db-node-badge.is-primary {
+  color: #ffffff;
+  background: var(--primary);
+}
+
+.db-node-badge.is-replica {
+  color: var(--muted-strong);
+  background: var(--panel-muted);
+  border: 1px solid var(--line-soft);
+}
+
+.db-node-status {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.db-node-status.is-ok {
+  color: var(--success);
+}
+
+.db-node-status.is-error {
+  color: var(--danger);
+}
+
+.db-node-status.is-warn {
+  color: var(--warning);
+}
+
+.db-node-status.is-idle,
+.db-node-status.is-muted {
+  color: var(--muted);
+}
+
+.db-node-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.db-node-actions .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  color: var(--muted-strong);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-smooth), border-color var(--dur-fast) var(--ease-smooth);
+}
+
+.db-node-actions .icon-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--primary) 40%, var(--line));
+}
+
+.db-node-actions .icon-btn.danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 46%, var(--line));
+}
+
+.db-node-actions .icon-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.db-node-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 12.5px;
+  color: var(--muted-strong);
+}
+
+.db-node-addr {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.db-node-warn {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.db-node-form {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--line-soft);
+}
+
+.db-grid {
+  display: grid;
+  gap: 0 12px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+.db-grid .field {
+  margin-bottom: 8px;
+  min-width: 0;
+}
+
+.db-node-toggles {
+  display: grid;
+  gap: 8px;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted-strong);
+}
+
+.checkbox-field input {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  accent-color: var(--primary);
+}
+
+.db-callout {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  background: var(--panel-soft);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted-strong);
+}
+
+.db-callout strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.db-callout ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.db-callout b {
+  color: var(--text);
+}
+
+.db-actions-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 2px 10px;
+}
+
+.db-inline-hint {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.db-empty {
+  margin: 0;
+  padding: 14px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-lg);
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+}
+
+@media (max-width: 760px) {
+  .db-node-head {
+    align-items: flex-start;
+  }
+
+  .db-node-actions {
+    width: 100%;
+  }
+
+  .db-node-actions .btn.small {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+
+  .db-actions-bar .btn {
+    flex: 1 1 100%;
+    justify-content: center;
+  }
+
+  .db-inline-hint {
+    flex-basis: 100%;
+  }
+}

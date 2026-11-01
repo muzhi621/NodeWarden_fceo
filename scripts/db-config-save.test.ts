@@ -59,7 +59,10 @@ test('a host rejected by policy is never persisted (B-3)', async () => {
   assert.equal(response.status, 502);
   const body = (await response.json()) as { errorKind?: string; saved?: boolean };
   assert.equal(body.errorKind, 'blocked');
-  assert.equal(body.saved, undefined);
+  // Multi-node saves answer with an explicit `saved: false` (it used to be
+  // omitted entirely): the admin UI now shows per-node probe results and must be
+  // able to tell "rejected" from "the field was not reported".
+  assert.equal(body.saved, false);
   assert.equal(kv.entries.size, 0, 'the config store must stay empty when the save is rejected');
 });
 

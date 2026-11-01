@@ -31,6 +31,8 @@
     "test:db-config-save": "tsx --test scripts/db-config-save.test.ts",
     "test:db-policy": "tsx --test scripts/db-host-policy.test.ts",
     "test:db-lifecycle": "tsx --test scripts/db-lifecycle.test.ts",
+    "test:db-cluster": "tsx --test scripts/db-cluster.test.ts",
+    "test:db-cluster-sync": "tsx --test scripts/db-cluster-sync.test.ts",
     "migrate:d1-to-mysql": "tsx scripts/migrate-d1-to-mysql.ts",
     "start:node": "node --import ./server/register-cf-stub.mjs --import tsx server/index.ts",
     "build:edgeone:pages": "npm run build && node scripts/edgeone-postbuild.mjs",

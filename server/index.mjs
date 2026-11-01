@@ -736,13 +736,13 @@ var init_storage_config_repo = __esm({
 });
 
 // src/services/push-relay.ts
-async function fetchPushEndpoint(url, init, errorMessage) {
+async function fetchPushEndpoint(url, init, errorMessage2) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PUSH_REQUEST_TIMEOUT_MS);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (error) {
-    console.error(errorMessage, error);
+    console.error(errorMessage2, error);
     return null;
   } finally {
     clearTimeout(timeout);
@@ -10490,17 +10490,17 @@ async function executeConfiguredBackup(env, storage, actorUserId, trigger, desti
       provider: upload.provider
     };
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : "Backup upload failed";
+    const errorMessage2 = error instanceof Error ? error.message : "Backup upload failed";
     await touchLease();
     destination.runtime = await updateBackupDestinationRuntime(storage, destination.id, (runtime2) => ({
       ...runtime2,
       lastErrorAt: (/* @__PURE__ */ new Date()).toISOString(),
-      lastErrorMessage: errorMessage
+      lastErrorMessage: errorMessage2
     }));
     await touchLease();
     await writeAuditLog2(storage, actorUserId, `admin.backup.remote.${trigger}.failed`, "backup", null, {
       ...getBackupDestinationSummary(destination),
-      error: errorMessage,
+      error: errorMessage2,
       ...auditMetadata || {}
     });
     await progress?.({
@@ -10511,7 +10511,7 @@ async function executeConfiguredBackup(env, storage, actorUserId, trigger, desti
       stageDetail: "txt_backup_remote_run_progress_failed_detail",
       done: true,
       ok: false,
-      error: errorMessage
+      error: errorMessage2
     });
     throw error;
   }
@@ -35727,6 +35727,23 @@ init_response();
 // src/services/db-config.ts
 var CONFIG_OBJECT_KEY = "__system__/db-config.json";
 var CONFIG_KV_KEY = "db-config:v1";
+var DEFAULT_CLUSTER_POLICY = {
+  readSplit: false,
+  syncMode: "native",
+  syncAsync: false,
+  failoverEnabled: true,
+  failureThreshold: 3,
+  cooldownMs: 3e4
+};
+var CLUSTER_LIMITS = {
+  maxNodes: 8,
+  minConnectionLimit: 1,
+  maxConnectionLimit: 64,
+  minFailureThreshold: 1,
+  maxFailureThreshold: 10,
+  minCooldownMs: 5e3,
+  maxCooldownMs: 10 * 6e4
+};
 function asKvLike(value) {
   if (!value || typeof value !== "object") return null;
   const kv = value;
@@ -35866,10 +35883,112 @@ async function readStoredPayloadCached(env) {
   if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: now });
   return payload;
 }
+function asRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function parsePort(raw, fallback) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 && n <= 65535 ? Math.floor(n) : fallback;
+}
+function clampInt(raw, fallback, min, max2) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max2, Math.max(min, Math.floor(n)));
+}
+function normalizePolicy(raw) {
+  const input = asRecord(raw) ?? {};
+  const syncMode = input.syncMode === "write-through" ? "write-through" : "native";
+  return {
+    readSplit: input.readSplit === true,
+    syncMode,
+    // Async only makes sense for an app-level replay; ignore it otherwise so a
+    // stale flag cannot silently downgrade a native pair.
+    syncAsync: syncMode === "write-through" && input.syncAsync === true,
+    failoverEnabled: input.failoverEnabled !== false,
+    failureThreshold: clampInt(
+      input.failureThreshold,
+      DEFAULT_CLUSTER_POLICY.failureThreshold,
+      CLUSTER_LIMITS.minFailureThreshold,
+      CLUSTER_LIMITS.maxFailureThreshold
+    ),
+    cooldownMs: clampInt(
+      input.cooldownMs,
+      DEFAULT_CLUSTER_POLICY.cooldownMs,
+      CLUSTER_LIMITS.minCooldownMs,
+      CLUSTER_LIMITS.maxCooldownMs
+    )
+  };
+}
+function normalizeNode(raw, index) {
+  const input = asRecord(raw);
+  if (!input) return null;
+  const host = String(input.host ?? "").trim();
+  if (!host) return null;
+  const id = String(input.id ?? "").trim() || `node-${index + 1}`;
+  return {
+    id,
+    label: String(input.label ?? "").trim() || (index === 0 ? "\u4E3B\u5E93" : `\u8282\u70B9 ${index + 1}`),
+    role: input.role === "replica" ? "replica" : "primary",
+    priority: clampInt(input.priority, index + 1, 1, 99),
+    enabled: input.enabled !== false,
+    host,
+    port: parsePort(input.port, 3306),
+    user: String(input.user ?? "").trim(),
+    password: typeof input.password === "string" ? input.password : "",
+    database: String(input.database ?? "").trim(),
+    ssl: input.ssl !== false,
+    connectionLimit: clampInt(
+      input.connectionLimit,
+      5,
+      CLUSTER_LIMITS.minConnectionLimit,
+      CLUSTER_LIMITS.maxConnectionLimit
+    )
+  };
+}
+function normalizeRuntimeConfig(raw) {
+  const input = asRecord(raw);
+  if (!input) return null;
+  const rawNodes = Array.isArray(input.nodes) ? input.nodes : [];
+  const nodes = rawNodes.map((node, index) => normalizeNode(node, index)).filter((node) => node !== null).slice(0, CLUSTER_LIMITS.maxNodes);
+  if (nodes.length === 0) {
+    const legacy = normalizeNode(
+      {
+        id: "node-1",
+        label: "\u4E3B\u5E93",
+        role: "primary",
+        priority: 1,
+        enabled: true,
+        host: input.host,
+        port: input.port,
+        user: input.user,
+        password: input.password,
+        database: input.database,
+        ssl: input.ssl,
+        connectionLimit: input.connectionLimit
+      },
+      0
+    );
+    if (!legacy) return null;
+    nodes.push(legacy);
+  }
+  const activePrimaries = nodes.filter((node) => node.role === "primary" && node.enabled);
+  if (activePrimaries.length > 1) {
+    activePrimaries.slice().sort((a, b) => a.priority - b.priority).slice(1).forEach((node) => {
+      node.role = "replica";
+    });
+  }
+  return {
+    version: 2,
+    mode: "mysql",
+    nodes,
+    policy: normalizePolicy(input.policy)
+  };
+}
 async function loadRuntimeConfig(env) {
   const payload = await readStoredPayloadCached(env);
   if (!payload) return null;
-  return decryptJson(env, payload);
+  const decrypted = await decryptJson(env, payload);
+  return normalizeRuntimeConfig(decrypted);
 }
 async function saveRuntimeConfig(env, config) {
   const payload = await encryptJson(env, config);
@@ -35889,10 +36008,6 @@ async function clearRuntimeConfig(env) {
   }
   return saved;
 }
-function parsePort(raw, fallback) {
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
-}
 function resolveDbConfigFromEnv(env) {
   const host = (env.DB_HOST || "").trim();
   if (!host) return null;
@@ -35908,21 +36023,64 @@ function resolveDbConfigFromEnv(env) {
     connectionLimit: parsePort(env.DB_CONN_LIMIT, 5)
   };
 }
-async function resolveDbConfig(env) {
+function toResolvedNodes(config) {
+  return config.nodes.filter((node) => node.enabled).map((node) => ({ ...node, source: "runtime" })).sort((a, b) => {
+    if (a.role !== b.role) return a.role === "primary" ? -1 : 1;
+    return a.priority - b.priority;
+  });
+}
+async function resolveDbCluster(env) {
   const fromEnv = resolveDbConfigFromEnv(env);
-  if (fromEnv) return fromEnv;
-  const runtime2 = await loadRuntimeConfig(env);
-  if (runtime2 && runtime2.mode === "mysql" && runtime2.host) {
+  if (fromEnv) {
     return {
       mode: "mysql",
-      source: "runtime",
-      host: runtime2.host,
-      port: runtime2.port || 3306,
-      user: runtime2.user || "",
-      password: runtime2.password || "",
-      database: runtime2.database || "",
-      ssl: runtime2.ssl !== false,
-      connectionLimit: runtime2.connectionLimit || 5
+      source: "env",
+      nodes: [
+        {
+          id: "env-primary",
+          label: "\u73AF\u5883\u53D8\u91CF\u4E3B\u5E93",
+          role: "primary",
+          priority: 1,
+          enabled: true,
+          host: fromEnv.host,
+          port: fromEnv.port,
+          user: fromEnv.user,
+          password: fromEnv.password,
+          database: fromEnv.database,
+          ssl: fromEnv.ssl,
+          connectionLimit: fromEnv.connectionLimit,
+          source: "env"
+        }
+      ],
+      policy: { ...DEFAULT_CLUSTER_POLICY }
+    };
+  }
+  const runtime2 = await loadRuntimeConfig(env);
+  if (runtime2) {
+    const nodes = toResolvedNodes(runtime2);
+    if (nodes.length > 0) {
+      return { mode: "mysql", source: "runtime", nodes, policy: runtime2.policy };
+    }
+  }
+  return { mode: "d1", source: "d1", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } };
+}
+function primaryNodeOf(cluster) {
+  return cluster.nodes.find((node) => node.role === "primary") ?? cluster.nodes[0] ?? null;
+}
+async function resolveDbConfig(env) {
+  const cluster = await resolveDbCluster(env);
+  const primary = primaryNodeOf(cluster);
+  if (cluster.mode === "mysql" && primary) {
+    return {
+      mode: "mysql",
+      source: cluster.source,
+      host: primary.host,
+      port: primary.port,
+      user: primary.user,
+      password: primary.password,
+      database: primary.database,
+      ssl: primary.ssl,
+      connectionLimit: primary.connectionLimit
     };
   }
   return {
@@ -35935,6 +36093,30 @@ async function resolveDbConfig(env) {
     database: "",
     ssl: false,
     connectionLimit: 5
+  };
+}
+function maskNode(node) {
+  return {
+    id: node.id,
+    label: node.label,
+    role: node.role,
+    priority: node.priority,
+    enabled: node.enabled,
+    host: node.host,
+    port: node.port,
+    user: node.user,
+    database: node.database,
+    ssl: node.ssl,
+    connectionLimit: node.connectionLimit,
+    passwordSet: !!node.password
+  };
+}
+function maskCluster(cluster) {
+  return {
+    mode: cluster.mode,
+    source: cluster.source,
+    nodes: cluster.nodes.map(maskNode),
+    policy: cluster.policy
   };
 }
 function maskConfig(config) {
@@ -35954,43 +36136,371 @@ function hasConfigStore(env) {
   return getConfigStore(env) !== null;
 }
 
+// src/services/db-cluster.ts
+init_storage_mysql();
+var READ_ONLY_SQL2 = /^\s*(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN|WITH\s+RECURSIVE)\b/i;
+var NODE_FAILURE_CODES = /* @__PURE__ */ new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+  "ETIMEDOUT",
+  "PROTOCOL_CONNECTION_LOST",
+  "PROTOCOL_SEQUENCE_TIMEOUT",
+  "ER_CLIENT_INTERACTION_TIMEOUT",
+  // The server refused a *new* connection because of max_connections: the node
+  // is saturated, so spilling over is the right call.
+  "ER_CON_COUNT_ERROR"
+]);
+var NODE_FAILURE_ERRNOS = /* @__PURE__ */ new Set([
+  1040,
+  // ER_CON_COUNT_ERROR
+  2002,
+  // CR_CONN_HOST_ERROR
+  2003,
+  // CR_CONNECTION_ERROR
+  2006,
+  // CR_SERVER_GONE_ERROR
+  2013
+  // CR_SERVER_LOST
+]);
+function nodeFailureMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function isNodeLevelFailure(error) {
+  const code = String(error?.code ?? "");
+  const errno = Number(error?.errno ?? 0);
+  if (NODE_FAILURE_CODES.has(code) || NODE_FAILURE_ERRNOS.has(errno)) return true;
+  const message = nodeFailureMessage(error);
+  return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|PROTOCOL_CONNECTION_LOST|Connection lost|connect timeout|Connection refused/i.test(
+    message
+  );
+}
+function defaultNodeFactory(config) {
+  return new MySqlDatabase(config);
+}
+var ClusterStatement = class {
+  constructor(cluster, sql) {
+    this.cluster = cluster;
+    this.sql = sql;
+  }
+  cluster;
+  sql;
+  params = [];
+  bind(...params) {
+    this.params = params;
+    return this;
+  }
+  getSql() {
+    return this.sql;
+  }
+  getParams() {
+    return this.params;
+  }
+  run() {
+    return this.cluster.execute(this.sql, this.params, "run");
+  }
+  all() {
+    return this.cluster.execute(this.sql, this.params, "all");
+  }
+  first() {
+    return this.cluster.execute(this.sql, this.params, "first");
+  }
+};
+var MySqlClusterDatabase = class {
+  /** Lets the storage layer recognize the adapter (see isMySqlDatabase). */
+  dialect = "mysql";
+  /** Marker so callers can tell a cluster from a single-node adapter. */
+  clusterNodes = true;
+  nodes;
+  policy;
+  readCursor = 0;
+  constructor(specs, policy, createDb = defaultNodeFactory) {
+    this.policy = policy;
+    const ordered = [...specs].sort((a, b) => {
+      if (a.role !== b.role) return a.role === "primary" ? -1 : 1;
+      return a.priority - b.priority;
+    });
+    this.nodes = ordered.map((spec) => ({
+      spec,
+      db: createDb({
+        host: spec.host,
+        port: spec.port,
+        user: spec.user,
+        password: spec.password,
+        database: spec.database,
+        ssl: spec.ssl,
+        connectionLimit: spec.connectionLimit,
+        connectTimeoutMs: spec.connectTimeoutMs ?? 1e4
+      }),
+      failures: 0,
+      downUntil: 0,
+      syncErrors: 0
+    }));
+  }
+  getPolicy() {
+    return this.policy;
+  }
+  /** Schema key helper: the primary's identity (see StorageService.schemaKeyFor). */
+  getConfig() {
+    const primary = this.primaryNode();
+    return { host: primary.spec.host, port: primary.spec.port, database: primary.spec.database };
+  }
+  /** Every node's database handle, for per-node schema bootstrap. */
+  nodeDatabases() {
+    return this.nodes.map((node) => ({ id: node.spec.id, db: node.db }));
+  }
+  nodeHealth() {
+    const now = Date.now();
+    return this.nodes.map((node) => ({
+      id: node.spec.id,
+      label: node.spec.label,
+      role: node.spec.role,
+      priority: node.spec.priority,
+      available: this.policy.failoverEnabled ? node.downUntil <= now : node.spec.role === "primary",
+      failures: node.failures,
+      lastError: node.lastError,
+      lastOkAt: node.lastOkAt,
+      lastFailureAt: node.lastFailureAt,
+      downUntil: node.downUntil > now ? node.downUntil : void 0,
+      syncErrors: node.syncErrors,
+      lastSyncError: node.lastSyncError
+    }));
+  }
+  primaryNode() {
+    return this.nodes.find((node) => node.spec.role === "primary") ?? this.nodes[0];
+  }
+  markOk(node) {
+    node.failures = 0;
+    node.downUntil = 0;
+    node.lastOkAt = Date.now();
+  }
+  markFailure(node, error) {
+    node.failures += 1;
+    node.lastError = nodeFailureMessage(error);
+    node.lastFailureAt = Date.now();
+    if (node.failures >= this.policy.failureThreshold) {
+      node.downUntil = Date.now() + this.policy.cooldownMs;
+      console.warn(
+        `[db-cluster] node "${node.spec.label}" tripped after ${node.failures} failures; skipping it for ${this.policy.cooldownMs}ms`
+      );
+    }
+  }
+  /**
+   * Nodes to try, best first.
+   *
+   * When everything is tripped the list is *not* empty: the node whose cooldown
+   * ends first is retried anyway (half-open). Returning an empty list would turn
+   * one bad minute into a permanently failed instance.
+   */
+  candidates(kind) {
+    if (!this.policy.failoverEnabled) {
+      return [this.primaryNode()];
+    }
+    const now = Date.now();
+    const isAvailable = (node) => node.downUntil <= now;
+    const healthy = this.nodes.filter(isAvailable);
+    const pool = healthy.length > 0 ? healthy : [...this.nodes].sort((a, b) => a.downUntil - b.downUntil).slice(0, 1);
+    if (kind === "write") return pool;
+    if (!this.policy.readSplit) {
+      return pool.sort((a, b) => a.spec.role === b.spec.role ? 0 : a.spec.role === "primary" ? -1 : 1);
+    }
+    const replicas = pool.filter((node) => node.spec.role === "replica");
+    const primaries = pool.filter((node) => node.spec.role === "primary");
+    if (replicas.length === 0) return primaries;
+    const start = this.readCursor % replicas.length;
+    this.readCursor += 1;
+    return [...replicas.slice(start), ...replicas.slice(0, start), ...primaries];
+  }
+  async runOnNode(node, sql, params, mode) {
+    const statement = node.db.prepare(sql);
+    if (params.length > 0) statement.bind(...params);
+    if (mode === "run") return statement.run();
+    if (mode === "all") return statement.all();
+    return statement.first();
+  }
+  async execute(sql, params, mode) {
+    const isRead = mode !== "run" && READ_ONLY_SQL2.test(sql);
+    const candidates = this.candidates(isRead ? "read" : "write");
+    let lastError = null;
+    const failedThisRequest = /* @__PURE__ */ new Set();
+    for (const node of candidates) {
+      try {
+        const result = await this.runOnNode(node, sql, params, mode);
+        this.markOk(node);
+        if (!isRead) await this.replicate(sql, params, node, failedThisRequest);
+        return result;
+      } catch (error) {
+        lastError = error;
+        if (!isNodeLevelFailure(error)) throw error;
+        this.markFailure(node, error);
+        failedThisRequest.add(node.spec.id);
+        console.warn(
+          `[db-cluster] node "${node.spec.label}" failed (${nodeFailureMessage(error)}); trying the next node`
+        );
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("[db-cluster] every configured database node failed");
+  }
+  /**
+   * Replay a committed write on the other nodes.
+   *
+   * Failures never surface to the caller: the primary already committed, so
+   * throwing here would report a failure for a write that actually happened.
+   * They are recorded per node and shown in the admin health panel instead.
+   */
+  async replicate(sql, params, source, failedThisRequest) {
+    if (this.policy.syncMode !== "write-through") return;
+    const targets = this.nodes.filter(
+      (node) => node !== source && node.downUntil <= Date.now() && !failedThisRequest.has(node.spec.id)
+    );
+    if (targets.length === 0) return;
+    const apply = async (node) => {
+      try {
+        await this.runOnNode(node, sql, params, "run");
+        this.markOk(node);
+      } catch (error) {
+        node.syncErrors += 1;
+        node.lastSyncError = nodeFailureMessage(error);
+        if (isNodeLevelFailure(error)) this.markFailure(node, error);
+        console.warn(
+          `[db-cluster] replica "${node.spec.label}" fell behind (${nodeFailureMessage(error)}). The primary write is kept; re-sync this node from the primary.`
+        );
+      }
+    };
+    if (this.policy.syncAsync) {
+      void Promise.allSettled(targets.map(apply));
+      return;
+    }
+    await Promise.allSettled(targets.map(apply));
+  }
+  prepare(sql) {
+    return new ClusterStatement(this, sql);
+  }
+  async batch(statements) {
+    const entries = statements.map((statement) => {
+      const clusterStatement = statement;
+      if (typeof clusterStatement.getSql !== "function") {
+        throw new Error("[db-cluster] batch() received a statement that was not created by this adapter");
+      }
+      return { sql: clusterStatement.getSql(), params: clusterStatement.getParams() };
+    });
+    const candidates = this.candidates("write");
+    let lastError = null;
+    const failedThisRequest = /* @__PURE__ */ new Set();
+    for (const node of candidates) {
+      try {
+        const local = entries.map((entry) => {
+          const statement = node.db.prepare(entry.sql);
+          if (entry.params.length > 0) statement.bind(...entry.params);
+          return statement;
+        });
+        const results = await node.db.batch(local);
+        this.markOk(node);
+        await this.replicateBatch(entries, node, failedThisRequest);
+        return results;
+      } catch (error) {
+        lastError = error;
+        if (!isNodeLevelFailure(error)) throw error;
+        this.markFailure(node, error);
+        failedThisRequest.add(node.spec.id);
+        console.warn(`[db-cluster] batch on "${node.spec.label}" failed; trying the next node`);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("[db-cluster] every configured database node failed");
+  }
+  /** Same contract as replicate(), for a transactional batch. */
+  async replicateBatch(entries, source, failedThisRequest) {
+    if (this.policy.syncMode !== "write-through") return;
+    const targets = this.nodes.filter(
+      (node) => node !== source && node.downUntil <= Date.now() && !failedThisRequest.has(node.spec.id)
+    );
+    if (targets.length === 0) return;
+    const apply = async (node) => {
+      try {
+        const local = entries.map((entry) => {
+          const statement = node.db.prepare(entry.sql);
+          if (entry.params.length > 0) statement.bind(...entry.params);
+          return statement;
+        });
+        await node.db.batch(local);
+        this.markOk(node);
+      } catch (error) {
+        node.syncErrors += 1;
+        node.lastSyncError = nodeFailureMessage(error);
+        if (isNodeLevelFailure(error)) this.markFailure(node, error);
+        console.warn(
+          `[db-cluster] replica "${node.spec.label}" rejected a replayed batch (${nodeFailureMessage(error)})`
+        );
+      }
+    };
+    if (this.policy.syncAsync) {
+      void Promise.allSettled(targets.map(apply));
+      return;
+    }
+    await Promise.allSettled(targets.map(apply));
+  }
+  async close() {
+    await Promise.allSettled(this.nodes.map((node) => node.db.close()));
+  }
+};
+function isMySqlClusterDatabase(db) {
+  return !!db && typeof db === "object" && db.clusterNodes !== void 0;
+}
+
 // src/services/storage-factory.ts
 init_storage_mysql();
 var cached = null;
-function cacheKeyFor(config) {
+function cacheKeyFor(cluster) {
   return JSON.stringify([
-    config.mode,
-    config.host,
-    config.port,
-    config.user,
-    config.database,
-    config.ssl,
-    config.connectionLimit,
-    config.password
+    cluster.source,
+    cluster.nodes.map((node) => [
+      node.id,
+      node.role,
+      node.priority,
+      node.host,
+      node.port,
+      node.user,
+      node.database,
+      node.ssl,
+      node.connectionLimit,
+      node.password
+    ]),
+    cluster.policy
   ]);
 }
+function toSpecs(cluster) {
+  return cluster.nodes.map((node) => ({
+    id: node.id,
+    label: node.label,
+    role: node.role,
+    priority: node.priority,
+    host: node.host,
+    port: node.port,
+    user: node.user,
+    password: node.password,
+    database: node.database,
+    ssl: node.ssl,
+    connectionLimit: node.connectionLimit,
+    connectTimeoutMs: 1e4
+  }));
+}
 async function getDatabase(env) {
-  const config = await resolveDbConfig(env);
-  if (config.mode !== "mysql") {
+  const cluster = await resolveDbCluster(env);
+  if (cluster.mode !== "mysql" || cluster.nodes.length === 0) {
     return env.DB;
   }
-  const cacheKey2 = cacheKeyFor(config);
+  const cacheKey2 = cacheKeyFor(cluster);
   if (cached && cached.cacheKey === cacheKey2) {
     return cached.db;
   }
   if (cached && isMySqlDatabase(cached.db)) {
     await cached.db.close();
   }
-  const db = new MySqlDatabase({
-    host: config.host,
-    port: config.port,
-    user: config.user,
-    password: config.password,
-    database: config.database,
-    ssl: config.ssl,
-    connectionLimit: config.connectionLimit,
-    connectTimeoutMs: 1e4
-  });
+  const db = new MySqlClusterDatabase(toSpecs(cluster), cluster.policy);
   cached = { cacheKey: cacheKey2, db };
   return cached.db;
 }
@@ -36008,14 +36518,18 @@ async function getDatabaseStatus(env) {
   let source = "d1";
   let cacheKey2 = "d1";
   try {
-    const config = await resolveDbConfig(env);
-    mode = config.mode;
-    source = config.source;
-    cacheKey2 = [config.mode, config.host, config.port, config.database].join("|");
+    const cluster = await resolveDbCluster(env);
+    mode = cluster.mode;
+    source = cluster.source;
+    cacheKey2 = [
+      cluster.mode,
+      cluster.source,
+      cluster.nodes.map((node) => `${node.id}:${node.host}:${node.port}/${node.database}`).join(",")
+    ].join("|");
     if (statusCache && statusCache.key === cacheKey2 && Date.now() - statusCache.at < STATUS_CACHE_MS) {
       return statusCache.value;
     }
-    if (config.mode === "d1" && !env.DB) {
+    if (cluster.mode === "d1" && !env.DB) {
       const missing = {
         mode: "d1",
         source: "d1",
@@ -36026,9 +36540,18 @@ async function getDatabaseStatus(env) {
       return missing;
     }
     const db = await getDatabase(env);
-    if (config.mode === "mysql") {
+    if (cluster.mode === "mysql") {
       const row = await db.prepare("SELECT VERSION() AS version").first();
-      const status2 = { mode: "mysql", source: config.source, ok: true, version: row?.version };
+      const nodes = db.nodeHealth?.();
+      const degraded = !!nodes?.some((node) => node.role !== "primary" && node.syncErrors > 0);
+      const status2 = {
+        mode: "mysql",
+        source: cluster.source,
+        ok: true,
+        version: row?.version,
+        nodes,
+        degraded
+      };
       statusCache = { key: cacheKey2, at: Date.now(), value: status2 };
       return status2;
     }
@@ -36045,22 +36568,162 @@ async function getDatabaseStatus(env) {
     };
   }
 }
+function peekClusterHealth() {
+  const db = cached?.db;
+  return db?.nodeHealth?.() ?? null;
+}
+
+// src/services/db-cluster-sync.ts
+var SYNC_DEFAULTS = {
+  chunkSize: 200,
+  maxRowsPerTable: 2e4,
+  maxDurationMs: 45e3
+};
+function quoteIdent(name) {
+  return `\`${name.replace(/`/g, "``")}\``;
+}
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+async function discoverTables(db) {
+  const result = await db.prepare(
+    "SELECT TABLE_NAME AS name FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME"
+  ).all();
+  return (result.results ?? []).map((row) => String(row.name ?? "")).filter((name) => name.length > 0);
+}
+async function discoverColumns(db, table) {
+  const result = await db.prepare(
+    "SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND (EXTRA IS NULL OR EXTRA NOT LIKE '%GENERATED%') ORDER BY ORDINAL_POSITION"
+  ).bind(table).all();
+  return (result.results ?? []).map((row) => String(row.name ?? "")).filter((name) => name.length > 0);
+}
+function buildUpsertSql(table, columns, rowCount) {
+  const columnList = columns.map(quoteIdent).join(", ");
+  const rowPlaceholder = `(${columns.map(() => "?").join(", ")})`;
+  const values = Array.from({ length: rowCount }, () => rowPlaceholder).join(", ");
+  const updates = columns.map((column) => `${quoteIdent(column)} = VALUES(${quoteIdent(column)})`).join(", ");
+  return `INSERT INTO ${quoteIdent(table)} (${columnList}) VALUES ${values} ON DUPLICATE KEY UPDATE ${updates}`;
+}
+async function syncTable(source, target, table, options = {}, startedAt = Date.now()) {
+  const chunkSize = Math.max(1, options.chunkSize ?? SYNC_DEFAULTS.chunkSize);
+  const maxRows = Math.max(1, options.maxRowsPerTable ?? SYNC_DEFAULTS.maxRowsPerTable);
+  const maxDurationMs = Math.max(1e3, options.maxDurationMs ?? SYNC_DEFAULTS.maxDurationMs);
+  const result = { table, columns: 0, rowsRead: 0, rowsWritten: 0, truncated: false };
+  try {
+    const columns = await discoverColumns(source, table);
+    if (columns.length === 0) {
+      result.error = "no readable columns (table missing on the source?)";
+      return result;
+    }
+    result.columns = columns.length;
+    const selectList = columns.map(quoteIdent).join(", ");
+    let offset = 0;
+    for (; ; ) {
+      if (result.rowsRead >= maxRows) {
+        result.truncated = true;
+        return result;
+      }
+      if (Date.now() - startedAt > maxDurationMs) {
+        result.truncated = true;
+        return result;
+      }
+      const limit = Math.min(chunkSize, maxRows - result.rowsRead);
+      const rows = await source.prepare(`SELECT ${selectList} FROM ${quoteIdent(table)} ORDER BY 1 LIMIT ${limit} OFFSET ${offset}`).all();
+      const batch = rows.results ?? [];
+      if (batch.length === 0) return result;
+      const params = [];
+      for (const row of batch) {
+        for (const column of columns) params.push(row[column] ?? null);
+      }
+      await target.prepare(buildUpsertSql(table, columns, batch.length)).bind(...params).run();
+      result.rowsRead += batch.length;
+      result.rowsWritten += batch.length;
+      offset += batch.length;
+      if (batch.length < limit) return result;
+    }
+  } catch (error) {
+    result.error = errorMessage(error);
+    return result;
+  }
+}
+async function syncDatabase(source, target, options = {}) {
+  const startedAt = Date.now();
+  let tables;
+  try {
+    tables = options.tables ?? await discoverTables(source);
+  } catch (error) {
+    return {
+      ok: false,
+      tables: [{ table: "*", columns: 0, rowsRead: 0, rowsWritten: 0, truncated: false, error: errorMessage(error) }],
+      rowsRead: 0,
+      rowsWritten: 0,
+      truncated: false,
+      durationMs: Date.now() - startedAt
+    };
+  }
+  const results = [];
+  for (const table of tables) {
+    results.push(await syncTable(source, target, table, options, Date.now()));
+  }
+  const rowsRead = results.reduce((sum, entry) => sum + entry.rowsRead, 0);
+  const rowsWritten = results.reduce((sum, entry) => sum + entry.rowsWritten, 0);
+  return {
+    ok: results.every((entry) => !entry.error),
+    tables: results,
+    rowsRead,
+    rowsWritten,
+    truncated: results.some((entry) => entry.truncated),
+    durationMs: Date.now() - startedAt
+  };
+}
 
 // src/services/db-lifecycle.ts
 init_storage();
-var initializedKey = null;
+var initializedKeys = /* @__PURE__ */ new Set();
 var dbInitError = null;
 var initPromises = /* @__PURE__ */ new Map();
 function getDbInitError() {
   return dbInitError;
 }
 function resetDbLifecycle() {
-  initializedKey = null;
+  initializedKeys.clear();
   dbInitError = null;
   initPromises.clear();
 }
 function attachDatabase(env, db) {
   env.DB = db;
+}
+function schemaTargets(db) {
+  if (isMySqlClusterDatabase(db)) {
+    return db.nodeDatabases().map((node, index) => ({
+      key: StorageService.schemaKeyFor(node.db),
+      db: node.db,
+      isPrimary: index === 0
+    }));
+  }
+  return [{ key: StorageService.schemaKeyFor(db), db, isPrimary: true }];
+}
+async function initializeTarget(target) {
+  if (initializedKeys.has(target.key)) return;
+  let pending = initPromises.get(target.key);
+  if (!pending) {
+    pending = (async () => {
+      await new StorageService(target.db).initializeDatabase();
+      initializedKeys.add(target.key);
+      if (target.isPrimary) dbInitError = null;
+    })().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (target.isPrimary) dbInitError = message;
+      console.error(
+        `[db-lifecycle] schema init failed for ${target.key}${target.isPrimary ? " (primary)" : " (standby)"}:`,
+        error
+      );
+    }).finally(() => {
+      initPromises.delete(target.key);
+    });
+    initPromises.set(target.key, pending);
+  }
+  await pending;
 }
 async function ensureDatabaseInitialized(env, resolve = getDatabase) {
   let db = null;
@@ -36077,29 +36740,16 @@ async function ensureDatabaseInitialized(env, resolve = getDatabase) {
     return;
   }
   attachDatabase(env, db);
-  const schemaKey = StorageService.schemaKeyFor(db);
-  if (initializedKey === schemaKey) {
+  const targets = schemaTargets(db);
+  const alreadyInitialized = targets.every((target) => initializedKeys.has(target.key));
+  if (alreadyInitialized) {
     if (dbInitError) {
       dbInitError = null;
       console.warn("[db-lifecycle] cleared a stale database init error: the same database resolved successfully again.");
     }
     return;
   }
-  let pending = initPromises.get(schemaKey);
-  if (!pending) {
-    pending = (async () => {
-      await new StorageService(db).initializeDatabase();
-      initializedKey = schemaKey;
-      dbInitError = null;
-    })().catch((error) => {
-      dbInitError = error instanceof Error ? error.message : String(error);
-      console.error("Database initialization failed:", error);
-    }).finally(() => {
-      initPromises.delete(schemaKey);
-    });
-    initPromises.set(schemaKey, pending);
-  }
-  await pending;
+  await Promise.all(targets.map((target) => initializeTarget(target)));
 }
 
 // src/handlers/admin-db-config.ts
@@ -36234,7 +36884,18 @@ function classifyConnectionError(error) {
   if (/Unknown database/i.test(msg)) return "database";
   return "unknown";
 }
-function normalizeCandidate(body, fallback) {
+function asRecord2(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function newId() {
+  return `node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+function clampInt2(raw, fallback, min, max2) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max2, Math.max(min, Math.floor(n)));
+}
+function normalizeNodeCandidate(body, fallback, index = 0) {
   const host = String(body.host ?? fallback?.host ?? "").trim();
   const user = String(body.user ?? fallback?.user ?? "").trim();
   const database = String(body.database ?? fallback?.database ?? "").trim();
@@ -36242,26 +36903,110 @@ function normalizeCandidate(body, fallback) {
   const clearPassword = body.clearPassword === true;
   const password = clearPassword ? "" : typeof passwordRaw === "string" && passwordRaw.length > 0 ? passwordRaw : fallback?.password ?? "";
   const port = Number(body.port ?? fallback?.port ?? 3306);
-  const connectionLimit = Number(body.connectionLimit ?? fallback?.connectionLimit ?? 5);
-  const ssl = body.ssl === void 0 ? fallback?.ssl !== false : !!body.ssl;
-  if (!host) return { config: fallback ?? { version: 1, mode: "d1" }, error: "host is required" };
-  if (!user) return { config: fallback ?? { version: 1, mode: "d1" }, error: "user is required" };
-  if (!database) return { config: fallback ?? { version: 1, mode: "d1" }, error: "database is required" };
+  const id = String(body.id ?? fallback?.id ?? "").trim() || newId();
+  const role = body.role === "replica" ? "replica" : body.role === "primary" ? "primary" : fallback?.role ?? "primary";
+  const empty = {
+    id,
+    label: String(body.label ?? fallback?.label ?? (index === 0 ? "\u4E3B\u5E93" : `\u8282\u70B9 ${index + 1}`)).trim(),
+    role,
+    priority: clampInt2(body.priority ?? fallback?.priority, index + 1, 1, 99),
+    enabled: body.enabled === void 0 ? fallback?.enabled ?? true : body.enabled !== false,
+    host,
+    port: Number.isFinite(port) ? Math.floor(port) : 3306,
+    user,
+    password,
+    database,
+    ssl: body.ssl === void 0 ? fallback?.ssl !== false : !!body.ssl,
+    connectionLimit: clampInt2(
+      body.connectionLimit ?? fallback?.connectionLimit,
+      5,
+      CLUSTER_LIMITS.minConnectionLimit,
+      CLUSTER_LIMITS.maxConnectionLimit
+    )
+  };
+  if (!host && empty.enabled) return { node: empty, error: `\u8282\u70B9 ${index + 1}\uFF1Ahost is required` };
+  if (empty.enabled && !user) return { node: empty, error: `\u8282\u70B9 ${index + 1}\uFF1Auser is required` };
+  if (empty.enabled && !database) return { node: empty, error: `\u8282\u70B9 ${index + 1}\uFF1Adatabase is required` };
   if (!Number.isFinite(port) || port <= 0 || port > 65535) {
-    return { config: fallback ?? { version: 1, mode: "d1" }, error: "invalid port" };
+    return { node: empty, error: `\u8282\u70B9 ${index + 1}\uFF1Ainvalid port` };
   }
-  return {
-    config: {
-      version: 1,
-      mode: "mysql",
-      host,
-      port: Math.floor(port),
-      user,
-      password,
-      database,
-      ssl,
-      connectionLimit: Number.isFinite(connectionLimit) && connectionLimit > 0 ? Math.floor(connectionLimit) : 5
+  return { node: empty };
+}
+function looksLikeLegacyBody(body) {
+  return !Array.isArray(body.nodes) && typeof body.host === "string";
+}
+function normalizeClusterCandidate(body, stored) {
+  const fallbackNodes = stored?.nodes ?? [];
+  const rawNodes = looksLikeLegacyBody(body) ? [body] : body.nodes;
+  if (!Array.isArray(rawNodes) || rawNodes.length === 0) {
+    return {
+      cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+      error: "at least one database node is required"
+    };
+  }
+  if (rawNodes.length > CLUSTER_LIMITS.maxNodes) {
+    return {
+      cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+      error: `at most ${CLUSTER_LIMITS.maxNodes} database nodes are supported`
+    };
+  }
+  const nodes = [];
+  const seenIds = /* @__PURE__ */ new Set();
+  for (const [index, rawNode] of rawNodes.entries()) {
+    const record = asRecord2(rawNode) ?? {};
+    const id = String(record.id ?? "").trim();
+    const fallback = id ? fallbackNodes.find((node2) => node2.id === id) : looksLikeLegacyBody(body) ? fallbackNodes[0] : void 0;
+    const { node, error } = normalizeNodeCandidate(record, fallback, index);
+    if (error) {
+      return {
+        cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+        error
+      };
     }
+    if (seenIds.has(node.id)) {
+      return {
+        cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+        error: `duplicate node id: ${node.id}`
+      };
+    }
+    seenIds.add(node.id);
+    nodes.push(node);
+  }
+  const enabled = nodes.filter((node) => node.enabled);
+  if (enabled.length === 0) {
+    return {
+      cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+      error: "at least one node must be enabled"
+    };
+  }
+  const primaries = enabled.filter((node) => node.role === "primary");
+  if (primaries.length === 0) {
+    return {
+      cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+      error: "one node must be the primary"
+    };
+  }
+  if (primaries.length > 1) {
+    return {
+      cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+      error: "only one node may be the primary"
+    };
+  }
+  const policy = body.policy === void 0 && stored ? stored.policy : normalizePolicy(body.policy);
+  return { cluster: { version: 2, mode: "mysql", nodes, policy } };
+}
+async function probeNode(node, env) {
+  const result = await testMySqlConnection(node, env);
+  return {
+    id: node.id,
+    label: node.label,
+    role: node.role,
+    ok: result.ok,
+    latencyMs: result.latencyMs,
+    version: result.version,
+    schemaState: result.schemaState,
+    error: result.error,
+    errorKind: result.errorKind
   };
 }
 async function testMySqlConnection(config, env) {
@@ -36322,33 +37067,53 @@ async function testMySqlConnection(config, env) {
 async function handleAdminGetDbConfig(request, env, actorUser) {
   void request;
   void actorUser;
+  const cluster = await resolveDbCluster(env);
   const resolved = await resolveDbConfig(env);
+  const health = peekClusterHealth();
   return jsonResponse({
+    cluster: maskCluster(cluster),
+    // Compatibility: the previous UI read `config` for a single connection.
     config: maskConfig(resolved),
+    health: health ?? [],
     runtimeConfigStored: !!await loadRuntimeConfig(env),
     configStoreAvailable: hasConfigStore(env),
-    envOverrideActive: !!resolveDbConfigFromEnv(env)
+    envOverrideActive: !!resolveDbConfigFromEnv(env),
+    limits: CLUSTER_LIMITS,
+    defaultPolicy: DEFAULT_CLUSTER_POLICY
   });
 }
 async function handleAdminTestDbConfig(request, env, actorUser) {
   void actorUser;
   const body = await readJsonBody3(request);
   const stored = await loadRuntimeConfig(env);
-  const resolved = await resolveDbConfig(env);
-  const fallback = stored ?? (resolved.mode === "mysql" ? {
-    version: 1,
-    mode: "mysql",
-    host: resolved.host,
-    port: resolved.port,
-    user: resolved.user,
-    password: resolved.password,
-    database: resolved.database,
-    ssl: resolved.ssl,
-    connectionLimit: resolved.connectionLimit
+  const resolved = await resolveDbCluster(env);
+  const storedFallbackFor = (id) => (id ? stored?.nodes.find((node2) => node2.id === id) : void 0) ?? (resolved.nodes[0] ? {
+    ...resolved.nodes[0],
+    id: resolved.nodes[0].id
   } : null);
-  const { config, error } = normalizeCandidate(body, fallback);
+  const single = asRecord2(body.node);
+  const list = Array.isArray(body.nodes) ? body.nodes : null;
+  if (single) {
+    const id = typeof single.id === "string" ? single.id : void 0;
+    const { node: node2, error: error2 } = normalizeNodeCandidate(single, storedFallbackFor(id), 0);
+    if (error2) return errorResponse(error2, 400);
+    const result2 = await probeNode(node2, env);
+    return jsonResponse({ ...result2, ok: result2.ok }, result2.ok ? 200 : 502);
+  }
+  if (list && list.length > 0) {
+    const candidates = list.map((raw, index) => {
+      const record = asRecord2(raw) ?? {};
+      const id = typeof record.id === "string" ? record.id : void 0;
+      return normalizeNodeCandidate(record, storedFallbackFor(id), index);
+    });
+    const invalid = candidates.find((entry) => entry.error);
+    if (invalid) return errorResponse(invalid.error ?? "invalid node", 400);
+    const results = await Promise.all(candidates.map((entry) => probeNode(entry.node, env)));
+    return jsonResponse({ ok: results.every((result2) => result2.ok), results }, results.every((r) => r.ok) ? 200 : 502);
+  }
+  const { node, error } = normalizeNodeCandidate(body, storedFallbackFor(void 0), 0);
   if (error) return errorResponse(error, 400);
-  const result = await testMySqlConnection(config, env);
+  const result = await probeNode(node, env);
   return jsonResponse(result, result.ok ? 200 : 502);
 }
 async function bootstrapSchemaOnCandidate(config) {
@@ -36399,28 +37164,46 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
     return jsonResponse({ ok: true, mode: "d1", effective: true });
   }
   const stored = await loadRuntimeConfig(env);
-  const { config, error } = normalizeCandidate(body, stored);
+  const { cluster, error } = normalizeClusterCandidate(body, stored);
   if (error) return errorResponse(error, 400);
-  const test = await testMySqlConnection(config, env);
-  if (!test.ok) {
-    return jsonResponse({ ok: false, error: test.error ?? "connection test failed", errorKind: test.errorKind }, 502);
+  const enabled = cluster.nodes.filter((node) => node.enabled);
+  const probes = await Promise.all(enabled.map((node) => probeNode(node, env)));
+  const failedProbe = probes.find((result) => !result.ok);
+  if (failedProbe) {
+    return jsonResponse(
+      {
+        ok: false,
+        saved: false,
+        error: `\u8282\u70B9\u300C${failedProbe.label}\u300D\u8FDE\u63A5\u5931\u8D25\uFF1A${failedProbe.error ?? "unknown error"}`,
+        errorKind: failedProbe.errorKind ?? "connection",
+        nodes: probes
+      },
+      502
+    );
   }
-  if (test.schemaState !== "ready") {
-    const bootstrap = await bootstrapSchemaOnCandidate(config);
-    if (!bootstrap.ok) {
-      return jsonResponse(
-        {
-          ok: false,
-          saved: false,
-          error: `Connected, but creating the schema failed, so the configuration was NOT saved and the current database is still in use. Grant CREATE/ALTER/INDEX on this schema (or import the schema manually).`,
-          schemaError: bootstrap.error,
-          errorKind: "schema"
-        },
-        502
-      );
-    }
+  const bootstraps = await Promise.all(
+    enabled.map(async (node) => {
+      const probe = probes.find((result2) => result2.id === node.id);
+      if (probe?.schemaState === "ready") return { id: node.id, label: node.label, ok: true };
+      const result = await bootstrapSchemaOnCandidate(node);
+      return { id: node.id, label: node.label, ok: result.ok, error: result.error };
+    })
+  );
+  const failedBootstrap = bootstraps.find((result) => !result.ok);
+  if (failedBootstrap) {
+    return jsonResponse(
+      {
+        ok: false,
+        saved: false,
+        error: `\u8282\u70B9\u300C${failedBootstrap.label}\u300D\u8FDE\u63A5\u6210\u529F\uFF0C\u4F46\u5EFA\u8868\u5931\u8D25\uFF0C\u914D\u7F6E\u672A\u4FDD\u5B58\uFF0C\u5F53\u524D\u6570\u636E\u5E93\u4ECD\u5728\u6B63\u5E38\u4F7F\u7528\u3002\u8BF7\u4E3A\u8BE5\u5E93\u8D26\u53F7\u6388\u4E88 CREATE/ALTER/INDEX \u6743\u9650\uFF08\u6216\u624B\u52A8\u5BFC\u5165\u8868\u7ED3\u6784\uFF09\u540E\u91CD\u8BD5\u3002`,
+        schemaError: failedBootstrap.error,
+        errorKind: "schema",
+        nodes: probes
+      },
+      502
+    );
   }
-  const saved = await saveRuntimeConfig(env, config);
+  const saved = await saveRuntimeConfig(env, cluster);
   if (!saved && !hasConfigStore(env)) {
     return errorResponse(
       "No config store available. Bind SETTINGS_KV (or ATTACHMENTS) or set DB_* environment variables instead.",
@@ -36445,7 +37228,7 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
     console.error("[db-config] schema bootstrap failed after save:", initError);
   }
   const envOverride = !!resolveDbConfigFromEnv(env);
-  await auditDbConfigChange(env, actorUser, "admin.db_config.saved", config);
+  await auditDbConfigChange(env, actorUser, "admin.db_config.saved", cluster);
   return jsonResponse({
     ok: true,
     mode: "mysql",
@@ -36453,9 +37236,91 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
     effective: !envOverride && schemaReady,
     warning: envOverride ? "DB_* \u73AF\u5883\u53D8\u91CF\u4F18\u5148\u4E8E\u8FD0\u884C\u65F6\u914D\u7F6E\uFF1A\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5F53\u524D\u751F\u6548\u7684\u4ECD\u662F\u73AF\u5883\u53D8\u91CF\u6307\u5411\u7684\u6570\u636E\u5E93\u3002" : schemaError ? `\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5EFA\u8868\u5931\u8D25\uFF1A${schemaError}` : void 0,
     schemaReady,
-    latencyMs: test.latencyMs,
-    version: test.version
+    latencyMs: Math.max(...probes.map((result) => result.latencyMs), 0),
+    version: probes.find((result) => result.role === "primary")?.version,
+    nodes: probes,
+    cluster: maskCluster({
+      mode: "mysql",
+      source: "runtime",
+      nodes: cluster.nodes.map((node) => ({ ...node, source: "runtime" })),
+      policy: cluster.policy
+    })
   });
+}
+async function handleAdminSyncDbCluster(request, env, actorUser) {
+  const body = await readJsonBody3(request);
+  const requested = Array.isArray(body.targetIds) ? body.targetIds.map((id) => String(id)) : null;
+  const cluster = await resolveDbCluster(env);
+  if (cluster.mode !== "mysql" || cluster.nodes.length === 0) {
+    return errorResponse("\u5F53\u524D\u6CA1\u6709\u914D\u7F6E\u5916\u63A5 MySQL \u8282\u70B9\uFF0C\u65E0\u9700\u540C\u6B65\u3002", 400);
+  }
+  if (cluster.policy.syncMode !== "write-through") {
+    return errorResponse(
+      "\u5F53\u524D\u526F\u5E93\u540C\u6B65\u65B9\u5F0F\u662F\u300C\u6570\u636E\u5E93\u81EA\u8EAB\u590D\u5236\u300D\uFF0C\u6570\u636E\u7531\u6570\u636E\u5E93\u8D1F\u8D23\uFF0C\u5E94\u7528\u5C42\u4E0D\u9700\u8981\u4E5F\u4E0D\u5E94\u8BE5\u5199\u5165\u526F\u5E93\u3002\u5982\u9700\u5E94\u7528\u5C42\u53CC\u5199\uFF0C\u8BF7\u5148\u5207\u6362\u5230\u300C\u5E94\u7528\u5C42\u5B9E\u65F6\u53CC\u5199\u300D\u5E76\u4FDD\u5B58\u3002",
+      400
+    );
+  }
+  const db = await getDatabase(env);
+  if (!isMySqlClusterDatabase(db)) {
+    return errorResponse("\u5F53\u524D\u6570\u636E\u5E93\u4E0D\u662F MySQL \u96C6\u7FA4\uFF0C\u65E0\u6CD5\u540C\u6B65\u3002", 400);
+  }
+  const handles = db.nodeDatabases();
+  const primaryId = primaryNodeOf(cluster)?.id;
+  const primary = handles.find((node) => node.id === primaryId) ?? handles[0];
+  if (!primary) return errorResponse("\u627E\u4E0D\u5230\u4E3B\u5E93\u8282\u70B9\u3002", 400);
+  const targets = handles.filter(
+    (node) => node.id !== primary.id && (!requested || requested.includes(node.id))
+  );
+  if (targets.length === 0) {
+    return errorResponse("\u6CA1\u6709\u53EF\u540C\u6B65\u7684\u526F\u5E93\u8282\u70B9\uFF08\u8BF7\u5148\u6DFB\u52A0\u5E76\u542F\u7528\u526F\u5E93\uFF09\u3002", 400);
+  }
+  const deadline = Date.now() + 9e4;
+  const reports = [];
+  for (const target of targets) {
+    const spec = cluster.nodes.find((node) => node.id === target.id);
+    const remaining = deadline - Date.now();
+    if (remaining < 3e3) {
+      reports.push({
+        id: target.id,
+        label: spec?.label ?? target.id,
+        ok: false,
+        rowsRead: 0,
+        rowsWritten: 0,
+        truncated: false,
+        durationMs: 0,
+        tables: [],
+        error: "\u65F6\u95F4\u9884\u7B97\u5DF2\u7528\u5B8C\uFF0C\u8BE5\u8282\u70B9\u672C\u6B21\u672A\u540C\u6B65\uFF0C\u8BF7\u7A0D\u540E\u5355\u72EC\u91CD\u8BD5\u3002"
+      });
+      continue;
+    }
+    const result = await syncDatabase(primary.db, target.db, { maxDurationMs: Math.min(45e3, remaining) });
+    reports.push({
+      id: target.id,
+      label: spec?.label ?? target.id,
+      ok: result.ok,
+      rowsRead: result.rowsRead,
+      rowsWritten: result.rowsWritten,
+      truncated: result.truncated,
+      durationMs: result.durationMs,
+      tables: result.tables
+    });
+  }
+  const ok = reports.every((report) => report.ok);
+  await auditDbConfigChange(env, actorUser, "admin.db_config.synced", {
+    version: 2,
+    mode: "mysql",
+    nodes: cluster.nodes.map((node) => ({ ...node })),
+    policy: cluster.policy
+  });
+  return jsonResponse(
+    {
+      ok,
+      targets: reports,
+      rowsWritten: reports.reduce((sum, report) => sum + report.rowsWritten, 0),
+      truncated: reports.some((report) => report.truncated)
+    },
+    ok ? 200 : 502
+  );
 }
 async function handleAdminClearDbConfig(request, env, actorUser) {
   if (clearingWouldLeaveNoDatabase(env) && !wantsForce(request)) {
@@ -36470,9 +37335,10 @@ async function handleAdminClearDbConfig(request, env, actorUser) {
   await auditDbConfigChange(env, actorUser, "admin.db_config.cleared", null);
   return jsonResponse({ ok: true, mode: "d1" });
 }
-async function auditDbConfigChange(env, actorUser, action, config) {
+async function auditDbConfigChange(env, actorUser, action, cluster) {
   if (!env.DB) return;
-  const target = config ? `${config.host}:${config.port ?? 3306}/${config.database ?? ""}` : "d1";
+  const primary = cluster?.nodes.find((node) => node.role === "primary" && node.enabled);
+  const target = primary ? `${primary.host}:${primary.port}/${primary.database}${cluster.nodes.length > 1 ? ` (+${cluster.nodes.length - 1})` : ""}` : "d1";
   try {
     await writeAuditEvent(new StorageService(env.DB), {
       actorUserId: actorUser.id,
@@ -36481,7 +37347,13 @@ async function auditDbConfigChange(env, actorUser, action, config) {
       level: "security",
       targetType: "database",
       targetId: target,
-      metadata: { destinationName: target, destinationType: config ? "mysql" : "d1", status: "ok" }
+      metadata: {
+        destinationName: target,
+        destinationType: cluster ? "mysql" : "d1",
+        status: "ok",
+        nodeCount: cluster?.nodes.length ?? 0,
+        syncMode: cluster?.policy.syncMode
+      }
     });
   } catch (error) {
     console.error("[db-config] audit write failed:", error);
@@ -36491,7 +37363,7 @@ async function auditDbConfigChange(env, actorUser, action, config) {
 // src/router-admin.ts
 init_response();
 function isKnownAdminPath(path2) {
-  return path2 === "/api/admin/users" || path2 === "/api/admin/logs" || path2 === "/api/admin/logs/settings" || path2 === "/api/admin/invites" || path2 === "/api/admin/db-config" || path2 === "/api/admin/db-config/test" || path2.startsWith("/api/admin/backup") || /^\/api\/admin\/invites\/[^/]+$/i.test(path2) || /^\/api\/admin\/users\/[a-f0-9-]+(?:\/status)?$/i.test(path2);
+  return path2 === "/api/admin/users" || path2 === "/api/admin/logs" || path2 === "/api/admin/logs/settings" || path2 === "/api/admin/invites" || path2 === "/api/admin/db-config" || path2 === "/api/admin/db-config/test" || path2 === "/api/admin/db-config/sync" || path2.startsWith("/api/admin/backup") || /^\/api\/admin\/invites\/[^/]+$/i.test(path2) || /^\/api\/admin\/users\/[a-f0-9-]+(?:\/status)?$/i.test(path2);
 }
 function isActiveAdmin(user) {
   return user.role === "admin" && user.status === "active";
@@ -36525,6 +37397,9 @@ async function handleAdminRoute(request, env, actorUser, path2, method) {
   }
   if (path2 === "/api/admin/db-config/test" && method === "POST") {
     return handleAdminTestDbConfig(request, env, actorUser);
+  }
+  if (path2 === "/api/admin/db-config/sync" && method === "POST") {
+    return handleAdminSyncDbCluster(request, env, actorUser);
   }
   const adminBackupResponse = await handleAdminBackupRoute(request, env, actorUser, path2, method);
   if (adminBackupResponse) return adminBackupResponse;
