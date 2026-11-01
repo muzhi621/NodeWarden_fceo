@@ -193,6 +193,11 @@ export async function startS3Server(options: S3ServerOptions): Promise<S3TestSer
         const prefix = params.get('prefix') ?? '';
         const delimiter = params.get('delimiter') ?? '';
         const token = params.get('continuation-token') ?? '';
+        // Real S3 percent-encodes keys and prefixes when the client asks for
+        // encoding-type=url, which is the only way a key containing '&' or '<'
+        // survives an XML parser. Mirror it so the client's decoding is tested.
+        const encodingType = params.get('encoding-type') === 'url' ? 'url' : '';
+        const encodeForList = (value: string) => (encodingType ? encodeURIComponent(value) : xmlEscape(value));
         const allKeys = [...objects.keys()].filter((name) => name.startsWith(prefix)).sort();
         const start = token ? Number(Buffer.from(token, 'base64').toString('utf8')) : 0;
         const pageSize = options.pageSize ?? 1000;
@@ -201,7 +206,7 @@ export async function startS3Server(options: S3ServerOptions): Promise<S3TestSer
           .map((name) => {
             const record = objects.get(name)!;
             return (
-              `<Contents><Key>${xmlEscape(name)}</Key><LastModified>2026-01-01T00:00:00.000Z</LastModified>` +
+              `<Contents><Key>${encodeForList(name)}</Key><LastModified>2026-01-01T00:00:00.000Z</LastModified>` +
               `<ETag>"x"</ETag><Size>${record.body.byteLength}</Size><StorageClass>STANDARD</StorageClass></Contents>`
             );
           })
@@ -219,13 +224,14 @@ export async function startS3Server(options: S3ServerOptions): Promise<S3TestSer
                   .filter((value): value is string => !!value)
               ),
             ]
-              .map((value) => `<CommonPrefixes><Prefix>${xmlEscape(value)}</Prefix></CommonPrefixes>`)
+              .map((value) => `<CommonPrefixes><Prefix>${encodeForList(value)}</Prefix></CommonPrefixes>`)
               .join('')
           : '';
         const xml =
           `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
-          `<Name>${xmlEscape(bucket)}</Name><Prefix>${xmlEscape(prefix)}</Prefix><KeyCount>${page.length}</KeyCount>` +
+          `<Name>${xmlEscape(bucket)}</Name><Prefix>${encodeForList(prefix)}</Prefix><KeyCount>${page.length}</KeyCount>` +
           `<MaxKeys>${pageSize}</MaxKeys>${nextToken ? `<IsTruncated>true</IsTruncated>` : '<IsTruncated>false</IsTruncated>'}` +
+          `${encodingType ? `<EncodingType>url</EncodingType>` : ''}` +
           `<NextContinuationToken>${nextToken}</NextContinuationToken>${contents}${commonPrefixes}</ListBucketResult>`;
         response.writeHead(200, { 'Content-Type': 'application/xml' });
         response.end(xml);

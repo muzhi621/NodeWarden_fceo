@@ -120,6 +120,25 @@ test('listing works when the root path and object names contain spaces and non-A
   );
 });
 
+test('keys containing XML metacharacters survive the listing', async () => {
+  // Without encoding-type=url the response carries a raw '&' or '<' inside
+  // <Key>; a tag-based parser then truncates the name at that point, so the
+  // file is listed under a name that does not exist and cannot be downloaded
+  // or deleted. The listing is requested with encoding-type=url and decoded.
+  await withServer(
+    async (server) => {
+      const dest = destination(server.endpoint);
+      const listing = await listRemoteBackupEntries(dest, '');
+      const names = listing.items.map((item) => item.name).sort();
+      assert.deepEqual(names, ['a&b<c>.zip', 'rock&roll.zip']);
+
+      const downloaded = await downloadRemoteBackupFile(dest, 'a&b<c>.zip');
+      assert.equal(new TextDecoder().decode(downloaded.bytes), 'x');
+    },
+    { seed: { 'nodewarden/a&b<c>.zip': 'x', 'nodewarden/rock&roll.zip': 'y' } }
+  );
+});
+
 test('listing follows continuation tokens', async () => {
   await withServer(
     async (server) => {

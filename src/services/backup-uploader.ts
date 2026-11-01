@@ -143,6 +143,23 @@ function extractXmlFirst(xml: string, tagName: string): string | null {
   return match?.[1] ? decodeXmlText(match[1].trim()) : null;
 }
 
+/**
+ * Undo `encoding-type=url` on a listing field.
+ *
+ * Object keys may contain `&` or `<`, which cannot survive a tag-based XML
+ * parser as raw text — `<Key>a&b</Key>` reads back as "a", and every download
+ * or delete after that points at a file that does not exist. Asking S3 to
+ * percent-encode the response removes the ambiguity; decode it here.
+ */
+function decodeS3UrlEncoded(value: string | null): string | null {
+  if (value === null) return null;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 async function sha256Hex(value: Uint8Array | string): Promise<string> {
   const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
   const digest = await crypto.subtle.digest('SHA-256', bytes);
@@ -693,6 +710,10 @@ async function listS3Entries(config: S3BackupDestination, relativePath: string):
     const queryPairs: Array<[string, string]> = [
       ['list-type', '2'],
       ['delimiter', '/'],
+      // Percent-encode keys in the response: otherwise a key containing '&' or
+      // '<' is indistinguishable from XML markup and the listing silently
+      // truncates it.
+      ['encoding-type', 'url'],
     ];
     if (targetPrefix) queryPairs.push(['prefix', targetPrefix]);
     if (continuationToken) queryPairs.push(['continuation-token', continuationToken]);
@@ -709,7 +730,7 @@ async function listS3Entries(config: S3BackupDestination, relativePath: string):
     const xml = await response.text();
 
     for (const prefix of extractXmlBlocks(xml, 'CommonPrefixes')) {
-      const fullPrefix = trimSlashes(extractXmlFirst(prefix, 'Prefix') || '');
+      const fullPrefix = trimSlashes(decodeS3UrlEncoded(extractXmlFirst(prefix, 'Prefix')) || '');
       if (!fullPrefix) continue;
       const relative = rootPrefix
         ? fullPrefix === rootPrefix
@@ -732,7 +753,7 @@ async function listS3Entries(config: S3BackupDestination, relativePath: string):
     }
 
     for (const content of extractXmlBlocks(xml, 'Contents')) {
-      const fullKey = trimSlashes(extractXmlFirst(content, 'Key') || '');
+      const fullKey = trimSlashes(decodeS3UrlEncoded(extractXmlFirst(content, 'Key')) || '');
       if (!fullKey || (targetPrefix && fullKey === trimSlashes(targetPrefix))) continue;
       const relative = rootPrefix
         ? fullKey.startsWith(`${rootPrefix}/`)
@@ -750,7 +771,7 @@ async function listS3Entries(config: S3BackupDestination, relativePath: string):
       });
     }
 
-    continuationToken = extractXmlFirst(xml, 'NextContinuationToken') || '';
+    continuationToken = decodeS3UrlEncoded(extractXmlFirst(xml, 'NextContinuationToken')) || '';
   } while (continuationToken);
 
   const deduped = new Map<string, RemoteBackupItem>();

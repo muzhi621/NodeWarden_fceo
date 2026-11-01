@@ -165,3 +165,129 @@ test('read errors are classified as missing vs fatal', () => {
   assert.equal(classifyReadError(Object.assign(new Error('not connected'), { code: 'ENOTCONN' })), 'fatal');
   assert.equal(classifyReadError(new Error('unknown')), 'fatal');
 });
+
+// ---------------------------------------------------------------------------
+// Streaming writes
+//
+// The upload path hands over a ReadableStream (the request body). Buffering it
+// to learn the length put a whole attachment in memory — 100 MB per upload on a
+// 0.5 GB FC instance. These tests pin the streaming behaviour and the marker
+// that replaces the length-first trick.
+// ---------------------------------------------------------------------------
+
+function streamOf(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      controller.close();
+    },
+  });
+}
+
+test('a streamed upload is written whole and reports the real size', async () => {
+  const { dir, cleanup } = await tempBucket();
+  try {
+    const bucket = createFsR2(dir);
+    const chunk = new Uint8Array(64 * 1024).fill(7);
+    const chunks = Array.from({ length: 32 }, () => chunk); // 2 MB
+    await bucket.put('cipher/big', streamOf(chunks), { httpMetadata: { contentType: 'video/mp4' } });
+
+    const object = await bucket.get('cipher/big');
+    assert.ok(object);
+    assert.equal(object!.size, 2 * 1024 * 1024);
+    const round = new Uint8Array(await new Response(object!.body).arrayBuffer());
+    assert.equal(round.byteLength, 2 * 1024 * 1024);
+    assert.equal(round[0], 7);
+    assert.equal(round[round.byteLength - 1], 7);
+
+    // The sidecar carries the size that was counted while streaming.
+    const meta = JSON.parse(await fsp.readFile(path.join(dir, 'cipher', 'big.meta.json'), 'utf8'));
+    assert.equal(meta.size, 2 * 1024 * 1024);
+    assert.equal(meta.incomplete, undefined);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a stream that dies mid-upload leaves nothing servable', async () => {
+  const { dir, cleanup } = await tempBucket();
+  try {
+    const bucket = createFsR2(dir);
+    let pulled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        if (pulled <= 2) controller.enqueue(new Uint8Array(1024).fill(1));
+        else controller.error(new Error('client went away'));
+      },
+    });
+
+    await assert.rejects(() => bucket.put('cipher/broken', body), /client went away/);
+    assert.equal(await bucket.get('cipher/broken'), null);
+    // The partial file and its marker are cleaned up, so a retry starts fresh.
+    assert.equal(fs.existsSync(path.join(dir, 'cipher', 'broken')), false);
+    assert.equal(fs.existsSync(path.join(dir, 'cipher', 'broken.meta.json')), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('an object still marked incomplete is never served, even if the size matches', async () => {
+  const { dir, cleanup } = await tempBucket();
+  try {
+    const bucket = createFsR2(dir);
+    await fsp.mkdir(path.join(dir, 'cipher'), { recursive: true });
+    // This is what a crash between "marker written" and "bytes written" (or a
+    // recycled instance) looks like: bytes on disk, upload never finished.
+    await fsp.writeFile(path.join(dir, 'cipher', 'att'), new TextEncoder().encode('0123456789'));
+    await fsp.writeFile(
+      path.join(dir, 'cipher', 'att.meta.json'),
+      JSON.stringify({ contentType: 'application/octet-stream', incomplete: true })
+    );
+
+    assert.equal(await bucket.get('cipher/att'), null);
+
+    // Re-uploading overwrites the marker and makes the object readable again.
+    await bucket.put('cipher/att', new TextEncoder().encode('done'));
+    const object = await bucket.get('cipher/att');
+    assert.ok(object);
+    assert.equal(await new Response(object!.body).text(), 'done');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('an object without a sidecar is still served (files restored by copy)', async () => {
+  const { dir, cleanup } = await tempBucket();
+  try {
+    const bucket = createFsR2(dir);
+    await fsp.mkdir(path.join(dir, 'cipher'), { recursive: true });
+    // Restoring a bucket by copying files only is a normal migration step; a
+    // missing sidecar must not turn the whole archive into 404s.
+    await fsp.writeFile(path.join(dir, 'cipher', 'att'), new TextEncoder().encode('legacy'));
+
+    const object = await bucket.get('cipher/att');
+    assert.ok(object);
+    assert.equal(await new Response(object!.body).text(), 'legacy');
+    assert.equal(object!.httpMetadata.contentType, 'application/octet-stream');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a Node Readable body is accepted as well as a web stream', async () => {
+  const { dir, cleanup } = await tempBucket();
+  try {
+    const bucket = createFsR2(dir);
+    const { Readable } = await import('node:stream');
+    await bucket.put('cipher/node-stream', Readable.from([Buffer.from('a'), Buffer.from('b')]));
+
+    const object = await bucket.get('cipher/node-stream');
+    assert.ok(object);
+    assert.equal(object!.size, 2);
+    assert.equal(await new Response(object!.body).text(), 'ab');
+  } finally {
+    await cleanup();
+  }
+});
+
