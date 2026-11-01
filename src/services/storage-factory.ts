@@ -7,8 +7,14 @@
 // implementation, so there is only one code path in production.
 
 import type { Env } from '../types';
-import { resolveDbCluster, type ResolvedDbCluster } from './db-config';
-import { MySqlClusterDatabase, type ClusterNodeSpec, type NodeHealthSnapshot } from './db-cluster';
+import {
+  readClusterWatermark,
+  resolveDbCluster,
+  saveClusterWatermark,
+  type ClusterWatermarkSnapshot,
+  type ResolvedDbCluster,
+} from './db-config';
+import { DbClusterUnavailableError, MySqlClusterDatabase, type ClusterNodeSpec, type NodeHealthSnapshot } from './db-cluster';
 import { isMySqlDatabase } from './storage-mysql';
 
 interface CachedDatabase {
@@ -68,22 +74,85 @@ function toSpecs(cluster: ResolvedDbCluster): ClusterNodeSpec[] {
 export async function getDatabase(env: Env): Promise<D1Database> {
   const cluster = await resolveDbCluster(env);
   if (cluster.mode !== 'mysql' || cluster.nodes.length === 0) {
+    // Neither branch below may end in "return env.DB" when that binding does not
+    // exist: on the Node runtime there is no D1, so the old code handed back
+    // `undefined` and every request died on `undefined.prepare(...)` with a
+    // message that named nothing the operator could act on.
+    if (cluster.unavailableReason) {
+      throw new DbClusterUnavailableError(
+        `${cluster.unavailableReason}。应用当前没有任何可用的数据库：` +
+          '请在 /admin/database 启用至少一个节点并保存，或清除配置回退到内置数据库。'
+      );
+    }
+    if (!env.DB) {
+      throw new DbClusterUnavailableError(
+        '当前运行环境没有内置数据库（D1），也没有配置外接 MySQL：' +
+          '请设置 DB_* 环境变量，或在 /admin/database 配置一个 MySQL 节点。'
+      );
+    }
     return env.DB;
   }
   const cacheKey = cacheKeyFor(cluster);
   if (cached && cached.cacheKey === cacheKey) {
+    // `syncReady` is deliberately not part of the key (it changes on every sync
+    // and rebuilding pools for that would drop live connections), so a cached
+    // adapter has to be told about it — otherwise a node synced by another
+    // instance stays out of rotation here until the process restarts (S2).
+    applySyncReadiness(cached.db, cluster);
     return cached.db;
   }
   if (cached && isMySqlDatabase(cached.db)) {
     await (cached.db as unknown as { close(): Promise<void> }).close();
   }
-  const db = new MySqlClusterDatabase(toSpecs(cluster), cluster.policy);
+  // Who was behind survives the restart; the journal does not (B1).
+  const watermark = await readClusterWatermark(env);
+  const db = new MySqlClusterDatabase(toSpecs(cluster), cluster.policy, undefined, {
+    watermark,
+    onWatermarkChange: (snapshot) => queueWatermark(env, snapshot),
+  });
   cached = { cacheKey, db: db as unknown as D1Database };
   return cached.db;
 }
 
+function applySyncReadiness(db: D1Database, cluster: ResolvedDbCluster): void {
+  const adapter = db as unknown as {
+    applySyncReadiness?: (next: Map<string, boolean | undefined>) => void;
+  };
+  adapter.applySyncReadiness?.(new Map(cluster.nodes.map((node) => [node.id, node.syncReady])));
+}
+
+// Watermark writes are coalesced: one failover marks several nodes at once, and
+// a busy write path would otherwise turn into a KV write per statement.
+let watermarkTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingWatermark: ClusterWatermarkSnapshot | null = null;
+let watermarkEnv: Env | null = null;
+
+function queueWatermark(env: Env, snapshot: ClusterWatermarkSnapshot): void {
+  pendingWatermark = snapshot;
+  watermarkEnv = env;
+  if (watermarkTimer) return;
+  const timer = setTimeout(() => {
+    watermarkTimer = null;
+    const next = pendingWatermark;
+    const target = watermarkEnv;
+    pendingWatermark = null;
+    if (!next || !target) return;
+    void saveClusterWatermark(target, next).catch((error: unknown) => {
+      console.warn('[db-cluster] could not persist the write watermark:', error);
+    });
+  }, 50);
+  (timer as unknown as { unref?: () => void }).unref?.();
+  watermarkTimer = timer;
+}
+
 /** Drop the cached pools so the next request reconnects with fresh settings. */
 export async function resetDatabaseCache(): Promise<void> {
+  if (watermarkTimer) {
+    clearTimeout(watermarkTimer);
+    watermarkTimer = null;
+  }
+  pendingWatermark = null;
+  watermarkEnv = null;
   if (cached && isMySqlDatabase(cached.db)) {
     await (cached.db as unknown as { close(): Promise<void> }).close();
   }
@@ -130,6 +199,16 @@ export async function getDatabaseStatus(env: Env): Promise<DatabaseStatus> {
       return statusCache.value;
     }
 
+    if (cluster.mode === 'd1' && cluster.unavailableReason) {
+      const unusable: DatabaseStatus = {
+        mode: 'd1',
+        source: 'd1',
+        ok: false,
+        error: `${cluster.unavailableReason}。请启用至少一个节点，或清除配置回退到内置数据库。`,
+      };
+      statusCache = { key: cacheKey, at: Date.now(), value: unusable };
+      return unusable;
+    }
     if (cluster.mode === 'd1' && !env.DB) {
       const missing: DatabaseStatus = {
         mode: 'd1',

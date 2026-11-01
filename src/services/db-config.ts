@@ -104,6 +104,16 @@ export interface ResolvedDbCluster {
   source: 'env' | 'runtime' | 'd1';
   nodes: ResolvedDbNode[];
   policy: DbClusterPolicy;
+  /**
+   * Set when the cluster is unusable *while* a config exists: every node is
+   * disabled, or a stored config resolved to nothing.
+   *
+   * Falling back to D1 silently is the dangerous part — on a Node runtime there
+   * is no D1 binding, so the app dies on `undefined.prepare()` with no hint
+   * about what the operator changed; on Workers it would quietly start using a
+   * different database. The storage factory turns this into an actionable 503.
+   */
+  unavailableReason?: string;
 }
 
 export interface MaskedDbNode {
@@ -130,6 +140,8 @@ export interface MaskedDbCluster {
   source: 'env' | 'runtime' | 'd1';
   nodes: MaskedDbNode[];
   policy: DbClusterPolicy;
+  /** Config exists but nothing is usable — see `ResolvedDbCluster`. */
+  unavailableReason?: string;
 }
 
 /**
@@ -172,6 +184,25 @@ const CONFIG_KV_KEY = 'db-config:v1';
 const SYNC_STATUS_OBJECT_KEY = '__system__/db-sync-status.json';
 const SYNC_STATUS_KV_KEY = 'db-sync-status:v1';
 
+/**
+ * Write watermark, persisted so a restart does not silently un-flag a standby
+ * that was behind (B1).
+ *
+ * Only the *relationship* is meaningful: `writeSeq` and each node's
+ * `appliedSeq` compared against it. The absolute numbers can be stale — after a
+ * restart the counters simply continue from the stored `writeSeq`, and nodes
+ * that were level stay level. The journal itself is not persisted, so a node
+ * that was behind keeps `needsFullSync` until an admin sync.
+ */
+const WATERMARK_OBJECT_KEY = '__system__/db-watermark.json';
+const WATERMARK_KV_KEY = 'db-watermark:v1';
+
+/** Shape stored by MySqlClusterDatabase.watermarkSnapshot(). */
+export interface ClusterWatermarkSnapshot {
+  writeSeq: number;
+  nodes: Record<string, number>;
+}
+
 interface StoreKeys {
   kv: string;
   object: string;
@@ -179,6 +210,7 @@ interface StoreKeys {
 
 const CONFIG_KEYS: StoreKeys = { kv: CONFIG_KV_KEY, object: CONFIG_OBJECT_KEY };
 const SYNC_STATUS_KEYS: StoreKeys = { kv: SYNC_STATUS_KV_KEY, object: SYNC_STATUS_OBJECT_KEY };
+const WATERMARK_KEYS: StoreKeys = { kv: WATERMARK_KV_KEY, object: WATERMARK_OBJECT_KEY };
 
 /** What the admin page needs to answer "is this standby ready?". */
 export interface DbNodeSyncState {
@@ -186,6 +218,15 @@ export interface DbNodeSyncState {
   at: number;
   /** Walked every table to the end and the row counts matched. */
   complete: boolean;
+  /**
+   * Which database the row counts referred to: `host|port|database`.
+   *
+   * Sync bookkeeping is keyed by node id, and the admin UI keeps that id when a
+   * node is edited (it is how the stored password is preserved). Without a
+   * fingerprint, pointing an already-synced node at a brand-new empty database
+   * left it marked ready and eligible to take over (B4).
+   */
+  fingerprint?: string;
   /** Hit a row cap / the time budget: more runs are needed. */
   truncated: boolean;
   rowsWritten: number;
@@ -197,6 +238,11 @@ export interface DbNodeSyncState {
 }
 
 export type DbSyncStates = Record<string, DbNodeSyncState>;
+
+/** Identity of the database a node points at (not of the node entry itself). */
+export function nodeFingerprint(node: { host: string; port: number; database: string }): string {
+  return `${node.host}|${node.port}|${node.database}`;
+}
 
 /**
  * Safe defaults. `native` is deliberate: two nodes configured against a real
@@ -343,7 +389,14 @@ async function writeStoredText(env: Env, keys: StoreKeys, payload: string | null
     if (payload) {
       await env.ATTACHMENTS!.put(keys.object, payload, {
         httpMetadata: { contentType: 'application/json' },
-        customMetadata: { purpose: keys === SYNC_STATUS_KEYS ? 'db-sync-status' : 'db-config' },
+        customMetadata: {
+          purpose:
+            keys.object === SYNC_STATUS_OBJECT_KEY
+              ? 'db-sync-status'
+              : keys.object === WATERMARK_OBJECT_KEY
+                ? 'db-watermark'
+                : 'db-config',
+        },
       });
     } else {
       await env.ATTACHMENTS!.delete(keys.object);
@@ -428,6 +481,7 @@ function normalizeSyncState(raw: unknown): DbNodeSyncState | null {
   return {
     at,
     complete: input.complete === true,
+    fingerprint: typeof input.fingerprint === 'string' && input.fingerprint ? input.fingerprint : undefined,
     truncated: input.truncated === true,
     rowsWritten: Number(input.rowsWritten ?? 0) || 0,
     tables: Number(input.tables ?? 0) || 0,
@@ -474,11 +528,63 @@ export async function saveNodeSyncState(env: Env, nodeId: string, state: DbNodeS
   return saved;
 }
 
+/** Drop the sync record of specific nodes (they point at another database now). */
+export async function deleteNodeSyncStates(env: Env, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const current = await readSyncStates(env);
+  const next: DbSyncStates = { ...current };
+  let changed = false;
+  for (const id of ids) {
+    if (!(id in next)) continue;
+    delete next[id];
+    changed = true;
+  }
+  if (!changed) return;
+  await writeStoredText(env, SYNC_STATUS_KEYS, JSON.stringify(next));
+  const ref = cacheStoreRef(env);
+  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: next });
+}
+
 /** Drop every node's sync record (used when the cluster config is cleared). */
 export async function clearSyncStates(env: Env): Promise<void> {
   await writeStoredText(env, SYNC_STATUS_KEYS, null).catch(() => false);
   const ref = cacheStoreRef(env);
   if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: {} });
+  // The watermark describes nodes that no longer exist.
+  await clearClusterWatermark(env);
+}
+
+/** Persisted write watermark, or null when none was ever recorded. */
+export async function readClusterWatermark(env: Env): Promise<ClusterWatermarkSnapshot | null> {
+  try {
+    const raw = await readStoredText(env, WATERMARK_KEYS);
+    if (!raw) return null;
+    const parsed = asRecord(JSON.parse(raw));
+    if (!parsed) return null;
+    const writeSeq = Number(parsed.writeSeq);
+    if (!Number.isFinite(writeSeq) || writeSeq <= 0) return null;
+    const nodes: Record<string, number> = {};
+    const rawNodes = asRecord(parsed.nodes);
+    if (rawNodes) {
+      for (const [id, value] of Object.entries(rawNodes)) {
+        const seq = Number(value);
+        if (Number.isFinite(seq) && seq >= 0) nodes[id] = Math.floor(seq);
+      }
+    }
+    return { writeSeq: Math.floor(writeSeq), nodes };
+  } catch {
+    // A corrupt watermark must not stop the app from booting: without it the
+    // adapter just starts from zero, which is the pre-fix behaviour.
+    return null;
+  }
+}
+
+export async function saveClusterWatermark(env: Env, snapshot: ClusterWatermarkSnapshot): Promise<boolean> {
+  return writeStoredText(env, WATERMARK_KEYS, JSON.stringify(snapshot)).catch(() => false);
+}
+
+export async function clearClusterWatermark(env: Env): Promise<void> {
+  await writeStoredText(env, WATERMARK_KEYS, null).catch(() => false);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -663,7 +769,14 @@ function toResolvedNodes(config: DbRuntimeConfigV2, syncStates: DbSyncStates): R
   return config.nodes
     .filter((node) => node.enabled)
     .map((node) => {
-      const syncStatus = syncStates[node.id];
+      const recorded = syncStates[node.id];
+      // A record made for a different database proves nothing about this one:
+      // the node was repointed (a migration, a new empty server), so its old
+      // "complete" must not survive (B4). Records without a fingerprint predate
+      // the check and are trusted, which keeps upgrades from disabling a working
+      // standby until it is synced again.
+      const syncStatus =
+        recorded && recorded.fingerprint && recorded.fingerprint !== nodeFingerprint(node) ? undefined : recorded;
       return {
         ...node,
         source: 'runtime' as const,
@@ -716,6 +829,19 @@ export async function resolveDbCluster(env: Env): Promise<ResolvedDbCluster> {
     if (nodes.length > 0) {
       return { mode: 'mysql', source: 'runtime', nodes, policy: runtime.policy };
     }
+    // A stored config whose every node is disabled (KV edited by hand, an old
+    // version, or a node list that no longer resolves) is not "no config".
+    // Saying so explicitly is what stops the silent switch to D1.
+    return {
+      mode: 'd1',
+      source: 'd1',
+      nodes: [],
+      policy: runtime.policy,
+      unavailableReason:
+        runtime.nodes.length > 0
+          ? `已保存的 MySQL 集群配置中有 ${runtime.nodes.length} 个节点，但全部处于「停用」状态`
+          : '已保存的 MySQL 集群配置里没有任何节点',
+    };
   }
 
   return { mode: 'd1', source: 'd1', nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } };
@@ -781,6 +907,7 @@ export function maskCluster(cluster: ResolvedDbCluster): MaskedDbCluster {
     source: cluster.source,
     nodes: cluster.nodes.map(maskNode),
     policy: cluster.policy,
+    unavailableReason: cluster.unavailableReason,
   };
 }
 

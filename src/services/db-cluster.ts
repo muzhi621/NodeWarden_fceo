@@ -30,6 +30,18 @@
 //   standby already has the rows and the switch is immediate (that is the point
 //   of native replication).
 //
+// Restarts (B1): the journal and the sequence number live in memory, but the
+// *relationship* between them ("who was behind") is persisted. On start the
+// adapter is handed the last known watermark; any node that was behind stays
+// behind and is flagged `needsFullSync`, because the journal that could have
+// bridged the gap no longer exists. A node that was level with the writer stays
+// usable — which is the common case, since write-through catches the standby up
+// inside the same request. Without this, a restart silently resets every node
+// to "0 == 0, therefore caught up" and the next failover loses whatever the
+// standby had missed. The record needs a config store (SETTINGS_KV / R2 /
+// ATTACHMENTS_KV); on a runtime without one it is simply absent, and the adapter
+// falls back to the pre-fix "assume level" behaviour.
+//
 // Deliberate limits (also surfaced in the admin UI):
 //   • A connection failure is a different thing from a SQL error: `ER_DUP_ENTRY`
 //     or a syntax error must NOT move traffic to another server, otherwise a
@@ -46,7 +58,7 @@
 //     several instances keeps its own view; each instance only talks to the
 //     servers it configured, and a failover is local.
 
-import type { DbClusterPolicy } from './db-config';
+import type { ClusterWatermarkSnapshot, DbClusterPolicy } from './db-config';
 import {
   MySqlDatabase,
   isReadOnlySql,
@@ -175,8 +187,12 @@ const JOURNAL_ENTRY_OVERHEAD = 96;
 /**
  * Read-your-writes window: right after a commit, a standby may not have the row
  * yet (async replay), so reads stay on the writer briefly (C-5).
+ *
+ * Async replay is fire-and-forget, so the window has to cover a slow standby
+ * (busy server, cross-region link) rather than one event-loop turn.
  */
 const READ_YOUR_WRITES_MS = 1_000;
+const READ_YOUR_WRITES_ASYNC_MS = 3_000;
 
 /** How long a node that answered 1290 stays out of the write candidates. */
 const WRITE_BLOCKED_COOLDOWN_MS = 60_000;
@@ -340,6 +356,23 @@ class ClusterStatement implements D1LikeStatement {
   }
 }
 
+export interface ClusterOptions {
+  /**
+   * Watermark persisted by the previous process (see the "Restarts" note at the
+   * top). Only used in `write-through`: in `native` mode the app keeps no
+   * watermark of its own.
+   */
+  watermark?: ClusterWatermarkSnapshot | null;
+  /**
+   * Called whenever "who is behind" changes, so the caller can persist it.
+   *
+   * Not called on every write: the absolute sequence number does not matter
+   * across a restart, only whether a node was level with the writer. That makes
+   * the write frequency proportional to failover events, not to traffic.
+   */
+  onWatermarkChange?: (snapshot: ClusterWatermarkSnapshot) => void;
+}
+
 export class MySqlClusterDatabase implements D1LikeDatabase {
   /** Lets the storage layer recognize the adapter (see isMySqlDatabase). */
   readonly dialect = 'mysql';
@@ -347,6 +380,7 @@ export class MySqlClusterDatabase implements D1LikeDatabase {
   readonly clusterNodes = true;
   private readonly nodes: NodeRuntime[];
   private readonly policy: DbClusterPolicy;
+  private readonly onWatermarkChange?: (snapshot: ClusterWatermarkSnapshot) => void;
   private readCursor = 0;
   /** Sequence of the last committed write (0 = nothing written yet). */
   private writeSeq = 0;
@@ -357,8 +391,14 @@ export class MySqlClusterDatabase implements D1LikeDatabase {
   private activeWriterId: string | null = null;
   private lastWriteAt = 0;
 
-  constructor(specs: ClusterNodeSpec[], policy: DbClusterPolicy, createDb: NodeDatabaseFactory = defaultNodeFactory) {
+  constructor(
+    specs: ClusterNodeSpec[],
+    policy: DbClusterPolicy,
+    createDb: NodeDatabaseFactory = defaultNodeFactory,
+    options: ClusterOptions = {}
+  ) {
     this.policy = policy;
+    this.onWatermarkChange = options.onWatermarkChange;
     // Primary first, then by the operator-configured failover order. Ties keep
     // the stored order so the behaviour is predictable.
     const ordered = [...specs].sort((a, b) => {
@@ -386,6 +426,69 @@ export class MySqlClusterDatabase implements D1LikeDatabase {
       writeBlockedUntil: 0,
       replayChain: Promise.resolve(),
     }));
+    this.applyInitialWatermark(options.watermark);
+  }
+
+  /**
+   * Restore "who was behind" from the previous process (B1).
+   *
+   * A node recorded as level with the writer stays usable; one recorded as
+   * behind keeps that state and is flagged `needsFullSync`, because the journal
+   * entries that could bridge the gap died with the old process. Treating both
+   * as "0 == 0" is what made a restart silently un-flag a stale standby.
+   */
+  private applyInitialWatermark(watermark?: ClusterWatermarkSnapshot | null): void {
+    if (!watermark || this.policy.syncMode !== 'write-through') return;
+    const writeSeq = Number(watermark.writeSeq);
+    if (!Number.isFinite(writeSeq) || writeSeq <= 0) return;
+    this.writeSeq = Math.floor(writeSeq);
+    for (const node of this.nodes) {
+      const recorded = watermark.nodes?.[node.spec.id];
+      // A node with no record is a *new* node: its readiness is governed by the
+      // persisted sync status, not by a watermark it never had.
+      if (!Number.isFinite(Number(recorded))) continue;
+      node.appliedSeq = Math.max(0, Math.floor(Number(recorded)));
+      if (node.appliedSeq < this.writeSeq) {
+        node.needsFullSync = true;
+        node.behindSince = Date.now();
+        node.missedWrites = this.writeSeq - node.appliedSeq;
+        console.warn(
+          `[db-cluster] node "${node.spec.label}" was ${node.missedWrites} writes behind when the process restarted; ` +
+            'it stays out of rotation until a full sync is run from /admin/database'
+        );
+      }
+    }
+  }
+
+  /** Current watermark, for persistence (see `onWatermarkChange`). */
+  watermarkSnapshot(): ClusterWatermarkSnapshot {
+    const nodes: Record<string, number> = {};
+    for (const node of this.nodes) nodes[node.spec.id] = node.appliedSeq;
+    return { writeSeq: this.writeSeq, nodes };
+  }
+
+  private notifyWatermark(): void {
+    if (!this.onWatermarkChange || this.policy.syncMode !== 'write-through') return;
+    try {
+      this.onWatermarkChange(this.watermarkSnapshot());
+    } catch (error) {
+      // Persistence must never break a write that already committed.
+      console.warn('[db-cluster] could not record the write watermark:', error);
+    }
+  }
+
+  /**
+   * Refresh per-node readiness from persisted sync state without rebuilding the
+   * connection pools (S2). Cache keys deliberately exclude `syncReady` (it
+   * changes on every sync, and rebuilding pools for that would drop every
+   * in-flight connection), so a cached instance has to be told about it.
+   */
+  applySyncReadiness(readiness: Map<string, boolean | undefined>): void {
+    for (const node of this.nodes) {
+      const next = readiness.get(node.spec.id);
+      if (next === undefined || node.spec.syncReady === next) continue;
+      node.spec = { ...node.spec, syncReady: next };
+    }
   }
 
   getPolicy(): DbClusterPolicy {
@@ -415,18 +518,26 @@ export class MySqlClusterDatabase implements D1LikeDatabase {
   }
 
   /**
-   * Record that `id` now holds everything (the admin ran a complete sync).
+   * Record that `id` now holds everything that existed when the sync *started*.
    *
-   * Also clears the journal gap flag: the operator just paid for a full copy, so
-   * the node is usable again without a restart.
+   * `syncedThroughSeq` is the watermark captured **before** the copy ran. Writes
+   * that committed while the copy was in flight are not covered by it — they are
+   * still in the journal and get replayed on the next write (B2). Passing no
+   * sequence keeps the old "everything up to now" behaviour, which is only
+   * correct for callers that really did copy the live database atomically.
    */
-  markNodeSynced(id: string): void {
+  markNodeSynced(id: string, syncedThroughSeq?: number): void {
     const node = this.nodes.find((entry) => entry.spec.id === id);
     if (!node) return;
-    node.appliedSeq = this.writeSeq;
+    const through = syncedThroughSeq === undefined ? this.writeSeq : Math.max(0, syncedThroughSeq);
+    node.appliedSeq = Math.max(node.appliedSeq, Math.min(through, this.writeSeq));
     node.needsFullSync = false;
     node.spec = { ...node.spec, syncReady: true };
-    this.clearBehind(node);
+    // Only claim "caught up" when it really is: a sync that started before the
+    // latest commit leaves a gap the journal still has to close.
+    if (node.appliedSeq >= this.writeSeq) this.clearBehind(node);
+    else this.markBehind(node);
+    this.notifyWatermark();
   }
 
   nodeHealth(): NodeHealthSnapshot[] {
@@ -491,13 +602,20 @@ export class MySqlClusterDatabase implements D1LikeDatabase {
   }
 
   private markBehind(node: NodeRuntime): void {
-    if (node.behindSince === undefined) node.behindSince = Date.now();
+    const first = node.behindSince === undefined;
+    if (first) node.behindSince = Date.now();
     node.missedWrites = Math.max(node.missedWrites, this.writeSeq - node.appliedSeq);
+    // Only the "fell behind" edge is worth persisting: the level state is the
+    // default after a restart, so re-recording it on every write would be pure
+    // overhead.
+    if (first) this.notifyWatermark();
   }
 
   private clearBehind(node: NodeRuntime): void {
+    const wasBehind = node.behindSince !== undefined || node.missedWrites > 0;
     node.behindSince = undefined;
     node.missedWrites = 0;
+    if (wasBehind) this.notifyWatermark();
   }
 
   private markNeedsFullSync(node: NodeRuntime): void {
@@ -508,6 +626,7 @@ export class MySqlClusterDatabase implements D1LikeDatabase {
       `[db-cluster] node "${node.spec.label}" is ${this.writeSeq - node.appliedSeq} writes behind and the ` +
         'journal no longer covers the gap; it stays out of rotation until a full sync is run from the admin page.'
     );
+    this.notifyWatermark();
   }
 
   private isCaughtUp(node: NodeRuntime): boolean {
@@ -585,8 +704,11 @@ export class MySqlClusterDatabase implements D1LikeDatabase {
       return [...candidates].sort((a, b) => (a.spec.role === b.spec.role ? 0 : a.spec.role === 'primary' ? -1 : 1));
     }
 
-    // Read-your-writes: async replay may not have landed yet.
-    if (Date.now() - this.lastWriteAt < READ_YOUR_WRITES_MS) {
+    // Read-your-writes: async replay may not have landed yet. The window covers
+    // a slow standby when the replay is fire-and-forget, and stays tight when the
+    // request already waited for it (S7).
+    const window = this.policy.syncAsync ? READ_YOUR_WRITES_ASYNC_MS : READ_YOUR_WRITES_MS;
+    if (Date.now() - this.lastWriteAt < window) {
       const writer = candidates.find((node) => node.spec.id === this.activeWriterId);
       if (writer) return [writer, ...candidates.filter((node) => node !== writer)];
     }
@@ -689,6 +811,16 @@ export class MySqlClusterDatabase implements D1LikeDatabase {
    * The sequence is assigned and the entry stored without an `await` in
    * between, so the journal is always dense (1..writeSeq) and two concurrent
    * requests cannot interleave their numbering.
+   *
+   * Caveat (S6): the number is the order in which this process *observed* the
+   * commit, which the driver normally reports in commit order but is not
+   * guaranteed to. Two concurrent statements that touch the same row could in
+   * principle be replayed in the opposite order, leaving the standby with the
+   * other value and no error to show for it. Replay is still strictly
+   * sequential and idempotent; making the ordering airtight would need the
+   * server's own commit sequence (binlog position) or a transaction-id column,
+   * which is out of scope for a D1-compatible adapter. Rows written by a single
+   * request are unaffected (they are journalled as one entry).
    */
   private recordWrite(node: NodeRuntime, statements: Array<{ sql: string; params: unknown[] }>): number {
     this.activeWriterId = node.spec.id;
