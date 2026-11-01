@@ -21,6 +21,7 @@ import {
   clearDbConfig,
   getDbConfigStatus,
   probeDbNodes,
+  promoteDbNode,
   saveDbConfig,
   syncDbCluster,
   testDbNode,
@@ -164,6 +165,29 @@ const SYNC_MODE_LABEL: Record<string, string> = {
   'write-through': '应用层实时双写（把每次写入同步到副库）',
 };
 
+/**
+ * "Written" and "added" are different numbers in merge mode: the copy re-sends
+ * rows the target already has. Saying "已写入 12 万行" for a copy that added 3
+ * makes the operator think a second sync is pointless, so the inserted count is
+ * reported separately whenever it was measured.
+ */
+function syncedRowsText(rowsWritten: number, rowsInserted?: number): string {
+  if (rowsInserted === undefined) return `处理 ${rowsWritten} 行`;
+  const skipped = Math.max(0, rowsWritten - rowsInserted);
+  return skipped > 0
+    ? `新增 ${rowsInserted} 行（另 ${skipped} 行已存在，未覆盖）`
+    : `新增 ${rowsInserted} 行`;
+}
+
+/**
+ * Rounds of automatic continuation for one click on "sync".
+ *
+ * Each round is bounded by the server's 90s budget, so this covers a large
+ * `audit_logs` without leaving the operator to click through every chunk. The
+ * cap only exists so a pathological table cannot loop forever.
+ */
+const SYNC_MAX_ROUNDS = 8;
+
 export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
   const [status, setStatus] = useState<DbConfigStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -176,6 +200,10 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
   const [dirty, setDirty] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [confirmSync, setConfirmSync] = useState(false);
+  // Node waiting for the "switch the writer" confirmation, plus whether the
+  // operator chose to override the safety gate (unsynced / read-only standby).
+  const [promoteId, setPromoteId] = useState<string | null>(null);
+  const [promoteForce, setPromoteForce] = useState(false);
   // Which node the rows are read from. The primary is the wrong source the
   // moment a failover happened, so this is explicit rather than implied.
   const [syncSourceId, setSyncSourceId] = useState('');
@@ -357,7 +385,9 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
       }
       if (result.ok) {
         setNotice({
-          kind: result.warning ? 'info' : 'ok',
+          // An empty native standby is not a style warning: it will take over
+          // with no accounts the day the primary fails.
+          kind: (result.emptyStandbys?.length ?? 0) > 0 ? 'error' : result.warning ? 'info' : 'ok',
           text:
             result.warning ??
             `已保存并生效：${enabled.length} 个节点，主库 ${result.version || 'MySQL'}，${result.latencyMs ?? 0}ms。配置已加密存储，密码不再回显。`,
@@ -391,15 +421,52 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
     }
   };
 
+  const onPromote = async (nodeId: string, force: boolean) => {
+    setPromoteId(null);
+    setPromoteForce(false);
+    setBusy('promote');
+    setNotice(null);
+    try {
+      const result = await promoteDbNode(props.authedFetch, nodeId, force);
+      const header = result.demoted
+        ? `已切换：主库现在是「${result.promoted?.label ?? nodeId}」，原主库「${result.demoted.label}」降为副库。`
+        : `已切换：主库现在是「${result.promoted?.label ?? nodeId}」。`;
+      setNotice({ kind: result.warning ? 'info' : 'ok', text: `${header}${result.warning ?? ''}` });
+      await load();
+    } catch (error) {
+      // The server's message names what is missing ("落后 12 条写入", "只读副本")
+      // — that is what makes the force option an informed decision.
+      setNotice({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const onSync = async () => {
     setConfirmSync(false);
     setBusy('sync');
     setNotice(null);
     try {
-      const result = await syncDbCluster(props.authedFetch, {
-        sourceId: syncSourceId || undefined,
-        mode: syncMode,
-      });
+      const request = () =>
+        syncDbCluster(props.authedFetch, { sourceId: syncSourceId || undefined, mode: syncMode });
+      let result = await request();
+      let rounds = 1;
+      // A single call has a 90s budget, so a large table needs several passes.
+      // Continue automatically instead of asking the operator to keep clicking
+      // (S4); the server resumes from the stored cursor each time.
+      while (
+        rounds < SYNC_MAX_ROUNDS &&
+        !result.complete &&
+        result.truncated &&
+        result.targets.every((target) => target.ok)
+      ) {
+        setNotice({
+          kind: 'info',
+          text: `第 ${rounds} 轮完成，累计${syncedRowsText(result.rowsWritten, result.rowsInserted)}，正在从上次的位置继续…`,
+        });
+        result = await request();
+        rounds += 1;
+      }
       const failed = result.targets.filter((target) => !target.ok);
       const partial = result.targets.filter((target) => target.ok && !target.complete);
       const mismatched = result.targets.flatMap((target) => target.countsMismatch ?? []);
@@ -414,15 +481,16 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
         setNotice({
           kind: 'info',
           text:
-            `已写入 ${result.rowsWritten} 行，但 ${partial.length} 个副库还没同步完（` +
-            `${partial.map((target) => target.label).join('、')}）。` +
-            '再次点击会从上次的位置继续，直到提示「已完成」为止。',
+            `已完成 ${rounds} 轮，${syncedRowsText(result.rowsWritten, result.rowsInserted)}，` +
+            `但 ${partial.length} 个副库还没同步完（${partial.map((target) => target.label).join('、')}）。` +
+            '数据量较大，再点一次会从上次的位置继续，直到提示「已完成」为止。',
         });
       } else {
         setNotice({
           kind: mismatched.length > 0 ? 'info' : 'ok',
           text:
-            `同步完成：${result.targets.length} 个副库共写入 ${result.rowsWritten} 行，行数校验通过。` +
+            `同步完成：${result.targets.length} 个副库${syncedRowsText(result.rowsWritten, result.rowsInserted)}（${rounds} 轮），行数校验通过。` +
+            '行数一致只说明没有缺行；如需纠正副库上被改过的旧值，请用「覆盖已有行」再同步一次。' +
             (mismatched.length > 0
               ? ` 仍有 ${mismatched.length} 张表行数不一致（${mismatched.slice(0, 3).join('、')}${mismatched.length > 3 ? '…' : ''}）：` +
                 '多为同步期间的并发写入，可再同步一次；若持续不一致，说明目标端有源端已删除的行。'
@@ -447,6 +515,25 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
   const enabledCount = nodes.filter((node) => node.enabled).length;
   const saving = busy === 'save';
   const occupied = busy !== null;
+
+  const promotableStored = promoteId ? status?.cluster.nodes.find((node) => node.id === promoteId) ?? null : null;
+  const promotableHealth = promoteId ? healthById[promoteId] : undefined;
+  /**
+   * The same gates the server applies, shown before the click so "force" is a
+   * decision rather than a surprise. The server is still the authority: this
+   * list only mirrors what the page can see (a node that is behind, unsynced or
+   * read-only), it cannot see the target's `@@read_only` flag.
+   */
+  const promoteRisks = (() => {
+    if (!promotableStored) return [] as string[];
+    const risks: string[] = [];
+    const sync = promotableStored.syncStatus;
+    if (policy.syncMode === 'write-through' && (!sync || !sync.complete)) risks.push('该节点从未完成过一次数据同步');
+    if (promotableHealth?.lag) risks.push(`落后 ${promotableHealth.lag} 条写入`);
+    if (promotableHealth?.needsFullSync) risks.push('补写日志已不覆盖缺口');
+    if (promotableHealth?.writeBlocked) risks.push('数据库把它报告为只读');
+    return risks;
+  })();
 
   return (
     <div className="stack db-cluster-page">
@@ -479,7 +566,9 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
         <div className="db-status-strip">
           <div className="db-status-item">
             <span className="db-status-label">当前模式</span>
-            <strong>{mode === 'mysql' ? '外接 MySQL' : 'D1（平台内置）'}</strong>
+            <strong>
+              {mode === 'mysql' ? '外接 MySQL' : status?.cluster.unavailableReason ? '无可用数据库' : 'D1（平台内置）'}
+            </strong>
           </div>
           <div className="db-status-item">
             <span className="db-status-label">配置来源</span>
@@ -495,6 +584,14 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
           </div>
         </div>
 
+        {status?.cluster.unavailableReason && (
+          <p className="local-error">
+            <span>
+              {status.cluster.unavailableReason}：应用当前<b>没有任何可用的数据库</b>，除本页外的请求都会返回 503。
+              请在下方至少启用一个节点并保存，或清除配置回退到内置数据库。
+            </span>
+          </p>
+        )}
         {status?.envOverrideActive && (
           <p className="local-error">
             <span>检测到 DB_HOST 环境变量：环境变量优先，下方保存的集群配置不会生效。</span>
@@ -586,11 +683,20 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
                         <button
                           type="button"
                           className="btn btn-secondary small"
-                          disabled={occupied}
-                          title="把该节点设为主库，原主库自动降为副库"
-                          onClick={() => makePrimary(node.id)}
+                          disabled={occupied || dirty || !stored}
+                          title={
+                            dirty
+                              ? '有未保存的修改：先保存，再做主库切换'
+                              : !stored
+                                ? '新节点需要先保存一次，才能接管写入'
+                                : '立即把写入切到该节点（校验连通性、只读状态与同步进度）'
+                          }
+                          onClick={() => {
+                            setPromoteForce(false);
+                            setPromoteId(node.id);
+                          }}
                         >
-                          <Check size={13} className="btn-icon" /> 设为主库
+                          <Check size={13} className="btn-icon" /> 切换主库
                         </button>
                       )}
                       <button
@@ -884,6 +990,9 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
             <li>
               <b>数据库自身复制</b>：副库由 MySQL 主从 / 云厂商只读副本维护。应用不双写，只在主库不可用时切换。数据一致性由数据库保证，
               <b>推荐用于生产</b>。
+              <br />
+              ⚠️ 前提是副库真的接入了复制。如果它只是另一台独立的 MySQL，这个选项会让主库故障时切换到一个
+              <b>空库</b>——保存时若检测到副库一条账号数据都没有，页面会给出警告。
             </li>
             <li>
               <b>应用层实时双写</b>：每次写入成功后立即在其他节点重放，适合“两台互不相关、想互为备份”的场景。
@@ -897,18 +1006,30 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
             </li>
             <li>
               同步默认<b>只补缺失行</b>，不会覆盖副库上已有的数据；需要纠正不一致时才选「覆盖已有行」。
-              单次跑不完（行数上限或时间预算）时提示里会说明，再点一次会<b>从上次的位置继续</b>，
-              不会每次从头开始。
+              单次跑不完（行数上限或时间预算）时会自动接着跑，最多连续 8 轮，仍未完成再点一次即可，<b>从上次的位置继续</b>，
+              不会每次从头开始。结果里的「新增 N 行」是目标库真正多出来的行数，「另 M 行已存在」是被跳过的行——
+              两者相加才是这次扫描的行数。
+              <br />
+              「行数校验通过」只说明两边<b>没有缺行</b>，不代表行内容一致：被改过的旧值要靠「覆盖已有行」才会被纠正。
             </li>
             <li>
               主库故障期间写入落在副库，主库恢复后<b>不会立刻收回写权</b>：先把落后的写入补上再切回，
               落后过多（超出内存补写日志范围）时该节点会被标红并要求完整同步。
             </li>
             <li>
+              切换主库请用副库卡片上的<b>「切换主库」</b>：它会先验证该节点连得上、数据库自己报告为可写
+              （只读副本会被当场挡下，因为切过去后所有写入都会失败），以及是否已经同步到位。
+              任一项不满足时会列出缺口，<b>确认可以放弃那部分数据</b>后才能强制切换。
+              原主库降为副库、数据保留，切换后请尽快以它为源同步一次新主库。
+            </li>
+            <li>
               故障切换只针对<b>连接级失败</b>（拒绝连接、超时、连接被重置等）。SQL 语法错误、唯一键冲突不会切换节点，否则同一条语句会被执行两次。
               写入报「无法确认是否已提交」时不会自动重放——那正是避免重复写入的保护。
             </li>
-            <li>节点健康与补写日志保存在当前进程内：多实例部署时每个实例各自判断，建议只让一个实例承担写入（或改用数据库自身复制）。</li>
+            <li>
+              节点健康与补写日志保存在当前进程内：多实例部署时每个实例各自判断，建议只让一个实例承担写入（或改用数据库自身复制）。
+              不过每个节点是否落后会<b>持久化</b>：进程重启后落后的副库仍然要求完整同步，不会因为重启就被当成已追平。
+            </li>
           </ul>
         </div>
       </section>
@@ -943,6 +1064,41 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
         onConfirm={() => void onSync()}
         onCancel={() => setConfirmSync(false)}
       />
+
+      <ConfirmDialog
+        open={promoteId !== null}
+        variant="warning"
+        title="切换主库？"
+        message={
+          (promoteRisks.length > 0
+            ? `「${promotableStored?.label ?? ''}」还不满足无损切换的条件：${promoteRisks.join('；')}。\n\n` +
+              '此时切换，这部分数据只留在原主库上，新主库看不到它们。正确做法是先点「同步数据到副库」，再切换。\n\n'
+            : '') +
+          `切换后，写入立即转到「${promotableStored?.label ?? ''}」，原主库自动降为副库（数据保留，可继续承接读请求或故障接管）。` +
+          '约 1 秒内的请求可能落在旧连接上，无需重启服务。'
+        }
+        confirmText={promoteForce ? '强制切换' : '切换主库'}
+        cancelText="取消"
+        danger={promoteForce}
+        onConfirm={() => {
+          if (promoteId) void onPromote(promoteId, promoteForce);
+        }}
+        onCancel={() => {
+          setPromoteId(null);
+          setPromoteForce(false);
+        }}
+      >
+        {promoteRisks.length > 0 && (
+          <label className="checkbox-field">
+            <input
+              type="checkbox"
+              checked={promoteForce}
+              onChange={(e) => setPromoteForce((e.target as HTMLInputElement).checked)}
+            />
+            <span>我知道上述缺口会丢失，仍然强制切换</span>
+          </label>
+        )}
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={confirmClear}

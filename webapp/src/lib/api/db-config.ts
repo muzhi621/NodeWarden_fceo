@@ -9,6 +9,11 @@ export interface DbNodeSyncState {
   at: number;
   /** Every table was walked to the end and the row counts matched. */
   complete: boolean;
+  /**
+   * `host|port|database` the record refers to. A record for another database is
+   * ignored by the server, so "complete" never outlives the node it describes.
+   */
+  fingerprint?: string;
   /** Hit a row cap / the time budget: run it again to continue. */
   truncated: boolean;
   rowsWritten: number;
@@ -62,6 +67,11 @@ export interface MaskedDbCluster {
   source: 'env' | 'runtime' | 'd1';
   nodes: MaskedDbNode[];
   policy: DbClusterPolicy;
+  /**
+   * A config exists but nothing in it is usable (every node disabled). The app
+   * has no database in that state, so it must be shown, not silently ignored.
+   */
+  unavailableReason?: string;
 }
 
 export interface NodeHealthSnapshot {
@@ -152,6 +162,10 @@ export interface DbConfigSaveResult {
   effective?: boolean;
   schemaReady?: boolean;
   warning?: string;
+  /** Replicas that still need a sync before they may take over. */
+  syncPending?: string[];
+  /** Native-mode standbys holding no accounts while the primary does. */
+  emptyStandbys?: string[];
   nodes?: NodeProbeResult[];
 }
 
@@ -219,7 +233,10 @@ export interface DbTableSyncResult {
   table: string;
   columns: number;
   rowsRead: number;
+  /** Rows pushed; in merge mode this includes rows the target already had. */
   rowsWritten: number;
+  /** Rows that were actually new on the target, when measured. */
+  rowsInserted?: number;
   truncated: boolean;
   /** Resume position for the next run. */
   nextCursor?: Array<string | number | boolean | null>;
@@ -239,6 +256,8 @@ export interface DbTargetSyncReport {
   complete: boolean;
   rowsRead: number;
   rowsWritten: number;
+  /** Rows that were actually new on this target. */
+  rowsInserted?: number;
   truncated: boolean;
   durationMs: number;
   tables: DbTableSyncResult[];
@@ -252,6 +271,7 @@ export interface DbSyncResult {
   complete: boolean;
   targets: DbTargetSyncReport[];
   rowsWritten: number;
+  rowsInserted?: number;
   truncated: boolean;
   source?: { id: string; label: string };
   mode?: DbSyncCopyMode;
@@ -292,10 +312,55 @@ export async function syncDbCluster(
     complete: payload.complete === true,
     targets: payload.targets,
     rowsWritten: payload.rowsWritten ?? 0,
+    rowsInserted: payload.rowsInserted,
     truncated: payload.truncated === true,
     source: payload.source,
     mode: payload.mode,
   };
+}
+
+export interface DbPromoteResult {
+  ok: boolean;
+  promoted?: { id: string; label: string };
+  demoted?: { id: string; label: string } | null;
+  syncMode?: DbSyncMode;
+  /** Writes the new primary had not seen when it was promoted. */
+  lagAtPromote?: number;
+  forced?: boolean;
+  schemaReady?: boolean;
+  warning?: string;
+  error?: string;
+  /** Reasons the switch was refused (409). */
+  reasons?: string[];
+  /** A gate refused the switch; retrying with `force` would override it. */
+  blocked?: boolean;
+}
+
+/**
+ * Switch which node receives writes.
+ *
+ * Throws for a refused switch (409/502) with the server's own explanation — the
+ * text names what is missing ("落后 12 条写入", "只读副本") and is the only thing
+ * that makes the force option an informed decision.
+ */
+export async function promoteDbNode(
+  authedFetch: AuthedFetch,
+  nodeId: string,
+  force = false
+): Promise<DbPromoteResult> {
+  const resp = await authedFetch(`/api/admin/db-config/promote${force ? '?force=1' : ''}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nodeId, force }),
+  });
+  const payload = await parseJson<DbPromoteResult>(resp);
+  if (!resp.ok || !payload?.ok) {
+    const error = new Error(payload?.error || `切换主库失败（HTTP ${resp.status}）`);
+    (error as Error & { blocked?: boolean; status?: number }).blocked = payload?.blocked === true;
+    (error as Error & { blocked?: boolean; status?: number }).status = resp.status;
+    throw error;
+  }
+  return payload;
 }
 
 export async function clearDbConfig(authedFetch: AuthedFetch): Promise<{ ok: boolean }> {
