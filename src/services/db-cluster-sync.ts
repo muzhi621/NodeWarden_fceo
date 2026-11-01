@@ -24,7 +24,10 @@
 //     The budget used to restart per table, so 19 tables × 45s could run for
 //     fifteen minutes inside a 120s request (C-4).
 //   • Row counts are compared afterwards, because `rowsWritten` only says "rows
-//     pushed", not "the two sides now agree" (S1).
+//     pushed", not "the two sides now agree" (S1). In `merge` mode a pushed row
+//     is usually one the target already had, so `rowsInserted` is measured from
+//     the target's own count before/after instead of being inferred from the
+//     upsert's affected rows (which `FOUND_ROWS` makes ambiguous).
 //   • Generated columns are skipped — MySQL rejects writes to them.
 //   • One failing table does not abort the others; the per-table error is
 //     returned to the admin.
@@ -40,7 +43,24 @@ export interface TableSyncResult {
   table: string;
   columns: number;
   rowsRead: number;
+  /**
+   * Rows pushed to the target. In `merge` mode most of them are usually rows the
+   * target already had (the statement is `ON DUPLICATE KEY UPDATE pk = pk`), so
+   * this is "rows processed", not "rows added" — see `rowsInserted`.
+   */
   rowsWritten: number;
+  /**
+   * Rows that were genuinely new on the target.
+   *
+   * Copied rows always go through one upsert, and MySQL reports "inserted" and
+   * "duplicate, no change" as the same affected-row count once `FOUND_ROWS` is
+   * set (which `storage-mysql` needs so D1's `meta.changes` stays right). The
+   * only honest source is the target's own row count before and after, so this
+   * is measured rather than derived — and only in `merge` mode, where the two
+   * numbers actually differ. `undefined` means "not measured" (truncated table,
+   * counts unavailable, or `overwrite` mode where every row is rewritten).
+   */
+  rowsInserted?: number;
   /** Stopped early because a row cap or the time budget was reached. */
   truncated: boolean;
   /** Last copied key; feed back as `cursors[table]` to continue (B-3). */
@@ -62,7 +82,10 @@ export interface ClusterSyncResult {
   complete: boolean;
   tables: TableSyncResult[];
   rowsRead: number;
+  /** Rows pushed (see `TableSyncResult.rowsWritten`). */
   rowsWritten: number;
+  /** Rows that were new on the target, when measured. */
+  rowsInserted?: number;
   truncated: boolean;
   durationMs: number;
   /** Resume cursors for tables that hit the row cap. */
@@ -227,6 +250,10 @@ export async function syncTable(
     paging: 'keyset',
   };
 
+  // Baseline for `rowsInserted`. Only `merge` needs it: `overwrite` rewrites
+  // every row it touches, so `rowsWritten` is already the number of rows changed.
+  let targetRowsBefore: number | null = null;
+
   try {
     const columns = await discoverColumns(source, table);
     if (columns.length === 0) {
@@ -252,6 +279,11 @@ export async function syncTable(
 
     let limit = Math.min(chunkSize, maxRows);
     let cursorOut: Array<string | number | boolean | null> | undefined;
+    // Taken before the first chunk: the delta is the only way to tell "inserted"
+    // from "already there" (see `rowsInserted`).
+    if (mode === 'merge' && verifyCounts) {
+      targetRowsBefore = await countRows(target, table);
+    }
     for (;;) {
       if (result.rowsRead >= maxRows) {
         result.truncated = true;
@@ -328,6 +360,12 @@ export async function syncTable(
         // report them so the operator can reconcile instead of assuming parity.
         if (targetRows > sourceRows) result.orphanRows = targetRows - sourceRows;
       }
+      if (mode === 'merge' && targetRowsBefore !== null && targetRows !== null) {
+        // Concurrent writes on the target can skew this by a row or two; it is a
+        // magnitude, not an audit number. Negative is clamped because a delete
+        // on the target between the two counts is not "minus 3 inserts".
+        result.rowsInserted = Math.max(0, targetRows - targetRowsBefore);
+      }
     }
     return result;
   } catch (error) {
@@ -401,6 +439,8 @@ export async function syncDatabase(
 
   const rowsRead = results.reduce((sum, entry) => sum + entry.rowsRead, 0);
   const rowsWritten = results.reduce((sum, entry) => sum + entry.rowsWritten, 0);
+  const measured = results.filter((entry) => entry.rowsInserted !== undefined);
+  const rowsInserted = measured.length > 0 ? measured.reduce((sum, entry) => sum + (entry.rowsInserted ?? 0), 0) : undefined;
   const cursors: Record<string, Array<string | number | boolean | null>> = {};
   for (const entry of results) {
     if (entry.nextCursor) cursors[entry.table] = entry.nextCursor;
@@ -412,6 +452,7 @@ export async function syncDatabase(
     tables: results,
     rowsRead,
     rowsWritten,
+    rowsInserted,
     truncated: results.some((entry) => entry.truncated),
     durationMs: Date.now() - startedAt,
     cursors,

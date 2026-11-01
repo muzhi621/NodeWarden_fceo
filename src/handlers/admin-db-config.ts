@@ -3,6 +3,8 @@
 //   GET  /api/admin/db-config        -> masked cluster config + node health
 //   POST /api/admin/db-config/test   -> test one node or probe every node
 //   POST /api/admin/db-config        -> save the cluster (encrypted), migrate every node
+//   POST /api/admin/db-config/sync   -> backfill a standby from another node
+//   POST /api/admin/db-config/promote-> switch which node receives writes (gated)
 //   DELETE /api/admin/db-config      -> clear runtime config (back to D1 / env)
 //
 // The cluster is saved as a whole: validation, connection tests and schema
@@ -30,7 +32,9 @@ import {
   saveRuntimeConfig,
   readSyncStates,
   saveNodeSyncState,
+  deleteNodeSyncStates,
   clearSyncStates,
+  nodeFingerprint,
   type DbClusterPolicy,
   type DbNodeConfig,
   type DbRuntimeConfigV2,
@@ -599,6 +603,37 @@ async function bootstrapSchemaOnCandidate(config: DbNodeConfig): Promise<{ ok: b
   }
 }
 
+/**
+ * Does this node actually hold accounts?
+ *
+ * Only used to warn about an empty `native` standby: in that mode the app trusts
+ * the database to replicate on its own, so an empty replica looks exactly like a
+ * working one until the day it takes over (B3). `users` is the table every
+ * deployment that has ever been used has rows in.
+ */
+async function hasUserRows(node: DbNodeConfig): Promise<boolean | null> {
+  const db = new MySqlDatabase({
+    host: node.host || '',
+    port: node.port || 3306,
+    user: node.user || '',
+    password: node.password || '',
+    database: node.database || '',
+    ssl: node.ssl !== false,
+    connectionLimit: 1,
+    connectTimeoutMs: 8_000,
+  });
+  try {
+    const row = await db.prepare('SELECT 1 AS present FROM users LIMIT 1').first<{ present: number }>();
+    return !!row;
+  } catch {
+    // No table yet / no rights: nothing to conclude, and the schema bootstrap
+    // above already reported the real problem.
+    return null;
+  } finally {
+    await db.close();
+  }
+}
+
 /** Clearing the runtime config falls back to env config or D1 — neither may exist here. */
 function clearingWouldLeaveNoDatabase(env: Env): boolean {
   return !resolveDbConfigFromEnv(env) && !env.DB;
@@ -696,6 +731,31 @@ export async function handleAdminSaveDbConfig(request: Request, env: Env, actorU
     return errorResponse('Failed to persist database config', 500);
   }
 
+  // A node that was repointed (migration, new empty server) still has the sync
+  // record of the *old* database. Keeping it would mark the new one "already
+  // synced" and let it take over empty (B4).
+  const previousNodes = stored?.nodes ?? [];
+  const staleSyncIds = previousNodes
+    .filter((previous) => {
+      const next = cluster.nodes.find((node) => node.id === previous.id);
+      return !next || nodeFingerprint(previous) !== nodeFingerprint(next);
+    })
+    .map((node) => node.id);
+  await deleteNodeSyncStates(env, [...new Set(staleSyncIds)]);
+
+  // An empty `native` standby means the database is probably *not* replicating:
+  // the app trusts it in that mode, so say so before the day it takes over (B3).
+  const emptyStandbys: string[] = [];
+  if (cluster.policy.syncMode === 'native') {
+    const replicas = enabled.filter((node) => node.role === 'replica');
+    const primaryCandidate = enabled.find((node) => node.role === 'primary');
+    if (replicas.length > 0 && primaryCandidate && (await hasUserRows(primaryCandidate))) {
+      for (const replica of replicas) {
+        if ((await hasUserRows(replica)) === false) emptyStandbys.push(replica.label);
+      }
+    }
+  }
+
   // Rebuild the pools with the new settings and run the schema step against the
   // real cluster. It is keyed by target database, so a freshly configured MySQL
   // really gets its tables (a process-wide "already initialized" flag used to
@@ -729,16 +789,31 @@ export async function handleAdminSaveDbConfig(request: Request, env: Env, actorU
   if (cluster.policy.syncMode === 'write-through') {
     const states = await readSyncStates(env);
     syncPending = cluster.nodes
-      .filter((node) => node.enabled && node.role === 'replica' && states[node.id]?.complete !== true)
+      .filter((node) => {
+        if (!node.enabled || node.role !== 'replica') return false;
+        const state = states[node.id];
+        if (!state || state.complete !== true) return true;
+        // A record for another database is not evidence for this one (B4).
+        return !!state.fingerprint && state.fingerprint !== nodeFingerprint(node);
+      })
       .map((node) => node.id);
   }
   const syncWarning =
     syncPending.length > 0
       ? `${syncPending.length} 个副库尚未完成同步，故障切换前请先点「同步数据到副库」，否则接管时会缺少历史数据。`
       : undefined;
-  const warning = [envOverride ? 'DB_* 环境变量优先于运行时配置：配置已保存，但当前生效的仍是环境变量指向的数据库。' : null,
+  const standbyWarning =
+    emptyStandbys.length > 0
+      ? `副库「${emptyStandbys.join('」「')}」里一条账号数据都没有，而主库有数据：当前副库同步方式是「数据库自身复制」，` +
+        '如果该库并没有真正接入 MySQL 主从复制，主库故障后切换过去将看不到任何账号。' +
+        '请先确认复制已生效，或改为「应用层实时双写」并点一次「同步数据到副库」。'
+      : undefined;
+  const warning = [
+    envOverride ? 'DB_* 环境变量优先于运行时配置：配置已保存，但当前生效的仍是环境变量指向的数据库。' : null,
     schemaError ? `配置已保存，但建表失败：${schemaError}` : null,
-    syncWarning]
+    syncWarning,
+    standbyWarning,
+  ]
     .filter((entry): entry is string => !!entry)
     .join(' ');
 
@@ -750,6 +825,7 @@ export async function handleAdminSaveDbConfig(request: Request, env: Env, actorU
     warning: warning || undefined,
     schemaReady,
     syncPending: syncPending.length > 0 ? syncPending : undefined,
+    emptyStandbys: emptyStandbys.length > 0 ? emptyStandbys : undefined,
     latencyMs: Math.max(...probes.map((result) => result.latencyMs), 0),
     version: probes.find((result) => result.role === 'primary')?.version,
     nodes: probes,
@@ -769,7 +845,10 @@ interface TargetSyncReport {
   /** Every table walked to the end and the row counts agreed. */
   complete: boolean;
   rowsRead: number;
+  /** Rows pushed to the target (`merge` mode re-sends rows it already has). */
   rowsWritten: number;
+  /** Rows that were genuinely new on the target, when measured. */
+  rowsInserted?: number;
   truncated: boolean;
   durationMs: number;
   tables: ClusterSyncResult['tables'];
@@ -868,6 +947,12 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
   }
 
   const storedStates = await readSyncStates(env);
+  // Watermark captured *before* the copy: writes that commit while it runs are
+  // still in the journal and are replayed on the next write (B2). Marking the
+  // node synced "up to now" would claim those rows were copied too, and the
+  // default `merge` mode never overwrites them, so the gap would become
+  // permanent.
+  const syncedThroughSeq = watermarks.writeSeq;
   // Sequential, with a shared budget: parallel copies would multiply the load on
   // the source and could push the request past the platform timeout.
   const deadline = Date.now() + 90_000;
@@ -917,9 +1002,10 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       rowsWritten: result.rowsWritten,
       tables: result.tables.length,
       sourceId: source.id,
+      fingerprint: spec ? nodeFingerprint(spec) : undefined,
       cursors: complete ? undefined : result.cursors,
     });
-    if (complete) db.markNodeSynced(target.id);
+    if (complete) db.markNodeSynced(target.id, syncedThroughSeq);
 
     reports.push({
       id: target.id,
@@ -928,6 +1014,7 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       complete,
       rowsRead: result.rowsRead,
       rowsWritten: result.rowsWritten,
+      rowsInserted: result.rowsInserted,
       truncated: result.truncated,
       durationMs: result.durationMs,
       tables: result.tables,
@@ -952,10 +1039,312 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       complete: reports.every((report) => report.complete),
       targets: reports,
       rowsWritten: reports.reduce((sum, report) => sum + report.rowsWritten, 0),
+      // Only meaningful when every target measured it; a partial sum would
+      // understate the copy without saying so.
+      rowsInserted: reports.every((report) => report.rowsInserted !== undefined)
+        ? reports.reduce((sum, report) => sum + (report.rowsInserted ?? 0), 0)
+        : undefined,
       truncated: reports.some((report) => report.truncated),
     },
     ok ? 200 : 502
   );
+}
+
+/**
+ * Can this node actually accept a write right now?
+ *
+ * `native` mode leaves replication to MySQL, so the standby the operator wants
+ * to promote is usually a *read-only* copy: switching roles in the app would
+ * point every write at a server that answers 1290. Checking the server's own
+ * `read_only` flags before touching the config is the difference between a
+ * clear instruction and a total outage of the write path.
+ *
+ * `unknown` (variable not readable / not supported, e.g. TiDB) is treated as
+ * "cannot tell", never as a refusal.
+ */
+async function probeWritability(node: DbNodeConfig): Promise<'writable' | 'read-only' | 'unknown'> {
+  const db = new MySqlDatabase({
+    host: node.host || '',
+    port: node.port || 3306,
+    user: node.user || '',
+    password: node.password || '',
+    database: node.database || '',
+    ssl: node.ssl !== false,
+    connectionLimit: 1,
+    connectTimeoutMs: 8_000,
+  });
+  try {
+    const row = await db.prepare('SELECT @@GLOBAL.read_only AS ro').first<{ ro: unknown }>();
+    const readOnly = Number(row?.ro ?? 0) === 1;
+    let superReadOnly = false;
+    try {
+      const extra = await db.prepare('SELECT @@GLOBAL.super_read_only AS sro').first<{ sro: unknown }>();
+      superReadOnly = Number(extra?.sro ?? 0) === 1;
+    } catch {
+      // Not exposed by every server (TiDB, some managed MySQL flavours).
+    }
+    return readOnly || superReadOnly ? 'read-only' : 'writable';
+  } catch (error) {
+    console.warn('[db-config] could not read the read_only flag:', error);
+    return 'unknown';
+  } finally {
+    await db.close();
+  }
+}
+
+export interface PromoteResult {
+  ok: boolean;
+  promoted?: { id: string; label: string };
+  demoted?: { id: string; label: string } | null;
+  syncMode?: DbClusterPolicy['syncMode'];
+  /** Writes the new primary had not seen when it was promoted. */
+  lagAtPromote?: number;
+  /** The gate was overridden (?force=1 / body.force). */
+  forced?: boolean;
+  schemaReady?: boolean;
+  warning?: string;
+  error?: string;
+}
+
+/**
+ * Switch which node receives writes.
+ *
+ * "Edit the role and press save" already works, but it re-runs the full save
+ * path — connection tests, schema bootstrap, password re-entry — in the middle
+ * of an incident, and it accepts a standby that has no data. This endpoint does
+ * the same change with the checks that actually matter at that moment:
+ *
+ *   1. the target is reachable (a config edit would silently persist a dead node);
+ *   2. the target is *writable* at the server level (`@@read_only`), which is
+ *      what a native replica is not until the operator promotes it in MySQL;
+ *   3. in `write-through`, the target has a completed sync and no unwritten
+ *      backlog — that is the whole "lossless" promise. Anything else needs an
+ *      explicit force, and the response says what will be missing.
+ *
+ * The demoted node keeps its data. If it was level with the writer it is marked
+ * synced so it can still serve reads and take over later; if it was behind it is
+ * deliberately left flagged and must be synced from the new primary.
+ */
+export async function handleAdminPromoteDbNode(
+  request: Request,
+  env: Env,
+  actorUser: User
+): Promise<Response> {
+  const body = await readJsonBody(request);
+  const targetId = String(body.nodeId ?? '').trim();
+  const forced = wantsForce(request) || body.force === true;
+  if (!targetId) return errorResponse('缺少 nodeId：请指定要提升为主库的节点。', 400);
+
+  if (resolveDbConfigFromEnv(env)) {
+    return errorResponse(
+      'DB_* 环境变量优先于运行时配置：主库由环境变量决定，页面上的切换不会生效。请修改环境变量后重启。',
+      409
+    );
+  }
+  const stored = await loadRuntimeConfig(env);
+  if (!stored) {
+    return errorResponse('当前没有可编辑的运行时配置（数据库由 D1 或环境变量提供），无需切换。', 400);
+  }
+
+  const target = stored.nodes.find((node) => node.id === targetId);
+  if (!target) return errorResponse(`未知的节点：${targetId}`, 404);
+  if (!target.enabled) {
+    return errorResponse(`节点「${target.label}」已停用，启用后才能接管写入。`, 409);
+  }
+  if (target.role === 'primary') {
+    return errorResponse(`节点「${target.label}」已经是主库。`, 400);
+  }
+
+  const currentPrimary = stored.nodes.find((node) => node.role === 'primary' && node.enabled) ?? null;
+
+  // 1) Reachable. Promoting a node that just went away turns a failover into an
+  //    outage, and the config would keep it until someone notices.
+  const probe = await testMySqlConnection(target, env);
+  if (!probe.ok) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: `节点「${target.label}」连接失败（${probe.error ?? 'unknown error'}），不能切换。`,
+        errorKind: probe.errorKind ?? 'connection',
+      },
+      502
+    );
+  }
+
+  // 2) Writable at the server level.
+  const writability = await probeWritability(target);
+  if (writability === 'read-only' && !forced) {
+    return jsonResponse(
+      {
+        ok: false,
+        blocked: true,
+        error:
+          `节点「${target.label}」目前是只读副本（@@read_only=1）：现在切过去，所有写入都会失败。` +
+          '请先在数据库侧把它提升为主库（停止复制并开放写入），再回来执行切换。' +
+          '确认它其实可写时，可选择「强制切换」。',
+      },
+      409
+    );
+  }
+
+  // 3) Data gate. Only write-through keeps an application-level watermark; in
+  //    native mode whether the copy is complete is the database's business.
+  const notes: string[] = [];
+  let lagAtPromote = 0;
+  let watermarks: { writeSeq: number; nodes: Array<{ id: string; appliedSeq: number }> } | null = null;
+  if (stored.policy.syncMode === 'write-through') {
+    const states = await readSyncStates(env);
+    const state = states[target.id];
+    const sameDatabase = !state?.fingerprint || state.fingerprint === nodeFingerprint(target);
+    if (state?.complete !== true || !sameDatabase) notes.push('该副库没有完成过一次数据同步');
+
+    try {
+      const db = await getDatabase(env);
+      if (isMySqlClusterDatabase(db)) {
+        watermarks = db.writeWatermarks();
+        const applied = watermarks.nodes.find((node) => node.id === target.id)?.appliedSeq ?? 0;
+        lagAtPromote = Math.max(0, watermarks.writeSeq - applied);
+        if (lagAtPromote > 0) notes.push(`落后 ${lagAtPromote} 条写入`);
+        if (db.nodeHealth().find((node) => node.id === target.id)?.needsFullSync) {
+          notes.push('补写日志已不覆盖缺口');
+        }
+      }
+    } catch (error) {
+      // The cluster itself is unusable — that is usually *why* the operator is
+      // here. Without a watermark the gap cannot be measured, so say so rather
+      // than assume zero.
+      console.warn('[db-config] could not read write watermarks during promote:', error);
+      notes.push('无法读取当前写入水位');
+    }
+
+    if (notes.length > 0 && !forced) {
+      return jsonResponse(
+        {
+          ok: false,
+          blocked: true,
+          reasons: notes,
+          error:
+            `节点「${target.label}」还不能无损接管：${notes.join('；')}。` +
+            '请先保存配置并点「同步数据到副库」补齐，再切换。确知这部分数据可以放弃时，可选择「强制切换」。',
+        },
+        409
+      );
+    }
+  }
+
+  // Roles before save: the promoted node becomes primary, the outgoing primary
+  // becomes the first standby (it holds the most recent complete copy), and the
+  // remaining replicas keep their relative order.
+  const promoted: DbNodeConfig = { ...target, role: 'primary', priority: 1 };
+  const rest = stored.nodes
+    .filter((node) => node.id !== target.id)
+    .sort((a, b) => (a.role === 'primary' ? -1 : a.priority) - (b.role === 'primary' ? -1 : b.priority))
+    .map((node, index) => ({
+      ...node,
+      role: (node.role === 'primary' ? 'replica' : node.role) as DbNodeConfig['role'],
+      priority: index + 2,
+    }));
+  const nextCluster: DbRuntimeConfigV2 = {
+    version: 2,
+    mode: 'mysql',
+    nodes: [promoted, ...rest],
+    policy: stored.policy,
+  };
+
+  const saved = await saveRuntimeConfig(env, nextCluster);
+  if (!saved) {
+    return errorResponse('切换检查已通过，但配置写入失败（配置存储不可用？）。当前主库未改变。', 500);
+  }
+
+  // Level with the writer? Then the demoted primary still holds a complete copy
+  // and may serve reads / take over again. Behind? Leave it unsynced on purpose
+  // so the panel keeps saying "sync this node" instead of pretending otherwise.
+  const demotedSeq = currentPrimary
+    ? (watermarks?.nodes.find((node) => node.id === currentPrimary.id)?.appliedSeq ?? null)
+    : null;
+  const demotedLevel =
+    currentPrimary !== null &&
+    watermarks !== null &&
+    demotedSeq !== null &&
+    demotedSeq >= watermarks.writeSeq;
+  if (currentPrimary && demotedLevel) {
+    await saveNodeSyncState(env, currentPrimary.id, {
+      at: Date.now(),
+      complete: true,
+      truncated: false,
+      rowsWritten: 0,
+      tables: 0,
+      sourceId: target.id,
+      fingerprint: nodeFingerprint(currentPrimary),
+    });
+  }
+
+  await resetDatabaseCache();
+  resetDbLifecycle();
+
+  let db: D1Database;
+  try {
+    db = await getDatabase(env);
+  } catch (error) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: `主库已切换为「${target.label}」，但重建连接失败：${
+          error instanceof Error ? error.message : String(error)
+        }。请刷新本页确认节点状态。`,
+      },
+      502
+    );
+  }
+  (env as { DB: D1Database }).DB = db;
+
+  let schemaReady = false;
+  let schemaError: string | undefined;
+  try {
+    await new StorageService(db).initializeDatabase();
+    schemaReady = true;
+  } catch (initError) {
+    schemaError = initError instanceof Error ? initError.message : String(initError);
+    console.error('[db-config] schema init on the promoted node failed:', initError);
+  }
+
+  if (isMySqlClusterDatabase(db)) {
+    // The promoted node is now the writer, so the persisted "was behind" flag
+    // must not keep it out of the write path — that would answer every write
+    // with "no node can take the write" right after a successful switch. The
+    // data that was missing is reported in the warning below instead.
+    db.markNodeSynced(target.id);
+  }
+
+  await auditDbConfigChange(env, actorUser, 'admin.db_config.promoted', nextCluster);
+
+  const warnings: string[] = [];
+  if (notes.length > 0) {
+    warnings.push(
+      `已强制切换，但新主库缺少 ${notes.join('、')}：这部分数据只存在于原主库「${
+        currentPrimary?.label ?? '旧主库'
+      }」上。请尽快以原主库为源点「同步数据到副库」，把它们补到新主库。`
+    );
+  }
+  if (writability === 'read-only') {
+    warnings.push(`「${target.label}」仍然报告为只读（@@read_only=1），写入可能继续失败，请在数据库侧确认已开放写入。`);
+  }
+  if (stored.policy.syncMode === 'native') {
+    warnings.push('当前是「数据库自身复制」：应用只改了写入路由，主从关系的提升仍需在数据库侧完成。');
+  }
+  if (schemaError) warnings.push(`配置已切换，但建表失败：${schemaError}`);
+
+  const result: PromoteResult = {
+    ok: true,
+    promoted: { id: target.id, label: target.label },
+    demoted: currentPrimary ? { id: currentPrimary.id, label: currentPrimary.label } : null,
+    syncMode: stored.policy.syncMode,
+    lagAtPromote,
+    forced: forced && (notes.length > 0 || writability === 'read-only'),
+    schemaReady,
+    warning: warnings.length > 0 ? warnings.join(' ') : undefined,
+  };
+  return jsonResponse(result);
 }
 
 export async function handleAdminClearDbConfig(request: Request, env: Env, actorUser: User): Promise<Response> {

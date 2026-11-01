@@ -16,6 +16,7 @@ import { handleAdminBackupRoute } from './router-admin-backup';
 import {
   handleAdminClearDbConfig,
   handleAdminGetDbConfig,
+  handleAdminPromoteDbNode,
   handleAdminSaveDbConfig,
   handleAdminSyncDbCluster,
   handleAdminTestDbConfig,
@@ -31,6 +32,7 @@ function isKnownAdminPath(path: string): boolean {
     path === '/api/admin/db-config' ||
     path === '/api/admin/db-config/test' ||
     path === '/api/admin/db-config/sync' ||
+    path === '/api/admin/db-config/promote' ||
     path.startsWith('/api/admin/backup') ||
     /^\/api\/admin\/invites\/[^/]+$/i.test(path) ||
     /^\/api\/admin\/users\/[a-f0-9-]+(?:\/status)?$/i.test(path)
@@ -86,6 +88,10 @@ export async function handleAdminRoute(
 
   if (path === '/api/admin/db-config/sync' && method === 'POST') {
     return handleAdminSyncDbCluster(request, env, actorUser);
+  }
+
+  if (path === '/api/admin/db-config/promote' && method === 'POST') {
+    return handleAdminPromoteDbNode(request, env, actorUser);
   }
 
   const adminBackupResponse = await handleAdminBackupRoute(request, env, actorUser, path, method);
