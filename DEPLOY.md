@@ -200,7 +200,7 @@ npx wrangler r2 object list nodewarden-attachments --json > keys.json
 #### 3.6.1 阿里云 OSS（ossfs）
 
 ```bash
-# 1) 安装（Ubuntu/Debian；ossfs 2.0 需要 FUSE3，功能与稳定性都更好）
+# 1) 安装（Ubuntu/Debian；先装 FUSE 运行时，ossfs 2.0 用 fuse3，1.x 用 fuse）
 #    官方文档：help.aliyun.com → 对象存储 OSS → 常用工具 → ossfs
 sudo apt install -y fuse3
 # 按官方提供的 .deb / .rpm 包安装，或从源码构建
