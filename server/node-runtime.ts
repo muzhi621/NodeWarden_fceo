@@ -27,7 +27,7 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import { handleRequest } from '../src/router';
-import { ensureDatabaseInitialized, getDbInitError } from '../src/services/db-lifecycle';
+import { ensureDatabaseInitialized, getDbInitError, getDbInitFailure } from '../src/services/db-lifecycle';
 import { getDatabaseStatus } from '../src/services/storage-factory';
 import { clearDbConfigCache } from '../src/services/db-config';
 import { applyCors, jsonResponse } from '../src/utils/response';
@@ -454,21 +454,44 @@ export async function pipeline(request: Request, env: Env): Promise<Response> {
   }
 
   await ensureDatabaseInitialized(env);
-  const dbInitError = getDbInitError();
-  if (dbInitError) {
-    const resp = jsonResponse(
-      {
-        error: 'Database not initialized',
-        error_description: 'Database initialization failed. Check server logs for details.',
-        ErrorModel: { Message: 'Service temporarily unavailable', Object: 'error' },
-      },
-      500
-    );
-    return applyCors(request, resp, env);
-  }
+  const dbFailure = dbInitFailureResponse();
+  if (dbFailure) return applyCors(request, dbFailure, env);
 
   const resp = await handleRequest(request, env);
   return applyCors(request, resp, env);
+}
+
+/**
+ * Translate a latched DB init failure into a response.
+ *
+ * Cluster-level refusals ("every node is disabled", "no database configured")
+ * are written for the operator and carry their own status, so they are passed
+ * through. Everything else stays behind the generic message: on this runtime the
+ * message can end up in a browser, and a raw driver error names hosts and
+ * credentials.
+ */
+function dbInitFailureResponse(): Response | null {
+  const failure = getDbInitFailure();
+  if (!failure) return null;
+  console.error('DB init error:', failure.message);
+  if (failure.status) {
+    return jsonResponse(
+      {
+        error: failure.message,
+        error_description: failure.message,
+        ErrorModel: { Message: failure.message, Object: 'error' },
+      },
+      failure.status
+    );
+  }
+  return jsonResponse(
+    {
+      error: 'Database not initialized',
+      error_description: 'Database initialization failed. Check server logs for details.',
+      ErrorModel: { Message: 'Service temporarily unavailable', Object: 'error' },
+    },
+    500
+  );
 }
 
 /**

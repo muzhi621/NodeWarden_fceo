@@ -30,12 +30,49 @@ export type DbResolver = (env: Env) => Promise<D1Database>;
 
 /** Schema keys already migrated in this process. */
 const initializedKeys = new Set<string>();
-let dbInitError: string | null = null;
+/**
+ * Latched init failure.
+ *
+ * `status` is only set for failures whose message was written for a human (the
+ * cluster adapter's "no node can take the write" / "no database configured"
+ * errors). Those are answered with their own status and text instead of the
+ * generic 500, which used to tell an operator nothing at all — on a Node runtime
+ * they may not even have access to the logs.
+ */
+interface DbInitFailure {
+  message: string;
+  status?: number;
+}
+let dbInitFailure: DbInitFailure | null = null;
 /** In-flight schema init per database target (see S-1 in the review notes). */
 const initPromises = new Map<string, Promise<void>>();
 
+/**
+ * Backoff for a target whose schema init failed.
+ *
+ * A standby that is unreachable used to be retried by *every* request, and the
+ * init is awaited on the request path: with a 10s connect timeout a hung standby
+ * added 10 seconds to each request while the primary was perfectly healthy (S1).
+ * The failure is not permanent, so the target is retried after a growing delay
+ * instead of being dropped.
+ */
+const RETRY_BASE_MS = 30_000;
+const RETRY_MAX_MS = 5 * 60_000;
+const retryAfter = new Map<string, number>();
+const failureCounts = new Map<string, number>();
+
 export function getDbInitError(): string | null {
-  return dbInitError;
+  return dbInitFailure?.message ?? null;
+}
+
+/**
+ * The latched failure together with the status it was raised with (if any).
+ *
+ * Only messages that were authored for the operator carry a status; anything
+ * else is a raw driver error and must keep the generic "check the logs" answer.
+ */
+export function getDbInitFailure(): DbInitFailure | null {
+  return dbInitFailure;
 }
 
 export function isDbInitialized(): boolean {
@@ -45,8 +82,10 @@ export function isDbInitialized(): boolean {
 /** Forget the "already initialized" state so the next call re-runs the schema. */
 export function resetDbLifecycle(): void {
   initializedKeys.clear();
-  dbInitError = null;
+  dbInitFailure = null;
   initPromises.clear();
+  retryAfter.clear();
+  failureCounts.clear();
 }
 
 /** Test hook: clear module state between test cases. */
@@ -85,20 +124,32 @@ function schemaTargets(db: D1Database): SchemaTarget[] {
 async function initializeTarget(target: SchemaTarget): Promise<void> {
   if (initializedKeys.has(target.key)) return;
 
+  // Skipping inside the backoff window is the whole point: the request must not
+  // pay for a standby that was unreachable a moment ago (S1).
+  const retryAt = retryAfter.get(target.key);
+  if (retryAt !== undefined && Date.now() < retryAt) return;
+
   let pending = initPromises.get(target.key);
   if (!pending) {
     pending = (async () => {
       await new StorageService(target.db).initializeDatabase();
       initializedKeys.add(target.key);
-      if (target.isPrimary) dbInitError = null;
+      retryAfter.delete(target.key);
+      failureCounts.delete(target.key);
+      if (target.isPrimary) dbInitFailure = null;
     })()
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
+        const previous = failureCounts.get(target.key) ?? 0;
+        failureCounts.set(target.key, previous + 1);
+        const delay = Math.min(RETRY_BASE_MS * 2 ** previous, RETRY_MAX_MS);
+        retryAfter.set(target.key, Date.now() + delay);
         // A standby that cannot be migrated is reported (it would fail the
         // moment it takes over) but must not take the running primary down.
-        if (target.isPrimary) dbInitError = message;
+        if (target.isPrimary) dbInitFailure = { message };
         console.error(
-          `[db-lifecycle] schema init failed for ${target.key}${target.isPrimary ? ' (primary)' : ' (standby)'}:`,
+          `[db-lifecycle] schema init failed for ${target.key}${target.isPrimary ? ' (primary)' : ' (standby)'}; ` +
+            `retrying in ${Math.round(delay / 1000)}s:`,
           error
         );
       })
@@ -130,7 +181,15 @@ export async function ensureDatabaseInitialized(
     // getDatabase() is cached, so this is a no-op lookup in the steady state.
     db = await resolve(env);
   } catch (error) {
-    dbInitError = error instanceof Error ? error.message : String(error);
+    const message = error instanceof Error ? error.message : String(error);
+    // A cluster-level refusal ("every node is disabled", "no database is
+    // configured") explains itself, so it is passed through to the client with
+    // its own status. Everything else stays behind the generic 500.
+    const status = Number((error as { status?: unknown })?.status ?? 0);
+    dbInitFailure =
+      status === 503 && error instanceof Error && error.name === 'DbClusterUnavailableError'
+        ? { message, status }
+        : { message };
     console.error('Failed to resolve database for request env:', error);
     return;
   }
@@ -139,8 +198,8 @@ export async function ensureDatabaseInitialized(
     // Node runtime without DB_* env vars and without a stored config: the D1
     // binding does not exist here, so there is nothing to talk to. Report it as
     // an init error (controlled 500) instead of crashing on null.prepare later.
-    dbInitError = 'No database configured: set DB_* env vars or use /admin/database.';
-    console.error(dbInitError);
+    dbInitFailure = { message: 'No database configured: set DB_* env vars or use /admin/database.' };
+    console.error(dbInitFailure.message);
     return;
   }
 
@@ -157,8 +216,8 @@ export async function ensureDatabaseInitialized(
     // databases fine, so the error is stale: clear it instead of failing every
     // request until the process is recycled (C-1 in the review notes — the
     // admin "save config" path only resets the storage cache, not this latch).
-    if (dbInitError) {
-      dbInitError = null;
+    if (dbInitFailure) {
+      dbInitFailure = null;
       console.warn('[db-lifecycle] cleared a stale database init error: the same database resolved successfully again.');
     }
     return;
