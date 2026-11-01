@@ -106,7 +106,7 @@
     "jsqr": "1.4.0",
     "lucide-preact": "^1.51.0",
     "mysql2": "^3.14.0",
-    "preact": "^10.29.3",
+    "preact": "^11.1.0",
     "qrcode-generator": "^2.0.4",
     "wouter": "^3.13.0"
   }
