@@ -2457,6 +2457,11 @@
   font-weight: 600;
 }
 
+.db-node-ok {
+  color: var(--success);
+  font-weight: 600;
+}
+
 .db-node-form {
   display: grid;
   gap: 8px;

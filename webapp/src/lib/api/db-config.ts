@@ -4,6 +4,19 @@ import { parseJson } from './shared';
 export type DbNodeRole = 'primary' | 'replica';
 export type DbSyncMode = 'native' | 'write-through';
 
+export interface DbNodeSyncState {
+  /** When the last sync run finished. */
+  at: number;
+  /** Every table was walked to the end and the row counts matched. */
+  complete: boolean;
+  /** Hit a row cap / the time budget: run it again to continue. */
+  truncated: boolean;
+  rowsWritten: number;
+  tables: number;
+  /** Node the rows were copied from. */
+  sourceId?: string;
+}
+
 export interface MaskedDbNode {
   id: string;
   label: string;
@@ -17,6 +30,10 @@ export interface MaskedDbNode {
   ssl: boolean;
   connectionLimit: number;
   passwordSet: boolean;
+  /** Last sync run for this node, when one is recorded. */
+  syncStatus?: DbNodeSyncState;
+  /** False: a write-through replica that has never completed a sync. */
+  syncReady?: boolean;
 }
 
 export interface MaskedDbConfig {
@@ -60,6 +77,16 @@ export interface NodeHealthSnapshot {
   downUntil?: number;
   syncErrors: number;
   lastSyncError?: string;
+  /** Committed writes this node has not applied yet. */
+  lag?: number;
+  appliedSeq?: number;
+  missedWrites?: number;
+  behindSince?: number;
+  /** The write journal no longer covers the gap: a full sync is required. */
+  needsFullSync?: boolean;
+  /** The server rejected a write as read-only (1290/1792). */
+  writeBlocked?: boolean;
+  syncReady?: boolean;
 }
 
 export interface DbClusterLimits {
@@ -194,6 +221,13 @@ export interface DbTableSyncResult {
   rowsRead: number;
   rowsWritten: number;
   truncated: boolean;
+  /** Resume position for the next run. */
+  nextCursor?: Array<string | number | boolean | null>;
+  paging?: 'keyset' | 'offset';
+  sourceRows?: number;
+  targetRows?: number;
+  countMatches?: boolean;
+  orphanRows?: number;
   error?: string;
 }
 
@@ -201,35 +235,67 @@ export interface DbTargetSyncReport {
   id: string;
   label: string;
   ok: boolean;
+  /** Every table finished and the row counts agreed. */
+  complete: boolean;
   rowsRead: number;
   rowsWritten: number;
   truncated: boolean;
   durationMs: number;
   tables: DbTableSyncResult[];
+  countsMismatch?: string[];
+  orphanRows?: number;
   error?: string;
 }
 
 export interface DbSyncResult {
   ok: boolean;
+  complete: boolean;
   targets: DbTargetSyncReport[];
   rowsWritten: number;
   truncated: boolean;
+  source?: { id: string; label: string };
+  mode?: DbSyncCopyMode;
+}
+
+export type DbSyncCopyMode = 'merge' | 'overwrite';
+
+export interface DbSyncOptions {
+  targetIds?: string[];
+  /** Node to read from; defaults to the primary. */
+  sourceId?: string;
+  /** `merge` (default) only inserts missing rows; `overwrite` replaces them. */
+  mode?: DbSyncCopyMode;
+  force?: boolean;
 }
 
 export async function syncDbCluster(
   authedFetch: AuthedFetch,
-  targetIds?: string[]
+  options: DbSyncOptions = {}
 ): Promise<DbSyncResult> {
+  const body: Record<string, unknown> = {};
+  if (options.targetIds && options.targetIds.length > 0) body.targetIds = options.targetIds;
+  if (options.sourceId) body.sourceId = options.sourceId;
+  if (options.mode) body.mode = options.mode;
+  if (options.force) body.force = true;
+
   const resp = await authedFetch('/api/admin/db-config/sync', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(targetIds && targetIds.length > 0 ? { targetIds } : {}),
+    body: JSON.stringify(body),
   });
-  const body = await parseJson<DbSyncResult & { error?: string; targets?: DbTargetSyncReport[] }>(resp);
-  if (!body?.targets) {
-    throw new Error(body?.error || `Failed to sync database nodes (HTTP ${resp.status})`);
+  const payload = await parseJson<DbSyncResult & { error?: string; targets?: DbTargetSyncReport[] }>(resp);
+  if (!payload?.targets) {
+    throw new Error(payload?.error || `Failed to sync database nodes (HTTP ${resp.status})`);
   }
-  return { ok: body.ok === true, targets: body.targets, rowsWritten: body.rowsWritten ?? 0, truncated: body.truncated === true };
+  return {
+    ok: payload.ok === true,
+    complete: payload.complete === true,
+    targets: payload.targets,
+    rowsWritten: payload.rowsWritten ?? 0,
+    truncated: payload.truncated === true,
+    source: payload.source,
+    mode: payload.mode,
+  };
 }
 
 export async function clearDbConfig(authedFetch: AuthedFetch): Promise<{ ok: boolean }> {

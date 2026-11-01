@@ -28,6 +28,7 @@ import {
   type DbConfigStatus,
   type DbNodeInput,
   type DbNodeRole,
+  type DbSyncCopyMode,
   type MaskedDbNode,
   type NodeHealthSnapshot,
   type NodeProbeResult,
@@ -137,10 +138,25 @@ function statusTone(draft: NodeDraft, probe?: NodeProbeResult, health?: NodeHeal
     if (probe.ok) return { tone: 'ok', text: `${probe.latencyMs}ms · ${probe.version || 'MySQL'}` };
     return { tone: 'error', text: probe.error || '连接失败' };
   }
+  if (health?.writeBlocked) return { tone: 'warn', text: '只读节点（不参与写入）' };
   if (health?.downUntil && health.downUntil > Date.now()) return { tone: 'error', text: '已熔断（自动切换中）' };
+  if (health?.needsFullSync) return { tone: 'error', text: '落后过多，需要完整同步' };
   if (health?.lastError) return { tone: 'warn', text: '近期失败' };
   if (health?.lastOkAt) return { tone: 'ok', text: '运行中' };
   return { tone: 'idle', text: '未测试' };
+}
+
+/** Human-readable sync state of a node: "never synced" must be loud (B-4). */
+function syncTone(node: MaskedDbNode, health?: NodeHealthSnapshot): { tone: string; text: string } | null {
+  if (node.role === 'primary') return null;
+  const status = node.syncStatus;
+  if (!status) return { tone: 'warn', text: '尚未同步（不可接管）' };
+  const when = new Date(status.at).toLocaleString();
+  if (health?.needsFullSync) return { tone: 'error', text: '落后过多，需要完整同步' };
+  if (health?.lag) return { tone: 'warn', text: `落后 ${health.lag} 条写入（正在补齐）` };
+  if (status.truncated) return { tone: 'warn', text: `上次同步未完成（${when}），可再次同步继续` };
+  if (!status.complete) return { tone: 'warn', text: `上次同步未完成（${when}）` };
+  return { tone: 'ok', text: `已同步 ${when} · ${status.tables} 张表` };
 }
 
 const SYNC_MODE_LABEL: Record<string, string> = {
@@ -160,6 +176,10 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
   const [dirty, setDirty] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [confirmSync, setConfirmSync] = useState(false);
+  // Which node the rows are read from. The primary is the wrong source the
+  // moment a failover happened, so this is explicit rather than implied.
+  const [syncSourceId, setSyncSourceId] = useState('');
+  const [syncMode, setSyncMode] = useState<DbSyncCopyMode>('merge');
 
   const healthById = useMemo(() => {
     const map: Record<string, NodeHealthSnapshot> = {};
@@ -376,8 +396,13 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
     setBusy('sync');
     setNotice(null);
     try {
-      const result = await syncDbCluster(props.authedFetch);
+      const result = await syncDbCluster(props.authedFetch, {
+        sourceId: syncSourceId || undefined,
+        mode: syncMode,
+      });
       const failed = result.targets.filter((target) => !target.ok);
+      const partial = result.targets.filter((target) => target.ok && !target.complete);
+      const mismatched = result.targets.flatMap((target) => target.countsMismatch ?? []);
       if (failed.length > 0) {
         setNotice({
           kind: 'error',
@@ -385,12 +410,23 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
             `${failed.length}/${result.targets.length} 个副库同步失败：` +
             failed.map((target) => `${target.label}（${target.error ?? '部分数据表出错'}）`).join('、'),
         });
+      } else if (partial.length > 0) {
+        setNotice({
+          kind: 'info',
+          text:
+            `已写入 ${result.rowsWritten} 行，但 ${partial.length} 个副库还没同步完（` +
+            `${partial.map((target) => target.label).join('、')}）。` +
+            '再次点击会从上次的位置继续，直到提示「已完成」为止。',
+        });
       } else {
         setNotice({
-          kind: 'ok',
+          kind: mismatched.length > 0 ? 'info' : 'ok',
           text:
-            `同步完成：${result.targets.length} 个副库共写入 ${result.rowsWritten} 行` +
-            `${result.truncated ? '（达到单次上限，已同步部分数据，可再点一次继续补齐）' : ''}。`,
+            `同步完成：${result.targets.length} 个副库共写入 ${result.rowsWritten} 行，行数校验通过。` +
+            (mismatched.length > 0
+              ? ` 仍有 ${mismatched.length} 张表行数不一致（${mismatched.slice(0, 3).join('、')}${mismatched.length > 3 ? '…' : ''}）：` +
+                '多为同步期间的并发写入，可再同步一次；若持续不一致，说明目标端有源端已删除的行。'
+              : ''),
         });
       }
       await load();
@@ -498,7 +534,10 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
           <div className="db-node-list">
             {nodes.map((node, index) => {
               const probe = probes[node.id];
-              const tone = statusTone(node, probe, healthById[node.id]);
+              const health = healthById[node.id];
+              const tone = statusTone(node, probe, health);
+              const stored = status?.cluster.nodes.find((entry) => entry.id === node.id);
+              const sync = stored && node.enabled ? syncTone(stored, health) : null;
               const editing = editingId === node.id;
               const testing = busy === `test:${node.id}`;
               return (
@@ -597,6 +636,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
                     {healthById[node.id]?.syncErrors ? (
                       <span className="db-node-warn">同步失败 {healthById[node.id].syncErrors} 次</span>
                     ) : null}
+                    {sync ? <span className={sync.tone === 'ok' ? 'db-node-ok' : 'db-node-warn'}>{sync.text}</span> : null}
                   </div>
 
                   {editing && (
@@ -734,7 +774,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
               title={
                 policy.syncMode !== 'write-through'
                   ? '仅「应用层实时双写」需要手动同步：数据库自身复制由数据库负责'
-                  : '把主库现有数据写入副库（按主键覆盖），用于首次添加副库或修复不一致'
+                  : '把源节点的数据补到副库；默认只插入缺失行，不会覆盖已有的更新'
               }
               onClick={() => setConfirmSync(true)}
             >
@@ -743,6 +783,39 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
             </button>
           </div>
         </div>
+
+        {policy.syncMode === 'write-through' && (
+          <div className="db-grid">
+            <label className="field">
+              <span>同步源（从哪个节点读数据）</span>
+              <select
+                className="input"
+                value={syncSourceId}
+                onChange={(e) => setSyncSourceId((e.target as HTMLSelectElement).value)}
+              >
+                <option value="">主库（默认）</option>
+                {nodes
+                  .filter((node) => node.enabled)
+                  .map((node) => (
+                    <option key={node.id} value={node.id}>
+                      {node.label}（{node.role === 'primary' ? '主库' : '副库'}）
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>写入方式</span>
+              <select
+                className="input"
+                value={syncMode}
+                onChange={(e) => setSyncMode((e.target as HTMLSelectElement).value as DbSyncCopyMode)}
+              >
+                <option value="merge">只补缺失行（安全，不覆盖已有数据）</option>
+                <option value="overwrite">覆盖已有行（修复不一致）</option>
+              </select>
+            </label>
+          </div>
+        )}
 
         <div className="db-grid">
           <label className="field">
@@ -819,12 +892,23 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
             </li>
             <li>
               应用层双写只覆盖<b>配置生效之后</b>的写入。给已有数据的部署新增副库时，保存后请点一次
-              <b>「同步数据到副库」</b>，把历史数据补齐；副库接管时才不会是一张空库。
+              <b>「同步数据到副库」</b>，把历史数据补齐；<b>未同步完成的副库不会被用于读取，也不会在故障时接管</b>，
+              避免空库上线后账号全丢。
+            </li>
+            <li>
+              同步默认<b>只补缺失行</b>，不会覆盖副库上已有的数据；需要纠正不一致时才选「覆盖已有行」。
+              单次跑不完（行数上限或时间预算）时提示里会说明，再点一次会<b>从上次的位置继续</b>，
+              不会每次从头开始。
+            </li>
+            <li>
+              主库故障期间写入落在副库，主库恢复后<b>不会立刻收回写权</b>：先把落后的写入补上再切回，
+              落后过多（超出内存补写日志范围）时该节点会被标红并要求完整同步。
             </li>
             <li>
               故障切换只针对<b>连接级失败</b>（拒绝连接、超时、连接被重置等）。SQL 语法错误、唯一键冲突不会切换节点，否则同一条语句会被执行两次。
+              写入报「无法确认是否已提交」时不会自动重放——那正是避免重复写入的保护。
             </li>
-            <li>节点健康状态保存在当前进程内：多实例部署时每个实例各自判断，切换互不影响。</li>
+            <li>节点健康与补写日志保存在当前进程内：多实例部署时每个实例各自判断，建议只让一个实例承担写入（或改用数据库自身复制）。</li>
           </ul>
         </div>
       </section>
@@ -847,8 +931,13 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
       <ConfirmDialog
         open={confirmSync}
         variant="warning"
-        title="把主库数据同步到副库？"
-        message="将逐表读取主库并写入所有启用的副库，主键相同的行会被主库数据覆盖。数据量大时可能只同步一部分，再次点击可继续补齐。此操作只写副库，不影响主库。"
+        title="把源节点的数据同步到副库？"
+        message={
+          (syncMode === 'overwrite'
+            ? '将逐表读取源节点并覆盖副库中主键相同的行——副库上更新的数据会被改回源节点的版本。'
+            : '将逐表读取源节点，只把副库缺少的行插入（不会覆盖副库已有的数据）。') +
+          '数据量大时会分批进行，未跑完可再次点击，从上次的位置继续。此操作只写副库，不影响源节点。'
+        }
         confirmText="开始同步"
         cancelText="取消"
         onConfirm={() => void onSync()}
