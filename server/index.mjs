@@ -6323,7 +6323,7 @@ var APP_VERSION;
 var init_app_version = __esm({
   "shared/app-version.ts"() {
     "use strict";
-    APP_VERSION = "1.8.3";
+    APP_VERSION = "1.8.4";
   }
 });
 
@@ -35731,8 +35731,14 @@ var CONFIG_OBJECT_KEY = "__system__/db-config.json";
 var CONFIG_KV_KEY = "db-config:v1";
 var SYNC_STATUS_OBJECT_KEY = "__system__/db-sync-status.json";
 var SYNC_STATUS_KV_KEY = "db-sync-status:v1";
+var WATERMARK_OBJECT_KEY = "__system__/db-watermark.json";
+var WATERMARK_KV_KEY = "db-watermark:v1";
 var CONFIG_KEYS = { kv: CONFIG_KV_KEY, object: CONFIG_OBJECT_KEY };
 var SYNC_STATUS_KEYS = { kv: SYNC_STATUS_KV_KEY, object: SYNC_STATUS_OBJECT_KEY };
+var WATERMARK_KEYS = { kv: WATERMARK_KV_KEY, object: WATERMARK_OBJECT_KEY };
+function nodeFingerprint(node) {
+  return `${node.host}|${node.port}|${node.database}`;
+}
 var DEFAULT_CLUSTER_POLICY = {
   readSplit: false,
   syncMode: "native",
@@ -35858,7 +35864,9 @@ async function writeStoredText(env, keys, payload) {
     if (payload) {
       await env.ATTACHMENTS.put(keys.object, payload, {
         httpMetadata: { contentType: "application/json" },
-        customMetadata: { purpose: keys === SYNC_STATUS_KEYS ? "db-sync-status" : "db-config" }
+        customMetadata: {
+          purpose: keys.object === SYNC_STATUS_OBJECT_KEY ? "db-sync-status" : keys.object === WATERMARK_OBJECT_KEY ? "db-watermark" : "db-config"
+        }
       });
     } else {
       await env.ATTACHMENTS.delete(keys.object);
@@ -35915,6 +35923,7 @@ function normalizeSyncState(raw) {
   return {
     at,
     complete: input.complete === true,
+    fingerprint: typeof input.fingerprint === "string" && input.fingerprint ? input.fingerprint : void 0,
     truncated: input.truncated === true,
     rowsWritten: Number(input.rowsWritten ?? 0) || 0,
     tables: Number(input.tables ?? 0) || 0,
@@ -35955,10 +35964,53 @@ async function saveNodeSyncState(env, nodeId, state2) {
   if (saved && ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: next });
   return saved;
 }
+async function deleteNodeSyncStates(env, ids) {
+  if (ids.length === 0) return;
+  const current = await readSyncStates(env);
+  const next = { ...current };
+  let changed = false;
+  for (const id of ids) {
+    if (!(id in next)) continue;
+    delete next[id];
+    changed = true;
+  }
+  if (!changed) return;
+  await writeStoredText(env, SYNC_STATUS_KEYS, JSON.stringify(next));
+  const ref = cacheStoreRef(env);
+  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: next });
+}
 async function clearSyncStates(env) {
   await writeStoredText(env, SYNC_STATUS_KEYS, null).catch(() => false);
   const ref = cacheStoreRef(env);
   if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: {} });
+  await clearClusterWatermark(env);
+}
+async function readClusterWatermark(env) {
+  try {
+    const raw = await readStoredText(env, WATERMARK_KEYS);
+    if (!raw) return null;
+    const parsed = asRecord(JSON.parse(raw));
+    if (!parsed) return null;
+    const writeSeq = Number(parsed.writeSeq);
+    if (!Number.isFinite(writeSeq) || writeSeq <= 0) return null;
+    const nodes = {};
+    const rawNodes = asRecord(parsed.nodes);
+    if (rawNodes) {
+      for (const [id, value] of Object.entries(rawNodes)) {
+        const seq = Number(value);
+        if (Number.isFinite(seq) && seq >= 0) nodes[id] = Math.floor(seq);
+      }
+    }
+    return { writeSeq: Math.floor(writeSeq), nodes };
+  } catch {
+    return null;
+  }
+}
+async function saveClusterWatermark(env, snapshot) {
+  return writeStoredText(env, WATERMARK_KEYS, JSON.stringify(snapshot)).catch(() => false);
+}
+async function clearClusterWatermark(env) {
+  await writeStoredText(env, WATERMARK_KEYS, null).catch(() => false);
 }
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -36103,7 +36155,8 @@ function resolveDbConfigFromEnv(env) {
 function toResolvedNodes(config, syncStates) {
   const writeThrough = config.policy.syncMode === "write-through";
   return config.nodes.filter((node) => node.enabled).map((node) => {
-    const syncStatus = syncStates[node.id];
+    const recorded = syncStates[node.id];
+    const syncStatus = recorded && recorded.fingerprint && recorded.fingerprint !== nodeFingerprint(node) ? void 0 : recorded;
     return {
       ...node,
       source: "runtime",
@@ -36152,6 +36205,13 @@ async function resolveDbCluster(env) {
     if (nodes.length > 0) {
       return { mode: "mysql", source: "runtime", nodes, policy: runtime2.policy };
     }
+    return {
+      mode: "d1",
+      source: "d1",
+      nodes: [],
+      policy: runtime2.policy,
+      unavailableReason: runtime2.nodes.length > 0 ? `\u5DF2\u4FDD\u5B58\u7684 MySQL \u96C6\u7FA4\u914D\u7F6E\u4E2D\u6709 ${runtime2.nodes.length} \u4E2A\u8282\u70B9\uFF0C\u4F46\u5168\u90E8\u5904\u4E8E\u300C\u505C\u7528\u300D\u72B6\u6001` : "\u5DF2\u4FDD\u5B58\u7684 MySQL \u96C6\u7FA4\u914D\u7F6E\u91CC\u6CA1\u6709\u4EFB\u4F55\u8282\u70B9"
+    };
   }
   return { mode: "d1", source: "d1", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } };
 }
@@ -36209,7 +36269,8 @@ function maskCluster(cluster) {
     mode: cluster.mode,
     source: cluster.source,
     nodes: cluster.nodes.map(maskNode),
-    policy: cluster.policy
+    policy: cluster.policy,
+    unavailableReason: cluster.unavailableReason
   };
 }
 function maskConfig(config) {
@@ -36281,6 +36342,7 @@ var WRITE_JOURNAL_MAX_ENTRIES = 2e3;
 var WRITE_JOURNAL_MAX_BYTES = 2e6;
 var JOURNAL_ENTRY_OVERHEAD = 96;
 var READ_YOUR_WRITES_MS = 1e3;
+var READ_YOUR_WRITES_ASYNC_MS = 3e3;
 var WRITE_BLOCKED_COOLDOWN_MS = 6e4;
 function nodeFailureMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -36380,6 +36442,7 @@ var MySqlClusterDatabase = class {
   clusterNodes = true;
   nodes;
   policy;
+  onWatermarkChange;
   readCursor = 0;
   /** Sequence of the last committed write (0 = nothing written yet). */
   writeSeq = 0;
@@ -36389,8 +36452,9 @@ var MySqlClusterDatabase = class {
   /** Node that currently holds the latest data (sticky across a failover). */
   activeWriterId = null;
   lastWriteAt = 0;
-  constructor(specs, policy, createDb = defaultNodeFactory) {
+  constructor(specs, policy, createDb = defaultNodeFactory, options = {}) {
     this.policy = policy;
+    this.onWatermarkChange = options.onWatermarkChange;
     const ordered = [...specs].sort((a, b) => {
       if (a.role !== b.role) return a.role === "primary" ? -1 : 1;
       return a.priority - b.priority;
@@ -36416,6 +36480,61 @@ var MySqlClusterDatabase = class {
       writeBlockedUntil: 0,
       replayChain: Promise.resolve()
     }));
+    this.applyInitialWatermark(options.watermark);
+  }
+  /**
+   * Restore "who was behind" from the previous process (B1).
+   *
+   * A node recorded as level with the writer stays usable; one recorded as
+   * behind keeps that state and is flagged `needsFullSync`, because the journal
+   * entries that could bridge the gap died with the old process. Treating both
+   * as "0 == 0" is what made a restart silently un-flag a stale standby.
+   */
+  applyInitialWatermark(watermark) {
+    if (!watermark || this.policy.syncMode !== "write-through") return;
+    const writeSeq = Number(watermark.writeSeq);
+    if (!Number.isFinite(writeSeq) || writeSeq <= 0) return;
+    this.writeSeq = Math.floor(writeSeq);
+    for (const node of this.nodes) {
+      const recorded = watermark.nodes?.[node.spec.id];
+      if (!Number.isFinite(Number(recorded))) continue;
+      node.appliedSeq = Math.max(0, Math.floor(Number(recorded)));
+      if (node.appliedSeq < this.writeSeq) {
+        node.needsFullSync = true;
+        node.behindSince = Date.now();
+        node.missedWrites = this.writeSeq - node.appliedSeq;
+        console.warn(
+          `[db-cluster] node "${node.spec.label}" was ${node.missedWrites} writes behind when the process restarted; it stays out of rotation until a full sync is run from /admin/database`
+        );
+      }
+    }
+  }
+  /** Current watermark, for persistence (see `onWatermarkChange`). */
+  watermarkSnapshot() {
+    const nodes = {};
+    for (const node of this.nodes) nodes[node.spec.id] = node.appliedSeq;
+    return { writeSeq: this.writeSeq, nodes };
+  }
+  notifyWatermark() {
+    if (!this.onWatermarkChange || this.policy.syncMode !== "write-through") return;
+    try {
+      this.onWatermarkChange(this.watermarkSnapshot());
+    } catch (error) {
+      console.warn("[db-cluster] could not record the write watermark:", error);
+    }
+  }
+  /**
+   * Refresh per-node readiness from persisted sync state without rebuilding the
+   * connection pools (S2). Cache keys deliberately exclude `syncReady` (it
+   * changes on every sync, and rebuilding pools for that would drop every
+   * in-flight connection), so a cached instance has to be told about it.
+   */
+  applySyncReadiness(readiness) {
+    for (const node of this.nodes) {
+      const next = readiness.get(node.spec.id);
+      if (next === void 0 || node.spec.syncReady === next) continue;
+      node.spec = { ...node.spec, syncReady: next };
+    }
   }
   getPolicy() {
     return this.policy;
@@ -36440,18 +36559,24 @@ var MySqlClusterDatabase = class {
     };
   }
   /**
-   * Record that `id` now holds everything (the admin ran a complete sync).
+   * Record that `id` now holds everything that existed when the sync *started*.
    *
-   * Also clears the journal gap flag: the operator just paid for a full copy, so
-   * the node is usable again without a restart.
+   * `syncedThroughSeq` is the watermark captured **before** the copy ran. Writes
+   * that committed while the copy was in flight are not covered by it — they are
+   * still in the journal and get replayed on the next write (B2). Passing no
+   * sequence keeps the old "everything up to now" behaviour, which is only
+   * correct for callers that really did copy the live database atomically.
    */
-  markNodeSynced(id) {
+  markNodeSynced(id, syncedThroughSeq) {
     const node = this.nodes.find((entry) => entry.spec.id === id);
     if (!node) return;
-    node.appliedSeq = this.writeSeq;
+    const through = syncedThroughSeq === void 0 ? this.writeSeq : Math.max(0, syncedThroughSeq);
+    node.appliedSeq = Math.max(node.appliedSeq, Math.min(through, this.writeSeq));
     node.needsFullSync = false;
     node.spec = { ...node.spec, syncReady: true };
-    this.clearBehind(node);
+    if (node.appliedSeq >= this.writeSeq) this.clearBehind(node);
+    else this.markBehind(node);
+    this.notifyWatermark();
   }
   nodeHealth() {
     const now = Date.now();
@@ -36508,12 +36633,16 @@ var MySqlClusterDatabase = class {
     }
   }
   markBehind(node) {
-    if (node.behindSince === void 0) node.behindSince = Date.now();
+    const first = node.behindSince === void 0;
+    if (first) node.behindSince = Date.now();
     node.missedWrites = Math.max(node.missedWrites, this.writeSeq - node.appliedSeq);
+    if (first) this.notifyWatermark();
   }
   clearBehind(node) {
+    const wasBehind = node.behindSince !== void 0 || node.missedWrites > 0;
     node.behindSince = void 0;
     node.missedWrites = 0;
+    if (wasBehind) this.notifyWatermark();
   }
   markNeedsFullSync(node) {
     this.markBehind(node);
@@ -36522,6 +36651,7 @@ var MySqlClusterDatabase = class {
     console.warn(
       `[db-cluster] node "${node.spec.label}" is ${this.writeSeq - node.appliedSeq} writes behind and the journal no longer covers the gap; it stays out of rotation until a full sync is run from the admin page.`
     );
+    this.notifyWatermark();
   }
   isCaughtUp(node) {
     if (this.policy.syncMode !== "write-through") return true;
@@ -36580,7 +36710,8 @@ var MySqlClusterDatabase = class {
     if (!this.policy.readSplit) {
       return [...candidates].sort((a, b) => a.spec.role === b.spec.role ? 0 : a.spec.role === "primary" ? -1 : 1);
     }
-    if (Date.now() - this.lastWriteAt < READ_YOUR_WRITES_MS) {
+    const window = this.policy.syncAsync ? READ_YOUR_WRITES_ASYNC_MS : READ_YOUR_WRITES_MS;
+    if (Date.now() - this.lastWriteAt < window) {
       const writer = candidates.find((node) => node.spec.id === this.activeWriterId);
       if (writer) return [writer, ...candidates.filter((node) => node !== writer)];
     }
@@ -36667,6 +36798,16 @@ var MySqlClusterDatabase = class {
    * The sequence is assigned and the entry stored without an `await` in
    * between, so the journal is always dense (1..writeSeq) and two concurrent
    * requests cannot interleave their numbering.
+   *
+   * Caveat (S6): the number is the order in which this process *observed* the
+   * commit, which the driver normally reports in commit order but is not
+   * guaranteed to. Two concurrent statements that touch the same row could in
+   * principle be replayed in the opposite order, leaving the standby with the
+   * other value and no error to show for it. Replay is still strictly
+   * sequential and idempotent; making the ordering airtight would need the
+   * server's own commit sequence (binlog position) or a transaction-id column,
+   * which is out of scope for a D1-compatible adapter. Rows written by a single
+   * request are unaffected (they are journalled as one entry).
    */
   recordWrite(node, statements) {
     this.activeWriterId = node.spec.id;
@@ -36888,20 +37029,65 @@ function toSpecs(cluster) {
 async function getDatabase(env) {
   const cluster = await resolveDbCluster(env);
   if (cluster.mode !== "mysql" || cluster.nodes.length === 0) {
+    if (cluster.unavailableReason) {
+      throw new DbClusterUnavailableError(
+        `${cluster.unavailableReason}\u3002\u5E94\u7528\u5F53\u524D\u6CA1\u6709\u4EFB\u4F55\u53EF\u7528\u7684\u6570\u636E\u5E93\uFF1A\u8BF7\u5728 /admin/database \u542F\u7528\u81F3\u5C11\u4E00\u4E2A\u8282\u70B9\u5E76\u4FDD\u5B58\uFF0C\u6216\u6E05\u9664\u914D\u7F6E\u56DE\u9000\u5230\u5185\u7F6E\u6570\u636E\u5E93\u3002`
+      );
+    }
+    if (!env.DB) {
+      throw new DbClusterUnavailableError(
+        "\u5F53\u524D\u8FD0\u884C\u73AF\u5883\u6CA1\u6709\u5185\u7F6E\u6570\u636E\u5E93\uFF08D1\uFF09\uFF0C\u4E5F\u6CA1\u6709\u914D\u7F6E\u5916\u63A5 MySQL\uFF1A\u8BF7\u8BBE\u7F6E DB_* \u73AF\u5883\u53D8\u91CF\uFF0C\u6216\u5728 /admin/database \u914D\u7F6E\u4E00\u4E2A MySQL \u8282\u70B9\u3002"
+      );
+    }
     return env.DB;
   }
   const cacheKey2 = cacheKeyFor(cluster);
   if (cached && cached.cacheKey === cacheKey2) {
+    applySyncReadiness(cached.db, cluster);
     return cached.db;
   }
   if (cached && isMySqlDatabase(cached.db)) {
     await cached.db.close();
   }
-  const db = new MySqlClusterDatabase(toSpecs(cluster), cluster.policy);
+  const watermark = await readClusterWatermark(env);
+  const db = new MySqlClusterDatabase(toSpecs(cluster), cluster.policy, void 0, {
+    watermark,
+    onWatermarkChange: (snapshot) => queueWatermark(env, snapshot)
+  });
   cached = { cacheKey: cacheKey2, db };
   return cached.db;
 }
+function applySyncReadiness(db, cluster) {
+  const adapter = db;
+  adapter.applySyncReadiness?.(new Map(cluster.nodes.map((node) => [node.id, node.syncReady])));
+}
+var watermarkTimer = null;
+var pendingWatermark = null;
+var watermarkEnv = null;
+function queueWatermark(env, snapshot) {
+  pendingWatermark = snapshot;
+  watermarkEnv = env;
+  if (watermarkTimer) return;
+  const timer = setTimeout(() => {
+    watermarkTimer = null;
+    const next = pendingWatermark;
+    const target = watermarkEnv;
+    pendingWatermark = null;
+    if (!next || !target) return;
+    void saveClusterWatermark(target, next).catch((error) => {
+      console.warn("[db-cluster] could not persist the write watermark:", error);
+    });
+  }, 50);
+  timer.unref?.();
+  watermarkTimer = timer;
+}
 async function resetDatabaseCache() {
+  if (watermarkTimer) {
+    clearTimeout(watermarkTimer);
+    watermarkTimer = null;
+  }
+  pendingWatermark = null;
+  watermarkEnv = null;
   if (cached && isMySqlDatabase(cached.db)) {
     await cached.db.close();
   }
@@ -36925,6 +37111,16 @@ async function getDatabaseStatus(env) {
     ].join("|");
     if (statusCache && statusCache.key === cacheKey2 && Date.now() - statusCache.at < STATUS_CACHE_MS) {
       return statusCache.value;
+    }
+    if (cluster.mode === "d1" && cluster.unavailableReason) {
+      const unusable = {
+        mode: "d1",
+        source: "d1",
+        ok: false,
+        error: `${cluster.unavailableReason}\u3002\u8BF7\u542F\u7528\u81F3\u5C11\u4E00\u4E2A\u8282\u70B9\uFF0C\u6216\u6E05\u9664\u914D\u7F6E\u56DE\u9000\u5230\u5185\u7F6E\u6570\u636E\u5E93\u3002`
+      };
+      statusCache = { key: cacheKey2, at: Date.now(), value: unusable };
+      return unusable;
     }
     if (cluster.mode === "d1" && !env.DB) {
       const missing = {
@@ -37052,6 +37248,7 @@ async function syncTable(source, target, table, options = {}, startedAt = Date.n
     truncated: false,
     paging: "keyset"
   };
+  let targetRowsBefore = null;
   try {
     const columns = await discoverColumns(source, table);
     if (columns.length === 0) {
@@ -37073,6 +37270,9 @@ async function syncTable(source, target, table, options = {}, startedAt = Date.n
     }
     let limit = Math.min(chunkSize, maxRows);
     let cursorOut;
+    if (mode === "merge" && verifyCounts) {
+      targetRowsBefore = await countRows(target, table);
+    }
     for (; ; ) {
       if (result.rowsRead >= maxRows) {
         result.truncated = true;
@@ -37129,6 +37329,9 @@ async function syncTable(source, target, table, options = {}, startedAt = Date.n
         result.countMatches = sourceRows === targetRows;
         if (targetRows > sourceRows) result.orphanRows = targetRows - sourceRows;
       }
+      if (mode === "merge" && targetRowsBefore !== null && targetRows !== null) {
+        result.rowsInserted = Math.max(0, targetRows - targetRowsBefore);
+      }
     }
     return result;
   } catch (error) {
@@ -37184,6 +37387,8 @@ async function syncDatabase(source, target, options = {}) {
   }
   const rowsRead = results.reduce((sum, entry) => sum + entry.rowsRead, 0);
   const rowsWritten = results.reduce((sum, entry) => sum + entry.rowsWritten, 0);
+  const measured = results.filter((entry) => entry.rowsInserted !== void 0);
+  const rowsInserted = measured.length > 0 ? measured.reduce((sum, entry) => sum + (entry.rowsInserted ?? 0), 0) : void 0;
   const cursors = {};
   for (const entry of results) {
     if (entry.nextCursor) cursors[entry.table] = entry.nextCursor;
@@ -37195,6 +37400,7 @@ async function syncDatabase(source, target, options = {}) {
     tables: results,
     rowsRead,
     rowsWritten,
+    rowsInserted,
     truncated: results.some((entry) => entry.truncated),
     durationMs: Date.now() - startedAt,
     cursors
@@ -37204,15 +37410,24 @@ async function syncDatabase(source, target, options = {}) {
 // src/services/db-lifecycle.ts
 init_storage();
 var initializedKeys = /* @__PURE__ */ new Set();
-var dbInitError = null;
+var dbInitFailure = null;
 var initPromises = /* @__PURE__ */ new Map();
+var RETRY_BASE_MS = 3e4;
+var RETRY_MAX_MS = 5 * 6e4;
+var retryAfter = /* @__PURE__ */ new Map();
+var failureCounts = /* @__PURE__ */ new Map();
 function getDbInitError() {
-  return dbInitError;
+  return dbInitFailure?.message ?? null;
+}
+function getDbInitFailure() {
+  return dbInitFailure;
 }
 function resetDbLifecycle() {
   initializedKeys.clear();
-  dbInitError = null;
+  dbInitFailure = null;
   initPromises.clear();
+  retryAfter.clear();
+  failureCounts.clear();
 }
 function attachDatabase(env, db) {
   env.DB = db;
@@ -37229,17 +37444,25 @@ function schemaTargets(db) {
 }
 async function initializeTarget(target) {
   if (initializedKeys.has(target.key)) return;
+  const retryAt = retryAfter.get(target.key);
+  if (retryAt !== void 0 && Date.now() < retryAt) return;
   let pending = initPromises.get(target.key);
   if (!pending) {
     pending = (async () => {
       await new StorageService(target.db).initializeDatabase();
       initializedKeys.add(target.key);
-      if (target.isPrimary) dbInitError = null;
+      retryAfter.delete(target.key);
+      failureCounts.delete(target.key);
+      if (target.isPrimary) dbInitFailure = null;
     })().catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
-      if (target.isPrimary) dbInitError = message;
+      const previous = failureCounts.get(target.key) ?? 0;
+      failureCounts.set(target.key, previous + 1);
+      const delay = Math.min(RETRY_BASE_MS * 2 ** previous, RETRY_MAX_MS);
+      retryAfter.set(target.key, Date.now() + delay);
+      if (target.isPrimary) dbInitFailure = { message };
       console.error(
-        `[db-lifecycle] schema init failed for ${target.key}${target.isPrimary ? " (primary)" : " (standby)"}:`,
+        `[db-lifecycle] schema init failed for ${target.key}${target.isPrimary ? " (primary)" : " (standby)"}; retrying in ${Math.round(delay / 1e3)}s:`,
         error
       );
     }).finally(() => {
@@ -37254,21 +37477,23 @@ async function ensureDatabaseInitialized(env, resolve = getDatabase) {
   try {
     db = await resolve(env);
   } catch (error) {
-    dbInitError = error instanceof Error ? error.message : String(error);
+    const message = error instanceof Error ? error.message : String(error);
+    const status = Number(error?.status ?? 0);
+    dbInitFailure = status === 503 && error instanceof Error && error.name === "DbClusterUnavailableError" ? { message, status } : { message };
     console.error("Failed to resolve database for request env:", error);
     return;
   }
   if (!db) {
-    dbInitError = "No database configured: set DB_* env vars or use /admin/database.";
-    console.error(dbInitError);
+    dbInitFailure = { message: "No database configured: set DB_* env vars or use /admin/database." };
+    console.error(dbInitFailure.message);
     return;
   }
   attachDatabase(env, db);
   const targets = schemaTargets(db);
   const alreadyInitialized = targets.every((target) => initializedKeys.has(target.key));
   if (alreadyInitialized) {
-    if (dbInitError) {
-      dbInitError = null;
+    if (dbInitFailure) {
+      dbInitFailure = null;
       console.warn("[db-lifecycle] cleared a stale database init error: the same database resolved successfully again.");
     }
     return;
@@ -37662,6 +37887,26 @@ async function bootstrapSchemaOnCandidate(config) {
     await probe.close();
   }
 }
+async function hasUserRows(node) {
+  const db = new MySqlDatabase({
+    host: node.host || "",
+    port: node.port || 3306,
+    user: node.user || "",
+    password: node.password || "",
+    database: node.database || "",
+    ssl: node.ssl !== false,
+    connectionLimit: 1,
+    connectTimeoutMs: 8e3
+  });
+  try {
+    const row = await db.prepare("SELECT 1 AS present FROM users LIMIT 1").first();
+    return !!row;
+  } catch {
+    return null;
+  } finally {
+    await db.close();
+  }
+}
 function clearingWouldLeaveNoDatabase(env) {
   return !resolveDbConfigFromEnv(env) && !env.DB;
 }
@@ -37738,6 +37983,22 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
   if (!saved) {
     return errorResponse("Failed to persist database config", 500);
   }
+  const previousNodes = stored?.nodes ?? [];
+  const staleSyncIds = previousNodes.filter((previous) => {
+    const next = cluster.nodes.find((node) => node.id === previous.id);
+    return !next || nodeFingerprint(previous) !== nodeFingerprint(next);
+  }).map((node) => node.id);
+  await deleteNodeSyncStates(env, [...new Set(staleSyncIds)]);
+  const emptyStandbys = [];
+  if (cluster.policy.syncMode === "native") {
+    const replicas = enabled.filter((node) => node.role === "replica");
+    const primaryCandidate = enabled.find((node) => node.role === "primary");
+    if (replicas.length > 0 && primaryCandidate && await hasUserRows(primaryCandidate)) {
+      for (const replica of replicas) {
+        if (await hasUserRows(replica) === false) emptyStandbys.push(replica.label);
+      }
+    }
+  }
   await resetDatabaseCache();
   resetDbLifecycle();
   const db = await getDatabase(env);
@@ -37757,13 +38018,20 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
   let syncPending = [];
   if (cluster.policy.syncMode === "write-through") {
     const states = await readSyncStates(env);
-    syncPending = cluster.nodes.filter((node) => node.enabled && node.role === "replica" && states[node.id]?.complete !== true).map((node) => node.id);
+    syncPending = cluster.nodes.filter((node) => {
+      if (!node.enabled || node.role !== "replica") return false;
+      const state2 = states[node.id];
+      if (!state2 || state2.complete !== true) return true;
+      return !!state2.fingerprint && state2.fingerprint !== nodeFingerprint(node);
+    }).map((node) => node.id);
   }
   const syncWarning = syncPending.length > 0 ? `${syncPending.length} \u4E2A\u526F\u5E93\u5C1A\u672A\u5B8C\u6210\u540C\u6B65\uFF0C\u6545\u969C\u5207\u6362\u524D\u8BF7\u5148\u70B9\u300C\u540C\u6B65\u6570\u636E\u5230\u526F\u5E93\u300D\uFF0C\u5426\u5219\u63A5\u7BA1\u65F6\u4F1A\u7F3A\u5C11\u5386\u53F2\u6570\u636E\u3002` : void 0;
+  const standbyWarning = emptyStandbys.length > 0 ? `\u526F\u5E93\u300C${emptyStandbys.join("\u300D\u300C")}\u300D\u91CC\u4E00\u6761\u8D26\u53F7\u6570\u636E\u90FD\u6CA1\u6709\uFF0C\u800C\u4E3B\u5E93\u6709\u6570\u636E\uFF1A\u5F53\u524D\u526F\u5E93\u540C\u6B65\u65B9\u5F0F\u662F\u300C\u6570\u636E\u5E93\u81EA\u8EAB\u590D\u5236\u300D\uFF0C\u5982\u679C\u8BE5\u5E93\u5E76\u6CA1\u6709\u771F\u6B63\u63A5\u5165 MySQL \u4E3B\u4ECE\u590D\u5236\uFF0C\u4E3B\u5E93\u6545\u969C\u540E\u5207\u6362\u8FC7\u53BB\u5C06\u770B\u4E0D\u5230\u4EFB\u4F55\u8D26\u53F7\u3002\u8BF7\u5148\u786E\u8BA4\u590D\u5236\u5DF2\u751F\u6548\uFF0C\u6216\u6539\u4E3A\u300C\u5E94\u7528\u5C42\u5B9E\u65F6\u53CC\u5199\u300D\u5E76\u70B9\u4E00\u6B21\u300C\u540C\u6B65\u6570\u636E\u5230\u526F\u5E93\u300D\u3002` : void 0;
   const warning = [
     envOverride ? "DB_* \u73AF\u5883\u53D8\u91CF\u4F18\u5148\u4E8E\u8FD0\u884C\u65F6\u914D\u7F6E\uFF1A\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5F53\u524D\u751F\u6548\u7684\u4ECD\u662F\u73AF\u5883\u53D8\u91CF\u6307\u5411\u7684\u6570\u636E\u5E93\u3002" : null,
     schemaError ? `\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5EFA\u8868\u5931\u8D25\uFF1A${schemaError}` : null,
-    syncWarning
+    syncWarning,
+    standbyWarning
   ].filter((entry) => !!entry).join(" ");
   return jsonResponse({
     ok: true,
@@ -37773,6 +38041,7 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
     warning: warning || void 0,
     schemaReady,
     syncPending: syncPending.length > 0 ? syncPending : void 0,
+    emptyStandbys: emptyStandbys.length > 0 ? emptyStandbys : void 0,
     latencyMs: Math.max(...probes.map((result) => result.latencyMs), 0),
     version: probes.find((result) => result.role === "primary")?.version,
     nodes: probes,
@@ -37838,6 +38107,7 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
     }
   }
   const storedStates = await readSyncStates(env);
+  const syncedThroughSeq = watermarks.writeSeq;
   const deadline = Date.now() + 9e4;
   const reports = [];
   for (const target of targets) {
@@ -37876,9 +38146,10 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
       rowsWritten: result.rowsWritten,
       tables: result.tables.length,
       sourceId: source.id,
+      fingerprint: spec ? nodeFingerprint(spec) : void 0,
       cursors: complete ? void 0 : result.cursors
     });
-    if (complete) db.markNodeSynced(target.id);
+    if (complete) db.markNodeSynced(target.id, syncedThroughSeq);
     reports.push({
       id: target.id,
       label: spec?.label ?? target.id,
@@ -37886,6 +38157,7 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
       complete,
       rowsRead: result.rowsRead,
       rowsWritten: result.rowsWritten,
+      rowsInserted: result.rowsInserted,
       truncated: result.truncated,
       durationMs: result.durationMs,
       tables: result.tables,
@@ -37908,10 +38180,204 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
       complete: reports.every((report) => report.complete),
       targets: reports,
       rowsWritten: reports.reduce((sum, report) => sum + report.rowsWritten, 0),
+      // Only meaningful when every target measured it; a partial sum would
+      // understate the copy without saying so.
+      rowsInserted: reports.every((report) => report.rowsInserted !== void 0) ? reports.reduce((sum, report) => sum + (report.rowsInserted ?? 0), 0) : void 0,
       truncated: reports.some((report) => report.truncated)
     },
     ok ? 200 : 502
   );
+}
+async function probeWritability(node) {
+  const db = new MySqlDatabase({
+    host: node.host || "",
+    port: node.port || 3306,
+    user: node.user || "",
+    password: node.password || "",
+    database: node.database || "",
+    ssl: node.ssl !== false,
+    connectionLimit: 1,
+    connectTimeoutMs: 8e3
+  });
+  try {
+    const row = await db.prepare("SELECT @@GLOBAL.read_only AS ro").first();
+    const readOnly = Number(row?.ro ?? 0) === 1;
+    let superReadOnly = false;
+    try {
+      const extra = await db.prepare("SELECT @@GLOBAL.super_read_only AS sro").first();
+      superReadOnly = Number(extra?.sro ?? 0) === 1;
+    } catch {
+    }
+    return readOnly || superReadOnly ? "read-only" : "writable";
+  } catch (error) {
+    console.warn("[db-config] could not read the read_only flag:", error);
+    return "unknown";
+  } finally {
+    await db.close();
+  }
+}
+async function handleAdminPromoteDbNode(request, env, actorUser) {
+  const body = await readJsonBody3(request);
+  const targetId = String(body.nodeId ?? "").trim();
+  const forced = wantsForce(request) || body.force === true;
+  if (!targetId) return errorResponse("\u7F3A\u5C11 nodeId\uFF1A\u8BF7\u6307\u5B9A\u8981\u63D0\u5347\u4E3A\u4E3B\u5E93\u7684\u8282\u70B9\u3002", 400);
+  if (resolveDbConfigFromEnv(env)) {
+    return errorResponse(
+      "DB_* \u73AF\u5883\u53D8\u91CF\u4F18\u5148\u4E8E\u8FD0\u884C\u65F6\u914D\u7F6E\uFF1A\u4E3B\u5E93\u7531\u73AF\u5883\u53D8\u91CF\u51B3\u5B9A\uFF0C\u9875\u9762\u4E0A\u7684\u5207\u6362\u4E0D\u4F1A\u751F\u6548\u3002\u8BF7\u4FEE\u6539\u73AF\u5883\u53D8\u91CF\u540E\u91CD\u542F\u3002",
+      409
+    );
+  }
+  const stored = await loadRuntimeConfig(env);
+  if (!stored) {
+    return errorResponse("\u5F53\u524D\u6CA1\u6709\u53EF\u7F16\u8F91\u7684\u8FD0\u884C\u65F6\u914D\u7F6E\uFF08\u6570\u636E\u5E93\u7531 D1 \u6216\u73AF\u5883\u53D8\u91CF\u63D0\u4F9B\uFF09\uFF0C\u65E0\u9700\u5207\u6362\u3002", 400);
+  }
+  const target = stored.nodes.find((node) => node.id === targetId);
+  if (!target) return errorResponse(`\u672A\u77E5\u7684\u8282\u70B9\uFF1A${targetId}`, 404);
+  if (!target.enabled) {
+    return errorResponse(`\u8282\u70B9\u300C${target.label}\u300D\u5DF2\u505C\u7528\uFF0C\u542F\u7528\u540E\u624D\u80FD\u63A5\u7BA1\u5199\u5165\u3002`, 409);
+  }
+  if (target.role === "primary") {
+    return errorResponse(`\u8282\u70B9\u300C${target.label}\u300D\u5DF2\u7ECF\u662F\u4E3B\u5E93\u3002`, 400);
+  }
+  const currentPrimary = stored.nodes.find((node) => node.role === "primary" && node.enabled) ?? null;
+  const probe = await testMySqlConnection(target, env);
+  if (!probe.ok) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: `\u8282\u70B9\u300C${target.label}\u300D\u8FDE\u63A5\u5931\u8D25\uFF08${probe.error ?? "unknown error"}\uFF09\uFF0C\u4E0D\u80FD\u5207\u6362\u3002`,
+        errorKind: probe.errorKind ?? "connection"
+      },
+      502
+    );
+  }
+  const writability = await probeWritability(target);
+  if (writability === "read-only" && !forced) {
+    return jsonResponse(
+      {
+        ok: false,
+        blocked: true,
+        error: `\u8282\u70B9\u300C${target.label}\u300D\u76EE\u524D\u662F\u53EA\u8BFB\u526F\u672C\uFF08@@read_only=1\uFF09\uFF1A\u73B0\u5728\u5207\u8FC7\u53BB\uFF0C\u6240\u6709\u5199\u5165\u90FD\u4F1A\u5931\u8D25\u3002\u8BF7\u5148\u5728\u6570\u636E\u5E93\u4FA7\u628A\u5B83\u63D0\u5347\u4E3A\u4E3B\u5E93\uFF08\u505C\u6B62\u590D\u5236\u5E76\u5F00\u653E\u5199\u5165\uFF09\uFF0C\u518D\u56DE\u6765\u6267\u884C\u5207\u6362\u3002\u786E\u8BA4\u5B83\u5176\u5B9E\u53EF\u5199\u65F6\uFF0C\u53EF\u9009\u62E9\u300C\u5F3A\u5236\u5207\u6362\u300D\u3002`
+      },
+      409
+    );
+  }
+  const notes = [];
+  let lagAtPromote = 0;
+  let watermarks = null;
+  if (stored.policy.syncMode === "write-through") {
+    const states = await readSyncStates(env);
+    const state2 = states[target.id];
+    const sameDatabase = !state2?.fingerprint || state2.fingerprint === nodeFingerprint(target);
+    if (state2?.complete !== true || !sameDatabase) notes.push("\u8BE5\u526F\u5E93\u6CA1\u6709\u5B8C\u6210\u8FC7\u4E00\u6B21\u6570\u636E\u540C\u6B65");
+    try {
+      const db2 = await getDatabase(env);
+      if (isMySqlClusterDatabase(db2)) {
+        watermarks = db2.writeWatermarks();
+        const applied = watermarks.nodes.find((node) => node.id === target.id)?.appliedSeq ?? 0;
+        lagAtPromote = Math.max(0, watermarks.writeSeq - applied);
+        if (lagAtPromote > 0) notes.push(`\u843D\u540E ${lagAtPromote} \u6761\u5199\u5165`);
+        if (db2.nodeHealth().find((node) => node.id === target.id)?.needsFullSync) {
+          notes.push("\u8865\u5199\u65E5\u5FD7\u5DF2\u4E0D\u8986\u76D6\u7F3A\u53E3");
+        }
+      }
+    } catch (error) {
+      console.warn("[db-config] could not read write watermarks during promote:", error);
+      notes.push("\u65E0\u6CD5\u8BFB\u53D6\u5F53\u524D\u5199\u5165\u6C34\u4F4D");
+    }
+    if (notes.length > 0 && !forced) {
+      return jsonResponse(
+        {
+          ok: false,
+          blocked: true,
+          reasons: notes,
+          error: `\u8282\u70B9\u300C${target.label}\u300D\u8FD8\u4E0D\u80FD\u65E0\u635F\u63A5\u7BA1\uFF1A${notes.join("\uFF1B")}\u3002\u8BF7\u5148\u4FDD\u5B58\u914D\u7F6E\u5E76\u70B9\u300C\u540C\u6B65\u6570\u636E\u5230\u526F\u5E93\u300D\u8865\u9F50\uFF0C\u518D\u5207\u6362\u3002\u786E\u77E5\u8FD9\u90E8\u5206\u6570\u636E\u53EF\u4EE5\u653E\u5F03\u65F6\uFF0C\u53EF\u9009\u62E9\u300C\u5F3A\u5236\u5207\u6362\u300D\u3002`
+        },
+        409
+      );
+    }
+  }
+  const promoted = { ...target, role: "primary", priority: 1 };
+  const rest = stored.nodes.filter((node) => node.id !== target.id).sort((a, b) => (a.role === "primary" ? -1 : a.priority) - (b.role === "primary" ? -1 : b.priority)).map((node, index) => ({
+    ...node,
+    role: node.role === "primary" ? "replica" : node.role,
+    priority: index + 2
+  }));
+  const nextCluster = {
+    version: 2,
+    mode: "mysql",
+    nodes: [promoted, ...rest],
+    policy: stored.policy
+  };
+  const saved = await saveRuntimeConfig(env, nextCluster);
+  if (!saved) {
+    return errorResponse("\u5207\u6362\u68C0\u67E5\u5DF2\u901A\u8FC7\uFF0C\u4F46\u914D\u7F6E\u5199\u5165\u5931\u8D25\uFF08\u914D\u7F6E\u5B58\u50A8\u4E0D\u53EF\u7528\uFF1F\uFF09\u3002\u5F53\u524D\u4E3B\u5E93\u672A\u6539\u53D8\u3002", 500);
+  }
+  const demotedSeq = currentPrimary ? watermarks?.nodes.find((node) => node.id === currentPrimary.id)?.appliedSeq ?? null : null;
+  const demotedLevel = currentPrimary !== null && watermarks !== null && demotedSeq !== null && demotedSeq >= watermarks.writeSeq;
+  if (currentPrimary && demotedLevel) {
+    await saveNodeSyncState(env, currentPrimary.id, {
+      at: Date.now(),
+      complete: true,
+      truncated: false,
+      rowsWritten: 0,
+      tables: 0,
+      sourceId: target.id,
+      fingerprint: nodeFingerprint(currentPrimary)
+    });
+  }
+  await resetDatabaseCache();
+  resetDbLifecycle();
+  let db;
+  try {
+    db = await getDatabase(env);
+  } catch (error) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: `\u4E3B\u5E93\u5DF2\u5207\u6362\u4E3A\u300C${target.label}\u300D\uFF0C\u4F46\u91CD\u5EFA\u8FDE\u63A5\u5931\u8D25\uFF1A${error instanceof Error ? error.message : String(error)}\u3002\u8BF7\u5237\u65B0\u672C\u9875\u786E\u8BA4\u8282\u70B9\u72B6\u6001\u3002`
+      },
+      502
+    );
+  }
+  env.DB = db;
+  let schemaReady = false;
+  let schemaError;
+  try {
+    await new StorageService(db).initializeDatabase();
+    schemaReady = true;
+  } catch (initError) {
+    schemaError = initError instanceof Error ? initError.message : String(initError);
+    console.error("[db-config] schema init on the promoted node failed:", initError);
+  }
+  if (isMySqlClusterDatabase(db)) {
+    db.markNodeSynced(target.id);
+  }
+  await auditDbConfigChange(env, actorUser, "admin.db_config.promoted", nextCluster);
+  const warnings = [];
+  if (notes.length > 0) {
+    warnings.push(
+      `\u5DF2\u5F3A\u5236\u5207\u6362\uFF0C\u4F46\u65B0\u4E3B\u5E93\u7F3A\u5C11 ${notes.join("\u3001")}\uFF1A\u8FD9\u90E8\u5206\u6570\u636E\u53EA\u5B58\u5728\u4E8E\u539F\u4E3B\u5E93\u300C${currentPrimary?.label ?? "\u65E7\u4E3B\u5E93"}\u300D\u4E0A\u3002\u8BF7\u5C3D\u5FEB\u4EE5\u539F\u4E3B\u5E93\u4E3A\u6E90\u70B9\u300C\u540C\u6B65\u6570\u636E\u5230\u526F\u5E93\u300D\uFF0C\u628A\u5B83\u4EEC\u8865\u5230\u65B0\u4E3B\u5E93\u3002`
+    );
+  }
+  if (writability === "read-only") {
+    warnings.push(`\u300C${target.label}\u300D\u4ECD\u7136\u62A5\u544A\u4E3A\u53EA\u8BFB\uFF08@@read_only=1\uFF09\uFF0C\u5199\u5165\u53EF\u80FD\u7EE7\u7EED\u5931\u8D25\uFF0C\u8BF7\u5728\u6570\u636E\u5E93\u4FA7\u786E\u8BA4\u5DF2\u5F00\u653E\u5199\u5165\u3002`);
+  }
+  if (stored.policy.syncMode === "native") {
+    warnings.push("\u5F53\u524D\u662F\u300C\u6570\u636E\u5E93\u81EA\u8EAB\u590D\u5236\u300D\uFF1A\u5E94\u7528\u53EA\u6539\u4E86\u5199\u5165\u8DEF\u7531\uFF0C\u4E3B\u4ECE\u5173\u7CFB\u7684\u63D0\u5347\u4ECD\u9700\u5728\u6570\u636E\u5E93\u4FA7\u5B8C\u6210\u3002");
+  }
+  if (schemaError) warnings.push(`\u914D\u7F6E\u5DF2\u5207\u6362\uFF0C\u4F46\u5EFA\u8868\u5931\u8D25\uFF1A${schemaError}`);
+  const result = {
+    ok: true,
+    promoted: { id: target.id, label: target.label },
+    demoted: currentPrimary ? { id: currentPrimary.id, label: currentPrimary.label } : null,
+    syncMode: stored.policy.syncMode,
+    lagAtPromote,
+    forced: forced && (notes.length > 0 || writability === "read-only"),
+    schemaReady,
+    warning: warnings.length > 0 ? warnings.join(" ") : void 0
+  };
+  return jsonResponse(result);
 }
 async function handleAdminClearDbConfig(request, env, actorUser) {
   if (clearingWouldLeaveNoDatabase(env) && !wantsForce(request)) {
@@ -37955,7 +38421,7 @@ async function auditDbConfigChange(env, actorUser, action, cluster) {
 // src/router-admin.ts
 init_response();
 function isKnownAdminPath(path2) {
-  return path2 === "/api/admin/users" || path2 === "/api/admin/logs" || path2 === "/api/admin/logs/settings" || path2 === "/api/admin/invites" || path2 === "/api/admin/db-config" || path2 === "/api/admin/db-config/test" || path2 === "/api/admin/db-config/sync" || path2.startsWith("/api/admin/backup") || /^\/api\/admin\/invites\/[^/]+$/i.test(path2) || /^\/api\/admin\/users\/[a-f0-9-]+(?:\/status)?$/i.test(path2);
+  return path2 === "/api/admin/users" || path2 === "/api/admin/logs" || path2 === "/api/admin/logs/settings" || path2 === "/api/admin/invites" || path2 === "/api/admin/db-config" || path2 === "/api/admin/db-config/test" || path2 === "/api/admin/db-config/sync" || path2 === "/api/admin/db-config/promote" || path2.startsWith("/api/admin/backup") || /^\/api\/admin\/invites\/[^/]+$/i.test(path2) || /^\/api\/admin\/users\/[a-f0-9-]+(?:\/status)?$/i.test(path2);
 }
 function isActiveAdmin(user) {
   return user.role === "admin" && user.status === "active";
@@ -37992,6 +38458,9 @@ async function handleAdminRoute(request, env, actorUser, path2, method) {
   }
   if (path2 === "/api/admin/db-config/sync" && method === "POST") {
     return handleAdminSyncDbCluster(request, env, actorUser);
+  }
+  if (path2 === "/api/admin/db-config/promote" && method === "POST") {
+    return handleAdminPromoteDbNode(request, env, actorUser);
   }
   const adminBackupResponse = await handleAdminBackupRoute(request, env, actorUser, path2, method);
   if (adminBackupResponse) return adminBackupResponse;
@@ -47709,12 +48178,12 @@ async function handleToken(request, env) {
       ) : null;
       const rejected = !sessionLimit.allowed ? sessionLimit : ipLimit && !ipLimit.allowed ? ipLimit : null;
       if (rejected) {
-        const retryAfter = Math.max(1, rejected.retryAfterSeconds || 1);
+        const retryAfter2 = Math.max(1, rejected.retryAfterSeconds || 1);
         return identityErrorResponse(
-          `Rate limit exceeded. Try again in ${retryAfter} seconds.`,
+          `Rate limit exceeded. Try again in ${retryAfter2} seconds.`,
           "temporarily_unavailable",
           429,
-          { "Retry-After": String(retryAfter) }
+          { "Retry-After": String(retryAfter2) }
         );
       }
     } catch (error) {
@@ -49571,20 +50040,33 @@ async function pipeline(request, env) {
     return applyCors(request, await serveAssets(request), env);
   }
   await ensureDatabaseInitialized(env);
-  const dbInitError2 = getDbInitError();
-  if (dbInitError2) {
-    const resp2 = jsonResponse(
-      {
-        error: "Database not initialized",
-        error_description: "Database initialization failed. Check server logs for details.",
-        ErrorModel: { Message: "Service temporarily unavailable", Object: "error" }
-      },
-      500
-    );
-    return applyCors(request, resp2, env);
-  }
+  const dbFailure = dbInitFailureResponse();
+  if (dbFailure) return applyCors(request, dbFailure, env);
   const resp = await handleRequest(request, env);
   return applyCors(request, resp, env);
+}
+function dbInitFailureResponse() {
+  const failure = getDbInitFailure();
+  if (!failure) return null;
+  console.error("DB init error:", failure.message);
+  if (failure.status) {
+    return jsonResponse(
+      {
+        error: failure.message,
+        error_description: failure.message,
+        ErrorModel: { Message: failure.message, Object: "error" }
+      },
+      failure.status
+    );
+  }
+  return jsonResponse(
+    {
+      error: "Database not initialized",
+      error_description: "Database initialization failed. Check server logs for details.",
+      ErrorModel: { Message: "Service temporarily unavailable", Object: "error" }
+    },
+    500
+  );
 }
 function getCronSecret() {
   return process.env.CRON_SECRET || "";
@@ -49605,9 +50087,9 @@ async function handleCronTick(request, env) {
     return jsonResponse({ error: "Unauthorized" }, 401);
   }
   await ensureDatabaseInitialized(env);
-  const dbInitError2 = getDbInitError();
-  if (dbInitError2) {
-    console.error("Skipping scheduled backup because DB init failed:", dbInitError2);
+  const dbInitError = getDbInitError();
+  if (dbInitError) {
+    console.error("Skipping scheduled backup because DB init failed:", dbInitError);
     return jsonResponse({ ok: false, error: "database unavailable" }, 503);
   }
   const { runScheduledBackupIfDue: runScheduledBackupIfDue2 } = await Promise.resolve().then(() => (init_backup(), backup_exports));
