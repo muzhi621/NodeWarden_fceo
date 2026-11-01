@@ -328,6 +328,10 @@ ATTACHMENTS_DIR=/mnt/oss/nodewarden/attachments
 - 没开 `kernel_cache`/vfs 缓存时，每次下载都会产生一次 GET 与流量；
 - 对象存储无 POSIX 完整语义（rename/append 缺失），本应用不用这些操作，但**不要**把 MySQL 数据文件、
   `kv-store.json` 之类放上去；
+- 上传被打断（实例回收、挂载掉线、客户端断开）时，落盘的是**半截文件**：应用会先写 `<key>.meta.json`
+  记下应有字节数，读取时发现长度不符就当作不存在（404）而不是把损坏的附件发出去，重新上传即可覆盖；
+- 挂载**掉线**（EIO/ETIMEDOUT/ENOTCONN）与「对象确实不存在」是两种答案：前者返回 5xx 并打日志，
+  后者才是 404。看到 5xx 先查挂载，别急着重传；
 - 对象存储挂载不适合高并发小文件场景，个人密码库的量级完全够用。
 
 #### 3.6.6 Serverless 上挂不了怎么办：用备份中心把 OSS/COS 当目标
@@ -340,11 +344,13 @@ FC / EdgeOne 没有 FUSE，但**备份中心支持 S3 兼容目标**，OSS 与 C
 | `endpoint` | `https://oss-cn-hangzhou.aliyuncs.com` | `https://cos.ap-guangzhou.myqcloud.com` |
 | `bucket` | `my-bucket` | `my-bucket-1250000000` |
 | `region` | `oss-cn-hangzhou` | `ap-guangzhou` |
-| `addressingStyle` | `virtual-hosted`（默认）或 `path` | `virtual-hosted`（默认）或 `path` |
+| `addressingStyle` | **必须 `virtual-hosted`** | `virtual-hosted`（推荐）或 `path` |
 | `rootPath` | 例如 `nodewarden` | 例如 `nodewarden` |
 | `accessKeyId` / `secretAccessKey` | 建议用只授权该桶的子账号 AK | 同左（建议子账号 + 最小权限策略） |
 
-> 端点必须带 `https://`；`path` 风格在自建/兼容端点（MinIO、R2）上更保险。
+> 端点必须带 `https://`。阿里云 OSS **只接受 virtual-hosted 风格**（path 风格会直接 403），
+> 选错时后台会明确报错让你切换；自建 MinIO / Cloudflare R2 用 `path` 更稳（也是配置默认值）。
+> 腾讯云 COS 两种都支持，按上面的表格填即可。
 > 这条路的语义是**定时备份**，不是实时存储：附件仍在实例本地（或 NAS），
 > 对象存储里是可供还原的快照。定期还原演练一次，确认附件也在快照里。
 
@@ -432,6 +438,8 @@ npm run start:node               # 默认 http://localhost:8787
 | `DB_SSL_CA` | — | F/N | 私有 CA 的 PEM 路径（比关校验更安全）；EdgeOne 无持久文件，不可用 |
 | `DB_CONN_LIMIT` | `5` | F/E/N | 连接池上限；函数环境别调大 |
 | `DB_HOST_ALLOWLIST` | 空 | 全部 | 逗号分隔的域名/IP/CIDR 白名单。后台「测试连接」默认**拒绝内网地址**，自建库在内网时必须填 |
+| `BACKUP_ENDPOINT_ALLOWLIST` | 空 | 全部 | 同上，但作用于**备份目的地**。自建 MinIO 在 `127.0.0.1` / 内网 NAS 上时填它，否则备份目标会以「host is not allowed」被拒 |
+| `S3_REQUEST_TIMEOUT_MS` | `120000` | 全部 | 单次 S3 请求超时；每个请求最多重试 3 次（429/5xx/网络中断） |
 | `DB_CONFIG_KEY` | — | W/F/N | 后台保存配置的加密主密钥（AES-256-GCM）。不设就只能用环境变量 |
 | `DB_TIMEZONE` | `Z` | F/E/N | 时间戳本身是 epoch 毫秒，一般不用改 |
 

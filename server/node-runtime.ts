@@ -23,7 +23,6 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import { handleRequest } from '../src/router';
@@ -38,6 +37,9 @@ import {
   createLocalNotificationsHubNamespace,
   installDurableObjectGlobals,
 } from './local-durable-objects';
+// The filesystem-backed attachment bucket lives in its own module so it can be
+// unit-tested without booting the whole runtime.
+import { createFsR2 } from './fs-r2';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -197,69 +199,6 @@ function createFileKv(dataDir: string) {
 // ---------------------------------------------------------------------------
 // Filesystem-backed R2-compatible bucket (attachments / send files)
 // ---------------------------------------------------------------------------
-
-function safeObjectPath(attachmentsDir: string, key: string): string {
-  // Containment check via path.relative: a plain startsWith() also accepts
-  // sibling directories such as "/data/attachments-evil".
-  const normalized = key.replace(/^[/\\]+/, '');
-  const full = path.resolve(attachmentsDir, normalized);
-  const rel = path.relative(attachmentsDir, full);
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('Invalid object key');
-  return full;
-}
-
-function createFsR2(attachmentsDir: string) {
-  return {
-    async put(key: string, value: unknown, options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }): Promise<void> {
-      const full = safeObjectPath(attachmentsDir, key);
-      fs.mkdirSync(path.dirname(full), { recursive: true });
-      let bytes: Uint8Array;
-      if (typeof value === 'string') bytes = new TextEncoder().encode(value);
-      else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
-      else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-      else if (value instanceof ReadableStream) {
-        const buf = await new Response(value).arrayBuffer();
-        bytes = new Uint8Array(buf);
-      } else {
-        bytes = new Uint8Array(0);
-      }
-      await fsp.writeFile(full, bytes);
-      const meta = {
-        contentType: options?.httpMetadata?.contentType || 'application/octet-stream',
-        customMetadata: options?.customMetadata || {},
-      };
-      await fsp.writeFile(`${full}.meta.json`, JSON.stringify(meta));
-    },
-    async get(key: string): Promise<{ body: ReadableStream; size: number; httpMetadata: { contentType: string }; customMetadata: Record<string, string> } | null> {
-      const full = safeObjectPath(attachmentsDir, key);
-      try {
-        // Stream, don't slurp: attachments can be large and FC instances are small
-        // (0.5 GB). Reading the file into a Buffer first doubled peak memory.
-        const stat = await fsp.stat(full);
-        let meta: { contentType?: string; customMetadata?: Record<string, string> } = {};
-        try {
-          meta = JSON.parse(await fsp.readFile(`${full}.meta.json`, 'utf8'));
-        } catch {
-          // no meta
-        }
-        const stream = fs.createReadStream(full);
-        return {
-          body: Readable.toWeb(stream) as unknown as ReadableStream,
-          size: stat.size,
-          httpMetadata: { contentType: meta.contentType || 'application/octet-stream' },
-          customMetadata: meta.customMetadata || {},
-        };
-      } catch {
-        return null;
-      }
-    },
-    async delete(key: string): Promise<void> {
-      const full = safeObjectPath(attachmentsDir, key);
-      await fsp.rm(full, { force: true });
-      await fsp.rm(`${full}.meta.json`, { force: true });
-    },
-  };
-}
 
 // ---------------------------------------------------------------------------
 // caches.* shim (in-memory)

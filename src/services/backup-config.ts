@@ -168,9 +168,51 @@ function isBlockedIpv6Address(hostname: string): boolean {
   );
 }
 
+/**
+ * Operator opt-in for backup endpoints that the SSRF guard would otherwise
+ * refuse (a self-hosted MinIO on `127.0.0.1` or `minio.lan`, a NAS on a private
+ * range). Same shape as `DB_HOST_ALLOWLIST`: exact host, `*.suffix`, or IPv4
+ * CIDR. Unset by default, so a stock deployment keeps the strict policy — an
+ * admin token alone still cannot turn the backup form into an internal port
+ * scanner.
+ */
+function backupEndpointAllowlist(): string[] {
+  const raw =
+    typeof process !== 'undefined' && process.env ? process.env.BACKUP_ENDPOINT_ALLOWLIST ?? '' : '';
+  return raw
+    .split(',')
+    .map((entry: string) => normalizeHostnameForPolicy(entry))
+    .filter(Boolean);
+}
+
+function ipv4ToInt(octets: number[]): number {
+  return ((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3];
+}
+
+function cidrContains(cidr: string, hostname: string): boolean {
+  const [network, bitsRaw] = cidr.split('/');
+  const bits = Number(bitsRaw);
+  const networkOctets = parseIpv4Address(network);
+  const hostOctets = parseIpv4Address(hostname);
+  if (!networkOctets || !hostOctets || !Number.isInteger(bits) || bits < 0 || bits > 32) return false;
+  if (bits === 0) return true;
+  const mask = (0xffffffff << (32 - bits)) >>> 0;
+  return (ipv4ToInt(hostOctets) & mask) === (ipv4ToInt(networkOctets) & mask);
+}
+
+function allowlistAllowsHostname(entries: string[], hostname: string): boolean {
+  return entries.some((entry) => {
+    if (entry === hostname) return true;
+    if (entry.startsWith('*.') && hostname.endsWith(entry.slice(1))) return true;
+    if (entry.includes('/') && cidrContains(entry, hostname)) return true;
+    return false;
+  });
+}
+
 function assertBackupEndpointHostAllowed(hostname: string, label: string): void {
   const normalized = normalizeHostnameForPolicy(hostname);
   if (!normalized) throw new Error(`${label} host is required`);
+  if (allowlistAllowsHostname(backupEndpointAllowlist(), normalized)) return;
   if (
     normalized === 'localhost' ||
     normalized === 'localhost.localdomain' ||

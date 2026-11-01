@@ -637,11 +637,11 @@ async function getPushAccessToken(env) {
   };
   return token;
 }
-async function postToPushRelay(env, path2, body) {
+async function postToPushRelay(env, path3, body) {
   const token = await getPushAccessToken(env);
   if (!token) return false;
   const response = await fetchPushEndpoint(
-    `${PUSH_RELAY_URI}${path2}`,
+    `${PUSH_RELAY_URI}${path3}`,
     {
       method: "POST",
       headers: {
@@ -651,11 +651,11 @@ async function postToPushRelay(env, path2, body) {
       },
       body: body === void 0 ? void 0 : JSON.stringify(body)
     },
-    `Bitwarden push relay request failed: ${path2}`
+    `Bitwarden push relay request failed: ${path3}`
   );
   if (!response) return false;
   if (!response.ok) {
-    console.error("Bitwarden push relay request failed:", path2, response.status, await response.text().catch(() => ""));
+    console.error("Bitwarden push relay request failed:", path3, response.status, await response.text().catch(() => ""));
     return false;
   }
   return true;
@@ -3918,8 +3918,8 @@ var init_origins = __esm({
 });
 
 // src/utils/response.ts
-function isWildcardCorsPath(path2) {
-  return path2.startsWith("/icons/") || path2.startsWith("/fill-assist/") || path2 === "/v1/assetlinks:check" || path2 === "/api/v1/assetlinks:check" || path2 === "/config" || path2 === "/api/config" || path2 === "/api/version";
+function isWildcardCorsPath(path3) {
+  return path3.startsWith("/icons/") || path3.startsWith("/fill-assist/") || path3 === "/v1/assetlinks:check" || path3 === "/api/v1/assetlinks:check" || path3 === "/config" || path3 === "/api/config" || path3 === "/api/version";
 }
 function getCorsPolicy(request, env) {
   const url = new URL(request.url);
@@ -5147,11 +5147,11 @@ var init_notifications_hub = __esm({
 });
 
 // src/utils/direct-upload.ts
-function buildDirectUploadUrl(request, path2, token) {
+function buildDirectUploadUrl(request, path3, token) {
   const version = "2023-11-03";
   const expiresAt = "2099-12-31T23:59:59Z";
   const origin = new URL(request.url).origin;
-  return `${origin}${path2}?sv=${encodeURIComponent(version)}&se=${encodeURIComponent(expiresAt)}&token=${encodeURIComponent(token)}`;
+  return `${origin}${path3}?sv=${encodeURIComponent(version)}&se=${encodeURIComponent(expiresAt)}&token=${encodeURIComponent(token)}`;
 }
 function getSafeJwtSecret(env) {
   const secret = (env.JWT_SECRET || "").trim();
@@ -6704,9 +6704,35 @@ function isBlockedIpv6Address(hostname) {
   if (!Number.isFinite(firstHextet)) return true;
   return firstHextet === 0 || (firstHextet & 65024) === 64512 || (firstHextet & 65472) === 65152 || (firstHextet & 65280) === 65280 || hextets.join(":").startsWith("2001:0db8:");
 }
+function backupEndpointAllowlist() {
+  const raw = typeof process !== "undefined" && process.env ? process.env.BACKUP_ENDPOINT_ALLOWLIST ?? "" : "";
+  return raw.split(",").map((entry) => normalizeHostnameForPolicy(entry)).filter(Boolean);
+}
+function ipv4ToInt(octets) {
+  return (octets[0] << 24 >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3];
+}
+function cidrContains(cidr, hostname) {
+  const [network, bitsRaw] = cidr.split("/");
+  const bits2 = Number(bitsRaw);
+  const networkOctets = parseIpv4Address(network);
+  const hostOctets = parseIpv4Address(hostname);
+  if (!networkOctets || !hostOctets || !Number.isInteger(bits2) || bits2 < 0 || bits2 > 32) return false;
+  if (bits2 === 0) return true;
+  const mask = 4294967295 << 32 - bits2 >>> 0;
+  return (ipv4ToInt(hostOctets) & mask) === (ipv4ToInt(networkOctets) & mask);
+}
+function allowlistAllowsHostname(entries, hostname) {
+  return entries.some((entry) => {
+    if (entry === hostname) return true;
+    if (entry.startsWith("*.") && hostname.endsWith(entry.slice(1))) return true;
+    if (entry.includes("/") && cidrContains(entry, hostname)) return true;
+    return false;
+  });
+}
 function assertBackupEndpointHostAllowed(hostname, label) {
   const normalized = normalizeHostnameForPolicy(hostname);
   if (!normalized) throw new Error(`${label} host is required`);
+  if (allowlistAllowsHostname(backupEndpointAllowlist(), normalized)) return;
   if (normalized === "localhost" || normalized === "localhost.localdomain" || normalized.endsWith(".localhost.localdomain") || normalized.endsWith(".localhost") || normalized.endsWith(".local") || normalized.endsWith(".home.arpa") || normalized.endsWith(".internal") || normalized.endsWith(".lan") || normalized === "metadata.google.internal" || normalized === "localtest.me" || normalized.endsWith(".localtest.me") || normalized === "lvh.me" || normalized.endsWith(".lvh.me") || normalized === "vcap.me" || normalized.endsWith(".vcap.me") || normalized === "nip.io" || normalized.endsWith(".nip.io") || normalized === "sslip.io" || normalized.endsWith(".sslip.io") || normalized === "xip.io" || normalized.endsWith(".xip.io")) {
     throw new Error(`${label} host is not allowed`);
   }
@@ -7476,8 +7502,8 @@ function normalizeParsedBackupDb(value) {
 }
 function createZipEntries(files) {
   const entries = {};
-  for (const [path2, bytes] of Object.entries(files)) {
-    entries[path2] = [bytes, { level: BACKUP_TEXT_COMPRESSION_LEVEL }];
+  for (const [path3, bytes] of Object.entries(files)) {
+    entries[path3] = [bytes, { level: BACKUP_TEXT_COMPRESSION_LEVEL }];
   }
   return entries;
 }
@@ -8241,11 +8267,11 @@ async function readEnvFile(name, label) {
   if (!filePath) return void 0;
   try {
     const fsName = "node:fs";
-    const fs2 = await import(
+    const fs3 = await import(
       /* @vite-ignore */
       fsName
     );
-    return fs2.readFileSync(filePath, "utf8");
+    return fs3.readFileSync(filePath, "utf8");
   } catch (error) {
     console.error(`[runtime-env] failed to read ${label} (${filePath}):`, error);
     return void 0;
@@ -9012,22 +9038,22 @@ async function prepareRemoteAttachmentPayload(env, payload, files, source) {
     const lookupKey = `${cipherId}/${attachmentId}`;
     const ref = manifestLookup.get(lookupKey);
     const sizeBytes = ref?.sizeBytes || Number(row.size || 0) || 0;
-    const path2 = ref ? `attachments/${ref.blobName}` : `attachments/${lookupKey}`;
+    const path3 = ref ? `attachments/${ref.blobName}` : `attachments/${lookupKey}`;
     const inlinePath = `attachments/${cipherId}/${attachmentId}.bin`;
     if (files[inlinePath]) {
       nextAttachments.push(row);
       continue;
     }
     if (!ref) {
-      skippedItems.push({ kind: "attachment", path: path2, sizeBytes });
+      skippedItems.push({ kind: "attachment", path: path3, sizeBytes });
       continue;
     }
     if (storageKind === "kv" && sizeBytes > KV_MAX_OBJECT_BYTES) {
-      skippedItems.push({ kind: "attachment", path: path2, sizeBytes });
+      skippedItems.push({ kind: "attachment", path: path3, sizeBytes });
       continue;
     }
     if (storageKind === null) {
-      skippedItems.push({ kind: "attachment", path: path2, sizeBytes });
+      skippedItems.push({ kind: "attachment", path: path3, sizeBytes });
       continue;
     }
     nextAttachments.push(row);
@@ -9467,8 +9493,8 @@ var init_backup_import = __esm({
 function isBackupArchiveName(name) {
   return /\.zip$/i.test(String(name || "").trim());
 }
-function encodePathSegments(path2) {
-  return path2.split("/").filter(Boolean).map((segment) => encodeURIComponent(segment)).join("/");
+function encodePathSegments(path3) {
+  return path3.split("/").filter(Boolean).map((segment) => encodeURIComponent(segment)).join("/");
 }
 function trimSlashes(value) {
   let next = String(value || "");
@@ -9479,8 +9505,8 @@ function trimSlashes(value) {
 function buildJoinedPath(...segments) {
   return segments.map(trimSlashes).filter(Boolean).join("/");
 }
-function normalizeRelativePath(path2) {
-  const normalized = trimSlashes(path2).replace(/\\/g, "/");
+function normalizeRelativePath(path3) {
+  const normalized = trimSlashes(path3).replace(/\\/g, "/");
   if (!normalized) return "";
   const parts = normalized.split("/").filter(Boolean);
   if (parts.some((part) => part === "." || part === "..")) {
@@ -9488,14 +9514,14 @@ function normalizeRelativePath(path2) {
   }
   return parts.join("/");
 }
-function basename(path2) {
-  const normalized = trimSlashes(path2);
+function basename(path3) {
+  const normalized = trimSlashes(path3);
   if (!normalized) return "";
   const parts = normalized.split("/").filter(Boolean);
   return parts[parts.length - 1] || "";
 }
-function parentPath(path2) {
-  const normalized = normalizeRelativePath(path2);
+function parentPath(path3) {
+  const normalized = normalizeRelativePath(path3);
   if (!normalized) return null;
   const parts = normalized.split("/");
   parts.pop();
@@ -9560,17 +9586,33 @@ function toBasicAuthHeader(username, password) {
   const token = btoa(`${username}:${password}`);
   return `Basic ${token}`;
 }
+function encodeRfc3986(value) {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+function compareCodePoints(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 function buildCanonicalQueryString(url) {
-  const params = Array.from(url.searchParams.entries()).sort(([aKey, aValue], [bKey, bValue]) => {
-    if (aKey === bKey) return aValue.localeCompare(bValue);
-    return aKey.localeCompare(bKey);
-  });
-  return params.map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");
+  const raw = url.search.startsWith("?") ? url.search.slice(1) : url.search;
+  if (!raw) return "";
+  return raw.split("&").filter(Boolean).map((pair) => {
+    const index = pair.indexOf("=");
+    const rawKey = index === -1 ? pair : pair.slice(0, index);
+    const rawValue = index === -1 ? "" : pair.slice(index + 1);
+    const decode3 = (part) => {
+      try {
+        return decodeURIComponent(part);
+      } catch {
+        return part;
+      }
+    };
+    return `${encodeRfc3986(decode3(rawKey))}=${encodeRfc3986(decode3(rawValue))}`;
+  }).sort(compareCodePoints).join("&");
 }
 async function buildAwsV4Authorization(method, url, headers, payloadHashHex, accessKeyId, secretAccessKey, region) {
   const amzDate = headers["x-amz-date"];
   const shortDate = amzDate.slice(0, 8);
-  const headerEntries = Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]).sort(([a], [b]) => a.localeCompare(b));
+  const headerEntries = Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]).sort(([a], [b]) => compareCodePoints(a, b));
   const canonicalHeaders = headerEntries.map(([name, value]) => `${name}:${String(value).trim().replace(/\s+/g, " ")}`).join("\n");
   const signedHeaders = headerEntries.map(([name]) => name).join(";");
   const canonicalRequest = [
@@ -9610,6 +9652,7 @@ function ensureDestinationConfigReady(destination) {
     const config = destination.destination;
     if (!String(config.endpoint || "").trim()) throw new Error("S3 endpoint is required");
     normalizeBackupEndpointUrl(String(config.endpoint || "").trim(), "S3 endpoint");
+    assertProviderAddressingSupported(String(config.endpoint || "").trim(), String(config.addressingStyle || ""));
     if (!String(config.bucket || "").trim()) throw new Error("S3 bucket is required");
     if (!String(config.accessKeyId || "").trim()) throw new Error("S3 access key is required");
     if (!String(config.secretAccessKey || "")) throw new Error("S3 secret key is required");
@@ -9822,6 +9865,61 @@ function isBucketHostedS3Endpoint(endpoint, bucket) {
   const bucketName = bucket.trim().toLowerCase();
   return !!bucketName && (hostname === bucketName || hostname.startsWith(`${bucketName}.`));
 }
+function s3RequestTimeoutMs() {
+  const configured = Number(
+    typeof process !== "undefined" && process.env ? process.env.S3_REQUEST_TIMEOUT_MS : NaN
+  );
+  return Number.isFinite(configured) && configured >= 1e3 ? configured : 12e4;
+}
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function s3Fetch(url, init) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= S3_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(url, { ...init, signal: AbortSignal.timeout(s3RequestTimeoutMs()) });
+      if ((response.status === 429 || response.status >= 500) && attempt < S3_MAX_ATTEMPTS) {
+        await response.body?.cancel().catch(() => void 0);
+        await delay(200 * attempt * attempt);
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt === S3_MAX_ATTEMPTS) break;
+      await delay(200 * attempt * attempt);
+    }
+  }
+  throw new Error(
+    `S3 request failed after ${S3_MAX_ATTEMPTS} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`
+  );
+}
+async function throwS3Error(response, action) {
+  let detail = "";
+  try {
+    const text = (await response.text()).slice(0, 2e3);
+    const code = /<Code>([^<]{1,100})<\/Code>/i.exec(text)?.[1];
+    const message = /<Message>([^<]{1,300})<\/Message>/i.exec(text)?.[1];
+    detail = [code, message].filter(Boolean).join(": ");
+  } catch {
+  }
+  throw new Error(`S3 ${action} failed: ${response.status}${detail ? ` ${detail}` : ""}`);
+}
+function assertProviderAddressingSupported(endpoint, addressingStyle) {
+  if (addressingStyle === "virtual-hosted-style") return;
+  let hostname = "";
+  try {
+    hostname = new URL(endpoint).hostname.toLowerCase();
+  } catch {
+    return;
+  }
+  if (/(^|\.)aliyuncs\.com$/.test(hostname)) {
+    throw new Error(
+      'Aliyun OSS only accepts virtual-hosted-style addressing: set the S3 addressing style to "virtual-hosted-style" (path-style requests are rejected by OSS).'
+    );
+  }
+}
 function s3BucketBaseUrl(config) {
   const endpoint = new URL(config.endpoint.replace(/\/+$/, ""));
   const bucket = config.bucket.trim();
@@ -9856,7 +9954,7 @@ async function signedS3Request(config, method, url, body, contentType) {
     config.secretAccessKey,
     config.region || "auto"
   );
-  return fetch(url, {
+  return s3Fetch(url, {
     method,
     headers: {
       Authorization: authorization,
@@ -9872,7 +9970,7 @@ async function putToS3(config, relativePath, bytes, options = {}) {
   const url = s3ObjectUrl(config, objectKey);
   const response = await signedS3Request(config, "PUT", url, bytes, options.contentType);
   if (!response.ok) {
-    throw new Error(`S3 upload failed: ${response.status}`);
+    await throwS3Error(response, "upload");
   }
 }
 async function uploadToS3(config, archive, fileName) {
@@ -9890,14 +9988,17 @@ async function listS3Entries(config, relativePath) {
   const items = [];
   let continuationToken = "";
   do {
-    const url = s3BucketBaseUrl(config);
-    url.searchParams.set("list-type", "2");
-    url.searchParams.set("delimiter", "/");
-    if (targetPrefix) url.searchParams.set("prefix", targetPrefix);
-    if (continuationToken) url.searchParams.set("continuation-token", continuationToken);
+    const queryPairs = [
+      ["list-type", "2"],
+      ["delimiter", "/"]
+    ];
+    if (targetPrefix) queryPairs.push(["prefix", targetPrefix]);
+    if (continuationToken) queryPairs.push(["continuation-token", continuationToken]);
+    const queryString = queryPairs.map(([key, value]) => `${encodeRfc3986(key)}=${encodeRfc3986(value)}`).join("&");
+    const url = new URL(`${s3BucketBaseUrl(config).toString().replace(/\/+$/, "")}?${queryString}`);
     const response = await signedS3Request(config, "GET", url);
     if (!response.ok) {
-      throw new Error(`S3 listing failed: ${response.status}`);
+      await throwS3Error(response, "listing");
     }
     const xml = await response.text();
     for (const prefix of extractXmlBlocks(xml, "CommonPrefixes")) {
@@ -9950,7 +10051,7 @@ async function downloadFromS3(config, relativePath) {
   const url = s3ObjectUrl(config, objectKey);
   const response = await signedS3Request(config, "GET", url);
   if (!response.ok) {
-    throw new Error(`S3 download failed: ${response.status}`);
+    await throwS3Error(response, "download");
   }
   return {
     provider: "s3",
@@ -9965,7 +10066,7 @@ async function deleteFromS3(config, relativePath) {
   const url = s3ObjectUrl(config, objectKey);
   const response = await signedS3Request(config, "DELETE", url);
   if (!response.ok && response.status !== 404) {
-    throw new Error(`S3 delete failed: ${response.status}`);
+    await throwS3Error(response, "delete");
   }
 }
 async function existsInS3(config, relativePath) {
@@ -9977,7 +10078,7 @@ async function statS3File(config, relativePath) {
   const response = await signedS3Request(config, "HEAD", url);
   if (response.status === 404) return null;
   if (!response.ok) {
-    throw new Error(`S3 existence check failed: ${response.status}`);
+    await throwS3Error(response, "existence check");
   }
   const size = Number(response.headers.get("Content-Length") || "");
   return {
@@ -10084,10 +10185,12 @@ function ensureRemoteRestoreCandidate(relativePath) {
   }
   return normalized;
 }
+var S3_MAX_ATTEMPTS;
 var init_backup_uploader = __esm({
   "src/services/backup-uploader.ts"() {
     "use strict";
     init_backup_config();
+    S3_MAX_ATTEMPTS = 3;
   }
 });
 
@@ -10632,8 +10735,8 @@ async function downloadRemoteAttachmentBatchViaDurableObject(env, destination, b
   const manifest = JSON.parse(new TextDecoder().decode(manifestBytes));
   for (const entry of manifest.entries || []) {
     const blobName = String(entry.blobName || "").trim();
-    const path2 = String(entry.path || "").trim();
-    const bytes = path2 ? files[path2] : null;
+    const path3 = String(entry.path || "").trim();
+    const bytes = path3 ? files[path3] : null;
     if (blobName && bytes) {
       result.set(blobName, bytes);
     }
@@ -10955,9 +11058,9 @@ async function handleDownloadAdminRemoteBackup(request, env, actorUser) {
   const storage = new StorageService(env.DB);
   try {
     const settings = await loadBackupSettings(storage, env, "UTC");
-    const path2 = ensureRemoteRestoreCandidate(String(body.path || ""));
+    const path3 = ensureRemoteRestoreCandidate(String(body.path || ""));
     const destination = requireBackupDestination(settings, body.destinationId || null);
-    const remoteFile = await downloadRemoteBackupFile(destination, path2);
+    const remoteFile = await downloadRemoteBackupFile(destination, path3);
     return new Response(remoteFile.bytes, {
       status: 200,
       headers: {
@@ -10984,15 +11087,15 @@ async function handleInspectAdminRemoteBackup(request, env, actorUser) {
   const storage = new StorageService(env.DB);
   try {
     const settings = await loadBackupSettings(storage, env, "UTC");
-    const path2 = ensureRemoteRestoreCandidate(String(body.path || ""));
+    const path3 = ensureRemoteRestoreCandidate(String(body.path || ""));
     const destination = requireBackupDestination(settings, body.destinationId || null);
-    const remoteFile = await downloadRemoteBackupFile(destination, path2);
-    const integrity = await inspectBackupArchiveFileNameChecksum(remoteFile.bytes, remoteFile.fileName || path2);
+    const remoteFile = await downloadRemoteBackupFile(destination, path3);
+    const integrity = await inspectBackupArchiveFileNameChecksum(remoteFile.bytes, remoteFile.fileName || path3);
     return jsonResponse({
       object: "backup-remote-integrity",
       destinationId: destination.id,
-      path: path2,
-      fileName: remoteFile.fileName || path2.split("/").pop() || path2,
+      path: path3,
+      fileName: remoteFile.fileName || path3.split("/").pop() || path3,
       integrity
     });
   } catch (error) {
@@ -11012,14 +11115,14 @@ async function handleDeleteAdminRemoteBackup(request, env, actorUser) {
   const storage = new StorageService(env.DB);
   try {
     const settings = await loadBackupSettings(storage, env, "UTC");
-    const path2 = ensureRemoteRestoreCandidate(String(body.path || ""));
+    const path3 = ensureRemoteRestoreCandidate(String(body.path || ""));
     const destination = requireBackupDestination(settings, body.destinationId || null);
-    await deleteRemoteBackupFile(destination, path2);
+    await deleteRemoteBackupFile(destination, path3);
     await writeAuditLog2(storage, actorUser.id, "admin.backup.remote.delete", "backup", null, {
       ...getBackupDestinationSummary(destination),
-      remotePath: path2
+      remotePath: path3
     }, request);
-    return jsonResponse({ object: "backup-remote-delete", deleted: true, path: path2 });
+    return jsonResponse({ object: "backup-remote-delete", deleted: true, path: path3 });
   } catch (error) {
     return errorResponse(error instanceof Error ? error.message : "Remote backup delete failed", 409);
   }
@@ -11035,14 +11138,14 @@ async function handleRestoreAdminRemoteBackup(request, env, actorUser) {
   const verificationError = await requireBackupUserVerification(actorUser, String(body.masterPasswordHash || ""), env);
   if (verificationError) return verificationError;
   try {
-    const path2 = ensureRemoteRestoreCandidate(String(body.path || ""));
+    const path3 = ensureRemoteRestoreCandidate(String(body.path || ""));
     const targetDeviceIdentifier = String(request.headers.get("X-NodeWarden-Acting-Device-Id") || "").trim() || null;
     const imported = await restoreRemoteBackupInDurableObject(env, {
       actorUserId: actorUser.id,
       allowChecksumMismatch: !!body.allowChecksumMismatch,
       auditMetadata: auditRequestMetadata(request),
       destinationId: body.destinationId || null,
-      path: path2,
+      path: path3,
       replaceExisting: !!body.replaceExisting,
       targetDeviceIdentifier
     });
@@ -15505,13 +15608,13 @@ function __disposeResources(env) {
   }
   return next();
 }
-function __rewriteRelativeImportExtension(path2, preserveJsx) {
-  if (typeof path2 === "string" && /^\.\.?\//.test(path2)) {
-    return path2.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m, tsx, d, ext, cm) {
+function __rewriteRelativeImportExtension(path3, preserveJsx) {
+  if (typeof path3 === "string" && /^\.\.?\//.test(path3)) {
+    return path3.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m, tsx, d, ext, cm) {
       return tsx ? preserveJsx ? ".jsx" : ".js" : d && (!ext || !cm) ? m : d + ext + "." + cm.toLowerCase() + "js";
     });
   }
-  return path2;
+  return path3;
 }
 var extendStatics, __assign, __createBinding, __setModuleDefault, ownKeys, _SuppressedError, tslib_es6_default;
 var init_tslib_es6 = __esm({
@@ -24079,13 +24182,13 @@ var require_lazy_helpers = __commonJS({
       }
     };
     exports.DelayedConstructor = DelayedConstructor;
-    function delay(wrappedConstructor) {
+    function delay2(wrappedConstructor) {
       if (typeof wrappedConstructor === "undefined") {
         throw new Error("Attempt to `delay` undefined. Constructor must be wrapped in a callback");
       }
       return new DelayedConstructor(wrappedConstructor);
     }
-    exports.delay = delay;
+    exports.delay = delay2;
   }
 });
 
@@ -24359,14 +24462,14 @@ var require_dependency_container = __commonJS({
           provider = providerOrConstructor;
         }
         if (providers_1.isTokenProvider(provider)) {
-          const path2 = [token];
+          const path3 = [token];
           let tokenProvider = provider;
           while (tokenProvider != null) {
             const currentToken = tokenProvider.useToken;
-            if (path2.includes(currentToken)) {
-              throw new Error(`Token registration cycle detected! ${[...path2, currentToken].join(" -> ")}`);
+            if (path3.includes(currentToken)) {
+              throw new Error(`Token registration cycle detected! ${[...path3, currentToken].join(" -> ")}`);
             }
-            path2.push(currentToken);
+            path3.push(currentToken);
             const registration = this._registry.get(currentToken);
             if (registration && providers_1.isTokenProvider(registration.provider)) {
               tokenProvider = registration.provider;
@@ -29170,11 +29273,10 @@ var require_x509_cjs = __commonJS({
 });
 
 // server/node-runtime.ts
-import fs from "node:fs";
-import fsp from "node:fs/promises";
+import fs2 from "node:fs";
+import fsp2 from "node:fs/promises";
 import os from "node:os";
-import path from "node:path";
-import { Readable } from "node:stream";
+import path2 from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/router.ts
@@ -29822,17 +29924,17 @@ function readBodyString(body, names) {
   }
   return "";
 }
-function readNestedString(source, path2) {
+function readNestedString(source, path3) {
   let current = source;
-  for (const key of path2) {
+  for (const key of path3) {
     if (!current || typeof current !== "object") return "";
     current = current[key];
   }
   return typeof current === "string" ? current : "";
 }
-function readNestedNumber(source, path2) {
+function readNestedNumber(source, path3) {
   let current = source;
-  for (const key of path2) {
+  for (const key of path3) {
     if (!current || typeof current !== "object") return void 0;
     current = current[key];
   }
@@ -31148,12 +31250,12 @@ async function processAttachmentUpload(request, env, cipher, attachment, cipherI
   if (upload instanceof Response) {
     return upload;
   }
-  const path2 = getAttachmentObjectKey(cipherId, attachment.id);
-  if (await getBlobObject(env, path2)) {
+  const path3 = getAttachmentObjectKey(cipherId, attachment.id);
+  if (await getBlobObject(env, path3)) {
     return errorResponse("Attachment file has already been uploaded", 409);
   }
   try {
-    await putBlobObject(env, path2, upload.body, {
+    await putBlobObject(env, path3, upload.body, {
       size: upload.size,
       contentType: upload.contentType,
       customMetadata: {
@@ -31353,12 +31455,12 @@ async function handlePublicDownloadAttachment(request, env, cipherId, attachment
   if (!attachment || attachment.cipherId !== cipherId) {
     return errorResponse("Attachment not found", 404);
   }
-  const path2 = getAttachmentObjectKey(cipherId, attachmentId);
+  const path3 = getAttachmentObjectKey(cipherId, attachmentId);
   const firstUse = await storage.consumeAttachmentDownloadToken(claims.jti, claims.exp);
   if (!firstUse) {
     return errorResponse("Invalid or expired token", 401);
   }
-  const object = await getBlobObject(env, path2);
+  const object = await getBlobObject(env, path3);
   if (!object) {
     return errorResponse("Attachment file not found", 404);
   }
@@ -31382,8 +31484,8 @@ async function handleDeleteAttachment(request, env, userId, cipherId, attachment
   if (!attachment || attachment.cipherId !== cipherId) {
     return errorResponse("Attachment not found", 404);
   }
-  const path2 = getAttachmentObjectKey(cipherId, attachmentId);
-  await deleteBlobObject(env, path2);
+  const path3 = getAttachmentObjectKey(cipherId, attachmentId);
+  await deleteBlobObject(env, path3);
   await storage.deleteAttachmentForUser(attachmentId, userId);
   const revisionInfo = await storage.updateCipherRevisionDate(cipherId);
   if (revisionInfo) {
@@ -31416,8 +31518,8 @@ async function deleteAllAttachmentsForCiphers(env, cipherIds) {
   );
   if (!attachments.length) return;
   await runWithConcurrency(attachments, LIMITS.performance.attachmentDeleteConcurrency, async ({ attachment, cipherId }) => {
-    const path2 = getAttachmentObjectKey(cipherId, attachment.id);
-    await deleteBlobObject(env, path2);
+    const path3 = getAttachmentObjectKey(cipherId, attachment.id);
+    await deleteBlobObject(env, path3);
   });
   await storage.bulkDeleteAttachmentsByIds(attachments.map(({ attachment }) => attachment.id));
 }
@@ -33259,12 +33361,12 @@ async function processSendFileUpload(request, env, send, fileId) {
   if (upload instanceof Response) {
     return upload;
   }
-  const path2 = getSendFileObjectKey(send.id, fileId);
-  if (await getBlobObject(env, path2)) {
+  const path3 = getSendFileObjectKey(send.id, fileId);
+  if (await getBlobObject(env, path3)) {
     return errorResponse("Send file has already been uploaded", 409);
   }
   try {
-    await putBlobObject(env, path2, upload.body, {
+    await putBlobObject(env, path3, upload.body, {
       size: upload.size,
       contentType: upload.contentType,
       customMetadata: {
@@ -35276,32 +35378,32 @@ async function handleClearDeviceToken(request, env, userId, deviceIdentifier) {
 function devicesPath(pattern) {
   return new RegExp(`^/(?:api/)?devices${pattern}$`, "i");
 }
-async function handleAuthenticatedDeviceRoute(request, env, userId, path2, method) {
-  if (path2 === "/api/devices" || path2 === "/devices") {
+async function handleAuthenticatedDeviceRoute(request, env, userId, path3, method) {
+  if (path3 === "/api/devices" || path3 === "/devices") {
     if (method === "GET") return handleGetDevices(request, env, userId);
     if (method === "POST") return handleRegisterDevice(request, env, userId);
     if (method === "DELETE") return handleDeleteAllDevices(request, env, userId);
     return null;
   }
-  if ((path2 === "/api/devices/lost-trust" || path2 === "/devices/lost-trust") && method === "POST") {
+  if ((path3 === "/api/devices/lost-trust" || path3 === "/devices/lost-trust") && method === "POST") {
     return handleReportLostTrust(request, env, userId);
   }
-  if (path2 === "/api/devices/authorized" || path2 === "/devices/authorized") {
+  if (path3 === "/api/devices/authorized" || path3 === "/devices/authorized") {
     if (method === "GET") return handleGetAuthorizedDevices(request, env, userId);
     if (method === "DELETE") return handleRevokeAllTrustedDevices(request, env, userId);
     return null;
   }
-  const authorizedDeviceMatch = path2.match(devicesPath("/authorized/([^/]+)"));
+  const authorizedDeviceMatch = path3.match(devicesPath("/authorized/([^/]+)"));
   if (authorizedDeviceMatch && method === "DELETE") {
     const deviceIdentifier = decodeURIComponent(authorizedDeviceMatch[1]);
     return handleRevokeTrustedDevice(request, env, userId, deviceIdentifier);
   }
-  const permanentAuthorizedDeviceMatch = path2.match(devicesPath("/authorized/([^/]+)/permanent"));
+  const permanentAuthorizedDeviceMatch = path3.match(devicesPath("/authorized/([^/]+)/permanent"));
   if (permanentAuthorizedDeviceMatch && method === "POST") {
     const deviceIdentifier = decodeURIComponent(permanentAuthorizedDeviceMatch[1]);
     return handleTrustDevicePermanently(request, env, userId, deviceIdentifier);
   }
-  const deleteDeviceMatch = path2.match(devicesPath("/([^/]+)"));
+  const deleteDeviceMatch = path3.match(devicesPath("/([^/]+)"));
   if (deleteDeviceMatch && method === "GET") {
     const deviceIdentifier = decodeURIComponent(deleteDeviceMatch[1]);
     return handleGetDevice(request, env, userId, deviceIdentifier);
@@ -35310,50 +35412,50 @@ async function handleAuthenticatedDeviceRoute(request, env, userId, path2, metho
     const deviceIdentifier = decodeURIComponent(deleteDeviceMatch[1]);
     return handleDeleteDevice(request, env, userId, deviceIdentifier);
   }
-  const updateDeviceNameMatch = path2.match(devicesPath("/([^/]+)/name"));
+  const updateDeviceNameMatch = path3.match(devicesPath("/([^/]+)/name"));
   if (updateDeviceNameMatch && method === "PUT") {
     const deviceIdentifier = decodeURIComponent(updateDeviceNameMatch[1]);
     return handleUpdateDeviceName(request, env, userId, deviceIdentifier);
   }
-  const identifierMatch = path2.match(devicesPath("/identifier/([^/]+)"));
+  const identifierMatch = path3.match(devicesPath("/identifier/([^/]+)"));
   if (identifierMatch && method === "GET") {
     const deviceIdentifier = decodeURIComponent(identifierMatch[1]);
     return handleGetDeviceByIdentifier(request, env, userId, deviceIdentifier);
   }
-  const deviceKeysMatch = path2.match(devicesPath("/([^/]+)/keys")) || path2.match(devicesPath("/identifier/([^/]+)/keys"));
+  const deviceKeysMatch = path3.match(devicesPath("/([^/]+)/keys")) || path3.match(devicesPath("/identifier/([^/]+)/keys"));
   if (deviceKeysMatch && (method === "PUT" || method === "POST")) {
     const deviceIdentifier = decodeURIComponent(deviceKeysMatch[1]);
     return handleUpdateDeviceKeys(request, env, userId, deviceIdentifier);
   }
-  const identifierTokenMatch = path2.match(devicesPath("/identifier/([^/]+)/token"));
+  const identifierTokenMatch = path3.match(devicesPath("/identifier/([^/]+)/token"));
   if (identifierTokenMatch && (method === "PUT" || method === "POST")) {
     const deviceIdentifier = decodeURIComponent(identifierTokenMatch[1]);
     return handleUpdateDeviceToken(request, env, userId, deviceIdentifier);
   }
-  const identifierWebPushMatch = path2.match(devicesPath("/identifier/([^/]+)/web-push-auth"));
+  const identifierWebPushMatch = path3.match(devicesPath("/identifier/([^/]+)/web-push-auth"));
   if (identifierWebPushMatch && (method === "PUT" || method === "POST")) {
     const deviceIdentifier = decodeURIComponent(identifierWebPushMatch[1]);
     return handleUpdateDeviceWebPushAuth(request, env, userId, deviceIdentifier);
   }
-  const identifierClearTokenMatch = path2.match(devicesPath("/identifier/([^/]+)/clear-token"));
+  const identifierClearTokenMatch = path3.match(devicesPath("/identifier/([^/]+)/clear-token"));
   if (identifierClearTokenMatch && (method === "PUT" || method === "POST")) {
     const deviceIdentifier = decodeURIComponent(identifierClearTokenMatch[1]);
     return handleClearDeviceToken(request, env, userId, deviceIdentifier);
   }
-  const identifierRetrieveKeysMatch = path2.match(devicesPath("/([^/]+)/retrieve-keys"));
+  const identifierRetrieveKeysMatch = path3.match(devicesPath("/([^/]+)/retrieve-keys"));
   if (identifierRetrieveKeysMatch && method === "POST") {
     const deviceIdentifier = decodeURIComponent(identifierRetrieveKeysMatch[1]);
     return handleRetrieveDeviceKeys(request, env, userId, deviceIdentifier);
   }
-  const identifierDeactivateMatch = path2.match(devicesPath("/([^/]+)/deactivate"));
+  const identifierDeactivateMatch = path3.match(devicesPath("/([^/]+)/deactivate"));
   if (identifierDeactivateMatch && (method === "POST" || method === "DELETE")) {
     const deviceIdentifier = decodeURIComponent(identifierDeactivateMatch[1]);
     return handleDeactivateDevice(request, env, userId, deviceIdentifier);
   }
-  if ((path2 === "/api/devices/update-trust" || path2 === "/devices/update-trust") && method === "POST") {
+  if ((path3 === "/api/devices/update-trust" || path3 === "/devices/update-trust") && method === "POST") {
     return handleUpdateDeviceTrust(request, env, userId);
   }
-  if ((path2 === "/api/devices/untrust" || path2 === "/devices/untrust") && method === "POST") {
+  if ((path3 === "/api/devices/untrust" || path3 === "/devices/untrust") && method === "POST") {
     return handleUntrustDevices(request, env, userId);
   }
   return null;
@@ -35689,11 +35791,11 @@ async function handleAdminDeleteUser(request, env, actorUser, targetUserId) {
 // src/router-admin-backup.ts
 init_backup();
 init_response();
-async function handleAdminBackupRoute(request, env, actorUser, path2, method) {
-  if (path2 === "/api/admin/backup/export" && method === "POST") {
+async function handleAdminBackupRoute(request, env, actorUser, path3, method) {
+  if (path3 === "/api/admin/backup/export" && method === "POST") {
     return handleAdminExportBackup(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/blob") {
+  if (path3 === "/api/admin/backup/blob") {
     if (method === "POST") {
       return handleDownloadAdminBackupAttachment(request, env, actorUser);
     }
@@ -35705,35 +35807,35 @@ async function handleAdminBackupRoute(request, env, actorUser, path2, method) {
     }
     return null;
   }
-  if (path2 === "/api/admin/backup/settings") {
+  if (path3 === "/api/admin/backup/settings") {
     if (method === "GET") return handleGetAdminBackupSettings(request, env, actorUser);
     if (method === "PUT") return handleUpdateAdminBackupSettings(request, env, actorUser);
     return null;
   }
-  if (path2 === "/api/admin/backup/settings/repair") {
+  if (path3 === "/api/admin/backup/settings/repair") {
     if (method === "GET") return handleGetAdminBackupSettingsRepairState(request, env, actorUser);
     if (method === "POST") return handleRepairAdminBackupSettings(request, env, actorUser);
     return null;
   }
-  if (path2 === "/api/admin/backup/run" && method === "POST") {
+  if (path3 === "/api/admin/backup/run" && method === "POST") {
     return handleRunAdminConfiguredBackup(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/remote" && method === "GET") {
+  if (path3 === "/api/admin/backup/remote" && method === "GET") {
     return handleListAdminRemoteBackups(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/remote/download" && method === "POST") {
+  if (path3 === "/api/admin/backup/remote/download" && method === "POST") {
     return handleDownloadAdminRemoteBackup(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/remote/integrity" && method === "POST") {
+  if (path3 === "/api/admin/backup/remote/integrity" && method === "POST") {
     return handleInspectAdminRemoteBackup(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/remote/file" && method === "DELETE") {
+  if (path3 === "/api/admin/backup/remote/file" && method === "DELETE") {
     return handleDeleteAdminRemoteBackup(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/remote/restore" && method === "POST") {
+  if (path3 === "/api/admin/backup/remote/restore" && method === "POST") {
     return handleRestoreAdminRemoteBackup(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/import" && method === "POST") {
+  if (path3 === "/api/admin/backup/import" && method === "POST") {
     return handleAdminImportBackup(request, env, actorUser);
   }
   return null;
@@ -37474,11 +37576,11 @@ async function initializeTarget(target) {
       const message = error instanceof Error ? error.message : String(error);
       const previous = failureCounts.get(target.key) ?? 0;
       failureCounts.set(target.key, previous + 1);
-      const delay = Math.min(RETRY_BASE_MS * 2 ** previous, RETRY_MAX_MS);
-      retryAfter.set(target.key, Date.now() + delay);
+      const delay2 = Math.min(RETRY_BASE_MS * 2 ** previous, RETRY_MAX_MS);
+      retryAfter.set(target.key, Date.now() + delay2);
       if (target.isPrimary) dbInitFailure = { message };
       console.error(
-        `[db-lifecycle] schema init failed for ${target.key}${target.isPrimary ? " (primary)" : " (standby)"}; retrying in ${Math.round(delay / 1e3)}s:`,
+        `[db-lifecycle] schema init failed for ${target.key}${target.isPrimary ? " (primary)" : " (standby)"}; retrying in ${Math.round(delay2 / 1e3)}s:`,
         error
       );
     }).finally(() => {
@@ -37530,7 +37632,7 @@ async function readJsonBody3(request) {
     return {};
   }
 }
-function ipv4ToInt(address) {
+function ipv4ToInt2(address) {
   const parts = address.split(".");
   if (parts.length !== 4) return null;
   const octets = parts.map((part) => Number(part));
@@ -37563,8 +37665,8 @@ function matchesCidr(address, entry) {
   const [network, bitsRaw] = entry.split("/");
   const bits2 = Number(bitsRaw);
   if (!network || !Number.isInteger(bits2) || bits2 < 0 || bits2 > 32) return false;
-  const ip = ipv4ToInt(address);
-  const base = ipv4ToInt(network);
+  const ip = ipv4ToInt2(address);
+  const base = ipv4ToInt2(network);
   if (ip === null || base === null) return false;
   if (bits2 === 0) return true;
   const mask = 4294967295 << 32 - bits2 >>> 0;
@@ -38436,66 +38538,66 @@ async function auditDbConfigChange(env, actorUser, action, cluster) {
 
 // src/router-admin.ts
 init_response();
-function isKnownAdminPath(path2) {
-  return path2 === "/api/admin/users" || path2 === "/api/admin/logs" || path2 === "/api/admin/logs/settings" || path2 === "/api/admin/invites" || path2 === "/api/admin/db-config" || path2 === "/api/admin/db-config/test" || path2 === "/api/admin/db-config/sync" || path2 === "/api/admin/db-config/promote" || path2.startsWith("/api/admin/backup") || /^\/api\/admin\/invites\/[^/]+$/i.test(path2) || /^\/api\/admin\/users\/[a-f0-9-]+(?:\/status)?$/i.test(path2);
+function isKnownAdminPath(path3) {
+  return path3 === "/api/admin/users" || path3 === "/api/admin/logs" || path3 === "/api/admin/logs/settings" || path3 === "/api/admin/invites" || path3 === "/api/admin/db-config" || path3 === "/api/admin/db-config/test" || path3 === "/api/admin/db-config/sync" || path3 === "/api/admin/db-config/promote" || path3.startsWith("/api/admin/backup") || /^\/api\/admin\/invites\/[^/]+$/i.test(path3) || /^\/api\/admin\/users\/[a-f0-9-]+(?:\/status)?$/i.test(path3);
 }
 function isActiveAdmin(user) {
   return user.role === "admin" && user.status === "active";
 }
-async function handleAdminRoute(request, env, actorUser, path2, method) {
-  if (!isKnownAdminPath(path2)) {
+async function handleAdminRoute(request, env, actorUser, path3, method) {
+  if (!isKnownAdminPath(path3)) {
     return null;
   }
   if (!isActiveAdmin(actorUser)) {
     return errorResponse("Forbidden", 403);
   }
-  if (path2 === "/api/admin/users" && method === "GET") {
+  if (path3 === "/api/admin/users" && method === "GET") {
     return handleAdminListUsers(request, env, actorUser);
   }
-  if (path2 === "/api/admin/logs" && method === "GET") {
+  if (path3 === "/api/admin/logs" && method === "GET") {
     return handleAdminListAuditLogs(request, env, actorUser);
   }
-  if (path2 === "/api/admin/logs" && method === "DELETE") {
+  if (path3 === "/api/admin/logs" && method === "DELETE") {
     return handleAdminClearAuditLogs(request, env, actorUser);
   }
-  if (path2 === "/api/admin/logs/settings") {
+  if (path3 === "/api/admin/logs/settings") {
     if (method === "GET") return handleAdminGetAuditLogSettings(request, env, actorUser);
     if (method === "PUT" || method === "POST") return handleAdminUpdateAuditLogSettings(request, env, actorUser);
     return null;
   }
-  if (path2 === "/api/admin/db-config") {
+  if (path3 === "/api/admin/db-config") {
     if (method === "GET") return handleAdminGetDbConfig(request, env, actorUser);
     if (method === "POST" || method === "PUT") return handleAdminSaveDbConfig(request, env, actorUser);
     if (method === "DELETE") return handleAdminClearDbConfig(request, env, actorUser);
     return null;
   }
-  if (path2 === "/api/admin/db-config/test" && method === "POST") {
+  if (path3 === "/api/admin/db-config/test" && method === "POST") {
     return handleAdminTestDbConfig(request, env, actorUser);
   }
-  if (path2 === "/api/admin/db-config/sync" && method === "POST") {
+  if (path3 === "/api/admin/db-config/sync" && method === "POST") {
     return handleAdminSyncDbCluster(request, env, actorUser);
   }
-  if (path2 === "/api/admin/db-config/promote" && method === "POST") {
+  if (path3 === "/api/admin/db-config/promote" && method === "POST") {
     return handleAdminPromoteDbNode(request, env, actorUser);
   }
-  const adminBackupResponse = await handleAdminBackupRoute(request, env, actorUser, path2, method);
+  const adminBackupResponse = await handleAdminBackupRoute(request, env, actorUser, path3, method);
   if (adminBackupResponse) return adminBackupResponse;
-  if (path2 === "/api/admin/invites") {
+  if (path3 === "/api/admin/invites") {
     if (method === "GET") return handleAdminListInvites(request, env, actorUser);
     if (method === "POST") return handleAdminCreateInvite(request, env, actorUser);
     if (method === "DELETE") return handleAdminDeleteAllInvites(request, env, actorUser);
     return null;
   }
-  const adminInviteMatch = path2.match(/^\/api\/admin\/invites\/([^/]+)$/i);
+  const adminInviteMatch = path3.match(/^\/api\/admin\/invites\/([^/]+)$/i);
   if (adminInviteMatch && method === "DELETE") {
     const inviteCode = decodeURIComponent(adminInviteMatch[1]);
     return handleAdminDeleteInvite(request, env, actorUser, inviteCode);
   }
-  const adminUserStatusMatch = path2.match(/^\/api\/admin\/users\/([a-f0-9-]+)\/status$/i);
+  const adminUserStatusMatch = path3.match(/^\/api\/admin\/users\/([a-f0-9-]+)\/status$/i);
   if (adminUserStatusMatch && (method === "PUT" || method === "POST")) {
     return handleAdminSetUserStatus(request, env, actorUser, adminUserStatusMatch[1]);
   }
-  const adminUserDeleteMatch = path2.match(/^\/api\/admin\/users\/([a-f0-9-]+)$/i);
+  const adminUserDeleteMatch = path3.match(/^\/api\/admin\/users\/([a-f0-9-]+)$/i);
   if (adminUserDeleteMatch && method === "DELETE") {
     return handleAdminDeleteUser(request, env, actorUser, adminUserDeleteMatch[1]);
   }
@@ -47048,7 +47150,7 @@ async function handleUpdateAuthRequest(request, env, userId, id) {
 }
 
 // src/router-authenticated.ts
-async function handleAuthenticatedRoute(request, env, userId, currentUser, path2, method) {
+async function handleAuthenticatedRoute(request, env, userId, currentUser, path3, method) {
   if (method === "POST" || method === "PUT" || method === "DELETE") {
     const blockedAccountPaths = /* @__PURE__ */ new Set([
       "/api/accounts/set-password",
@@ -47056,11 +47158,11 @@ async function handleAuthenticatedRoute(request, env, userId, currentUser, path2
       "/api/accounts/delete-account",
       "/api/accounts/delete-vault"
     ]);
-    if (blockedAccountPaths.has(path2)) {
+    if (blockedAccountPaths.has(path3)) {
       return errorResponse("Not implemented", 501);
     }
   }
-  if ((path2 === "/api/accounts/kdf" || path2 === "/accounts/kdf") && (method === "POST" || method === "PUT")) {
+  if ((path3 === "/api/accounts/kdf" || path3 === "/accounts/kdf") && (method === "POST" || method === "PUT")) {
     return unsupportedResponse("KDF changes are not supported by this server.");
   }
   const mailBackedAccountPaths = /* @__PURE__ */ new Set([
@@ -47075,7 +47177,7 @@ async function handleAuthenticatedRoute(request, env, userId, currentUser, path2
     "/api/accounts/verify-otp",
     "/accounts/verify-otp"
   ]);
-  if (mailBackedAccountPaths.has(path2) && (method === "POST" || method === "PUT")) {
+  if (mailBackedAccountPaths.has(path3) && (method === "POST" || method === "PUT")) {
     return unsupportedResponse("Email delivery is not supported by this server.");
   }
   const emailTwoFactorPaths = /* @__PURE__ */ new Set([
@@ -47088,142 +47190,142 @@ async function handleAuthenticatedRoute(request, env, userId, currentUser, path2
     "/api/two-factor/email",
     "/two-factor/email"
   ]);
-  if (emailTwoFactorPaths.has(path2) && (method === "POST" || method === "PUT" || method === "DELETE")) {
+  if (emailTwoFactorPaths.has(path3) && (method === "POST" || method === "PUT" || method === "DELETE")) {
     return unsupportedResponse("Email two-step login is not supported by this server.");
   }
-  if (path2 === "/api/accounts/profile") {
+  if (path3 === "/api/accounts/profile") {
     if (method === "GET") return handleGetProfile(request, env, userId);
     if (method === "PUT") return handleUpdateProfile(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if ((path2 === "/api/accounts/password" || path2 === "/api/accounts/change-password") && (method === "POST" || method === "PUT")) {
+  if ((path3 === "/api/accounts/password" || path3 === "/api/accounts/change-password") && (method === "POST" || method === "PUT")) {
     return handleChangePassword(request, env, userId);
   }
-  if (path2 === "/api/accounts/keys") {
+  if (path3 === "/api/accounts/keys") {
     if (method === "GET") return handleGetKeys(request, env, userId);
     if (method === "POST") return handleSetKeys(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/accounts/totp") {
+  if (path3 === "/api/accounts/totp") {
     if (method === "GET") return handleGetTotpStatus(request, env, userId);
     if (method === "PUT" || method === "POST") return handleSetTotpStatus(request, env, userId);
     return null;
   }
-  if ((path2 === "/api/accounts/totp/recovery-code" || path2 === "/api/two-factor/get-recover") && method === "POST") {
+  if ((path3 === "/api/accounts/totp/recovery-code" || path3 === "/api/two-factor/get-recover") && method === "POST") {
     return handleGetTotpRecoveryCode(request, env, userId);
   }
-  if (path2 === "/api/two-factor") {
+  if (path3 === "/api/two-factor") {
     if (method === "GET") return handleGetTwoFactorProviders(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/two-factor/get-authenticator" && method === "POST") {
+  if (path3 === "/api/two-factor/get-authenticator" && method === "POST") {
     return handleGetTwoFactorAuthenticator(request, env, userId);
   }
-  if ((path2 === "/api/two-factor/get-yubikey" || path2 === "/api/two-factor/get-yubi-key") && method === "POST") {
+  if ((path3 === "/api/two-factor/get-yubikey" || path3 === "/api/two-factor/get-yubi-key") && method === "POST") {
     return handleGetTwoFactorYubiKey(request, env, userId);
   }
-  if (path2 === "/api/two-factor/get-device-verification-settings" && method === "POST") {
+  if (path3 === "/api/two-factor/get-device-verification-settings" && method === "POST") {
     return handleGetDeviceVerificationSettings(request, env, userId);
   }
-  if (path2 === "/api/two-factor/device-verification-settings") {
+  if (path3 === "/api/two-factor/device-verification-settings") {
     if (method === "PUT" || method === "POST") return handlePutDeviceVerificationSettings(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/two-factor/get-webauthn" && method === "POST") {
+  if (path3 === "/api/two-factor/get-webauthn" && method === "POST") {
     return handleGetTwoFactorWebAuthn(request, env, userId, currentUser);
   }
-  if (path2 === "/api/two-factor/get-webauthn-challenge" && method === "POST") {
+  if (path3 === "/api/two-factor/get-webauthn-challenge" && method === "POST") {
     return handleGetTwoFactorWebAuthnChallenge(request, env, userId, currentUser);
   }
-  if (path2 === "/api/two-factor/authenticator") {
+  if (path3 === "/api/two-factor/authenticator") {
     if (method === "PUT" || method === "POST") return handlePutTwoFactorAuthenticator(request, env, userId);
     if (method === "DELETE") return handleDisableTwoFactorProvider(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/two-factor/yubikey" || path2 === "/api/two-factor/yubi-key") {
+  if (path3 === "/api/two-factor/yubikey" || path3 === "/api/two-factor/yubi-key") {
     if (method === "PUT" || method === "POST") return handlePutTwoFactorYubiKey(request, env, userId);
     if (method === "DELETE") return handleDisableTwoFactorProvider(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/two-factor/webauthn") {
+  if (path3 === "/api/two-factor/webauthn") {
     if (method === "PUT" || method === "POST") return handlePutTwoFactorWebAuthn(request, env, userId, currentUser);
     if (method === "DELETE") return handleDeleteTwoFactorWebAuthn(request, env, userId, currentUser);
     return errorResponse("Method not allowed", 405);
   }
-  if ((path2 === "/api/two-factor/yubikey/config" || path2 === "/api/two-factor/yubi-key/config") && (method === "PUT" || method === "POST")) {
+  if ((path3 === "/api/two-factor/yubikey/config" || path3 === "/api/two-factor/yubi-key/config") && (method === "PUT" || method === "POST")) {
     return handlePutTwoFactorYubiKeyConfig(request, env, userId);
   }
-  if ((path2 === "/api/two-factor/yubikey/bootstrap" || path2 === "/api/two-factor/yubi-key/bootstrap") && method === "POST") {
+  if ((path3 === "/api/two-factor/yubikey/bootstrap" || path3 === "/api/two-factor/yubi-key/bootstrap") && method === "POST") {
     return handleBootstrapTwoFactorYubiKeyConfig(request, env, userId);
   }
-  if (path2 === "/api/two-factor/disable" && (method === "PUT" || method === "POST")) {
+  if (path3 === "/api/two-factor/disable" && (method === "PUT" || method === "POST")) {
     return handleDisableTwoFactorProvider(request, env, userId);
   }
-  if (path2 === "/api/accounts/revision-date" && method === "GET") {
+  if (path3 === "/api/accounts/revision-date" && method === "GET") {
     return handleGetRevisionDate(request, env, userId);
   }
-  if (path2 === "/api/accounts/verify-password" && method === "POST") {
+  if (path3 === "/api/accounts/verify-password" && method === "POST") {
     return handleVerifyPassword(request, env, userId);
   }
-  if (path2 === "/api/accounts/verify-devices" && (method === "PUT" || method === "POST")) {
+  if (path3 === "/api/accounts/verify-devices" && (method === "PUT" || method === "POST")) {
     return handleSetVerifyDevices(request, env, userId);
   }
-  if ((path2 === "/api/accounts/api-key" || path2 === "/api/accounts/api_key") && method === "POST") {
+  if ((path3 === "/api/accounts/api-key" || path3 === "/api/accounts/api_key") && method === "POST") {
     return handleGetApiKey(request, env, userId);
   }
-  if ((path2 === "/api/accounts/rotate-api-key" || path2 === "/api/accounts/rotate_api_key") && method === "POST") {
+  if ((path3 === "/api/accounts/rotate-api-key" || path3 === "/api/accounts/rotate_api_key") && method === "POST") {
     return handleRotateApiKey(request, env, userId);
   }
-  if (path2 === "/api/webauthn" || path2 === "/webauthn") {
+  if (path3 === "/api/webauthn" || path3 === "/webauthn") {
     if (method === "GET") return handleGetAccountPasskeyCredentials(request, env, userId);
     if (method === "POST") return handleCreateAccountPasskeyCredential(request, env, userId);
     if (method === "PUT") return handleUpdateAccountPasskeyEncryption(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if ((path2 === "/api/webauthn/attestation-options" || path2 === "/webauthn/attestation-options") && method === "POST") {
+  if ((path3 === "/api/webauthn/attestation-options" || path3 === "/webauthn/attestation-options") && method === "POST") {
     return handleGetAccountPasskeyAttestationOptions(request, env, userId, currentUser);
   }
-  if ((path2 === "/api/webauthn/assertion-options" || path2 === "/webauthn/assertion-options") && method === "POST") {
+  if ((path3 === "/api/webauthn/assertion-options" || path3 === "/webauthn/assertion-options") && method === "POST") {
     return handleGetAccountPasskeyUpdateAssertionOptions(request, env, userId, currentUser);
   }
-  const accountPasskeyDeleteMatch = path2.match(/^\/api\/webauthn\/([^/]+)\/delete$/i) || path2.match(/^\/webauthn\/([^/]+)\/delete$/i);
+  const accountPasskeyDeleteMatch = path3.match(/^\/api\/webauthn\/([^/]+)\/delete$/i) || path3.match(/^\/webauthn\/([^/]+)\/delete$/i);
   if (accountPasskeyDeleteMatch && method === "POST") {
     return handleDeleteAccountPasskeyCredential(request, env, userId, accountPasskeyDeleteMatch[1], currentUser);
   }
-  if (path2 === "/api/sync" && method === "GET") {
+  if (path3 === "/api/sync" && method === "GET") {
     return handleSync(request, env, userId);
   }
-  if (path2.startsWith("/notifications/")) {
+  if (path3.startsWith("/notifications/")) {
     return errorResponse("Not found", 404);
   }
-  if (path2 === "/api/ciphers" || path2 === "/api/ciphers/create") {
+  if (path3 === "/api/ciphers" || path3 === "/api/ciphers/create") {
     if (method === "GET") return handleGetCiphers(request, env, userId);
     if (method === "POST") return handleCreateCipher(request, env, userId);
-    if (path2 === "/api/ciphers" && method === "DELETE") return handleBulkPermanentDeleteCiphers(request, env, userId);
+    if (path3 === "/api/ciphers" && method === "DELETE") return handleBulkPermanentDeleteCiphers(request, env, userId);
     return null;
   }
-  if (path2 === "/api/ciphers/import" && method === "POST") {
+  if (path3 === "/api/ciphers/import" && method === "POST") {
     return handleCiphersImport(request, env, userId);
   }
-  if (path2 === "/api/ciphers/delete" && (method === "PUT" || method === "POST")) {
+  if (path3 === "/api/ciphers/delete" && (method === "PUT" || method === "POST")) {
     return handleBulkDeleteCiphers(request, env, userId);
   }
-  if (path2 === "/api/ciphers/delete-permanent" && method === "POST") {
+  if (path3 === "/api/ciphers/delete-permanent" && method === "POST") {
     return handleBulkPermanentDeleteCiphers(request, env, userId);
   }
-  if (path2 === "/api/ciphers/restore" && (method === "PUT" || method === "POST")) {
+  if (path3 === "/api/ciphers/restore" && (method === "PUT" || method === "POST")) {
     return handleBulkRestoreCiphers(request, env, userId);
   }
-  if (path2 === "/api/ciphers/archive" && (method === "PUT" || method === "POST")) {
+  if (path3 === "/api/ciphers/archive" && (method === "PUT" || method === "POST")) {
     return handleBulkArchiveCiphers(request, env, userId);
   }
-  if (path2 === "/api/ciphers/unarchive" && (method === "PUT" || method === "POST")) {
+  if (path3 === "/api/ciphers/unarchive" && (method === "PUT" || method === "POST")) {
     return handleBulkUnarchiveCiphers(request, env, userId);
   }
-  if (path2 === "/api/ciphers/move" && (method === "POST" || method === "PUT")) {
+  if (path3 === "/api/ciphers/move" && (method === "POST" || method === "PUT")) {
     return handleBulkMoveCiphers(request, env, userId);
   }
-  const cipherMatch = path2.match(/^\/api\/ciphers\/([a-f0-9-]+)(\/.*)?$/i);
+  const cipherMatch = path3.match(/^\/api\/ciphers\/([a-f0-9-]+)(\/.*)?$/i);
   if (cipherMatch) {
     const cipherId = cipherMatch[1];
     const subPath = cipherMatch[2] || "";
@@ -47258,63 +47360,63 @@ async function handleAuthenticatedRoute(request, env, userId, currentUser, path2
       return handleDeleteAttachment(request, env, userId, cipherId, attachmentDeleteMatch[1]);
     }
   }
-  if (path2 === "/api/folders") {
+  if (path3 === "/api/folders") {
     if (method === "GET") return handleGetFolders(request, env, userId);
     if (method === "POST") return handleCreateFolder(request, env, userId);
     return null;
   }
-  if (path2 === "/api/folders/delete" && method === "POST") {
+  if (path3 === "/api/folders/delete" && method === "POST") {
     return handleBulkDeleteFolders(request, env, userId);
   }
-  const folderMatch = path2.match(/^\/api\/folders\/([a-f0-9-]+)$/i);
+  const folderMatch = path3.match(/^\/api\/folders\/([a-f0-9-]+)$/i);
   if (folderMatch) {
     const folderId = folderMatch[1];
     if (method === "GET") return handleGetFolder(request, env, userId, folderId);
     if (method === "PUT") return handleUpdateFolder(request, env, userId, folderId);
     if (method === "DELETE") return handleDeleteFolder(request, env, userId, folderId);
   }
-  if (path2 === "/api/auth-requests" || path2 === "/api/auth-requests/" || path2 === "/auth-requests" || path2 === "/auth-requests/") {
+  if (path3 === "/api/auth-requests" || path3 === "/api/auth-requests/" || path3 === "/auth-requests" || path3 === "/auth-requests/") {
     if (method === "GET") return handleListAuthRequests(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/auth-requests/pending" || path2 === "/auth-requests/pending") {
+  if (path3 === "/api/auth-requests/pending" || path3 === "/auth-requests/pending") {
     if (method === "GET") return handleListPendingAuthRequests(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/auth-requests/admin-request" || path2 === "/auth-requests/admin-request") {
+  if (path3 === "/api/auth-requests/admin-request" || path3 === "/auth-requests/admin-request") {
     if (method === "POST") return handleCreateAdminAuthRequest(request, env, userId, currentUser.email);
     return errorResponse("Method not allowed", 405);
   }
-  const authRequestMatch = path2.match(/^\/(?:api\/)?auth-requests\/([a-f0-9-]+)$/i);
+  const authRequestMatch = path3.match(/^\/(?:api\/)?auth-requests\/([a-f0-9-]+)$/i);
   if (authRequestMatch) {
     if (method === "GET") return handleGetAuthRequest(request, env, userId, authRequestMatch[1]);
     if (method === "PUT") return handleUpdateAuthRequest(request, env, userId, authRequestMatch[1]);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/collections" || path2.startsWith("/api/collections/")) {
+  if (path3 === "/api/collections" || path3.startsWith("/api/collections/")) {
     if (method === "GET") {
       return jsonResponse({ data: [], object: "list", continuationToken: null });
     }
     return null;
   }
-  if (path2 === "/api/organizations" || path2.startsWith("/api/organizations/")) {
+  if (path3 === "/api/organizations" || path3.startsWith("/api/organizations/")) {
     if (method === "GET") {
       return jsonResponse({ data: [], object: "list", continuationToken: null });
     }
     return null;
   }
-  if (path2 === "/api/sends") {
+  if (path3 === "/api/sends") {
     if (method === "GET") return handleGetSends(request, env, userId);
     if (method === "POST") return handleCreateSend(request, env, userId);
     return null;
   }
-  if (path2 === "/api/sends/file/v2" && method === "POST") {
+  if (path3 === "/api/sends/file/v2" && method === "POST") {
     return handleCreateFileSendV2(request, env, userId);
   }
-  if (path2 === "/api/sends/delete" && method === "POST") {
+  if (path3 === "/api/sends/delete" && method === "POST") {
     return handleBulkDeleteSends(request, env, userId);
   }
-  const sendMatch = path2.match(/^\/api\/sends\/([^/]+)(\/.*)?$/i);
+  const sendMatch = path3.match(/^\/api\/sends\/([^/]+)(\/.*)?$/i);
   if (sendMatch) {
     const sendId = sendMatch[1];
     const subPath = sendMatch[2] || "";
@@ -47336,20 +47438,20 @@ async function handleAuthenticatedRoute(request, env, userId, currentUser, path2
       if (method === "POST" || method === "PUT") return handleUploadSendFile(request, env, userId, sendId, fileId);
     }
   }
-  if (path2 === "/api/policies" || path2.startsWith("/api/policies/")) {
+  if (path3 === "/api/policies" || path3.startsWith("/api/policies/")) {
     if (method === "GET") {
       return jsonResponse({ data: [], object: "list", continuationToken: null });
     }
     return null;
   }
-  if (path2 === "/api/settings/domains" || path2 === "/settings/domains") {
+  if (path3 === "/api/settings/domains" || path3 === "/settings/domains") {
     if (method === "GET") return handleGetDomains(env, userId);
     if (method === "PUT" || method === "POST") return handleUpdateDomains(request, env, userId);
     return null;
   }
-  const authenticatedDeviceResponse = await handleAuthenticatedDeviceRoute(request, env, userId, path2, method);
+  const authenticatedDeviceResponse = await handleAuthenticatedDeviceRoute(request, env, userId, path3, method);
   if (authenticatedDeviceResponse) return authenticatedDeviceResponse;
-  const adminResponse = await handleAdminRoute(request, env, currentUser, path2, method);
+  const adminResponse = await handleAdminRoute(request, env, currentUser, path3, method);
   if (adminResponse) return adminResponse;
   return null;
 }
@@ -48774,8 +48876,8 @@ async function buildWebBootstrapResponse(env) {
     websiteIconsEnabled: isWebsiteIconProxyEnabled(env)
   };
 }
-async function handlePublicRoute(request, env, path2, method, enforcePublicRateLimit) {
-  if (path2 === "/.well-known/appspecific/com.chrome.devtools.json" && method === "GET") {
+async function handlePublicRoute(request, env, path3, method, enforcePublicRateLimit) {
+  if (path3 === "/.well-known/appspecific/com.chrome.devtools.json" && method === "GET") {
     return new Response("{}", {
       status: 200,
       headers: {
@@ -48784,117 +48886,117 @@ async function handlePublicRoute(request, env, path2, method, enforcePublicRateL
       }
     });
   }
-  if ((path2 === "/api/web-bootstrap" || path2 === "/web-bootstrap") && method === "GET") {
+  if ((path3 === "/api/web-bootstrap" || path3 === "/web-bootstrap") && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-read", LIMITS.rateLimit.publicReadRequestsPerMinute);
     if (blocked) return blocked;
     return jsonResponse(await buildWebBootstrapResponse(env));
   }
-  if (path2 === "/fill-assist/manifest.json" && method === "GET") {
+  if (path3 === "/fill-assist/manifest.json" && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-read", LIMITS.rateLimit.publicReadRequestsPerMinute);
     if (blocked) return blocked;
     return handleFillAssistManifest();
   }
-  if ((path2 === "/v1/assetlinks:check" || path2 === "/api/v1/assetlinks:check") && method === "GET") {
+  if ((path3 === "/v1/assetlinks:check" || path3 === "/api/v1/assetlinks:check") && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-read", LIMITS.rateLimit.publicReadRequestsPerMinute);
     if (blocked) return blocked;
     return handleDigitalAssetLinkCheck();
   }
-  const fillAssistFormsMatch = path2.match(/^\/fill-assist\/([^/]+)$/i);
+  const fillAssistFormsMatch = path3.match(/^\/fill-assist\/([^/]+)$/i);
   if (fillAssistFormsMatch && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-read", LIMITS.rateLimit.publicReadRequestsPerMinute);
     if (blocked) return blocked;
     return handleFillAssistForms(fillAssistFormsMatch[1]);
   }
-  const iconMatch = path2.match(/^\/icons\/([^/]+)\/icon\.png$/i);
+  const iconMatch = path3.match(/^\/icons\/([^/]+)\/icon\.png$/i);
   if (iconMatch && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-icon", LIMITS.rateLimit.publicIconRequestsPerMinute);
     if (blocked) return blocked;
     const fallbackMode = new URL(request.url).searchParams.get("fallback") === "404" ? "not-found" : "default";
     return handleWebsiteIcon(env, iconMatch[1], fallbackMode);
   }
-  const publicAttachmentMatch = path2.match(/^\/api\/attachments\/([a-f0-9-]+)\/([a-f0-9-]+)$/i);
+  const publicAttachmentMatch = path3.match(/^\/api\/attachments\/([a-f0-9-]+)\/([a-f0-9-]+)$/i);
   if (publicAttachmentMatch && method === "GET") {
     return handlePublicDownloadAttachment(request, env, publicAttachmentMatch[1], publicAttachmentMatch[2]);
   }
-  const publicAttachmentUploadMatch = path2.match(/^\/api\/ciphers\/([a-f0-9-]+)\/attachment\/([a-f0-9-]+)$/i);
+  const publicAttachmentUploadMatch = path3.match(/^\/api\/ciphers\/([a-f0-9-]+)\/attachment\/([a-f0-9-]+)$/i);
   if (publicAttachmentUploadMatch && (method === "POST" || method === "PUT") && new URL(request.url).searchParams.has("token")) {
     return handlePublicUploadAttachment(request, env, publicAttachmentUploadMatch[1], publicAttachmentUploadMatch[2]);
   }
-  const publicSendUploadMatch = path2.match(/^\/api\/sends\/([^/]+)\/file\/([^/]+)\/?$/i);
+  const publicSendUploadMatch = path3.match(/^\/api\/sends\/([^/]+)\/file\/([^/]+)\/?$/i);
   if (publicSendUploadMatch && (method === "POST" || method === "PUT") && new URL(request.url).searchParams.has("token")) {
     return handlePublicUploadSendFile(request, env, publicSendUploadMatch[1], publicSendUploadMatch[2]);
   }
-  const sendAccessMatch = path2.match(/^\/api\/sends\/access\/([^/]+)$/i);
+  const sendAccessMatch = path3.match(/^\/api\/sends\/access\/([^/]+)$/i);
   if (sendAccessMatch && method === "POST") {
     const blocked = await enforcePublicRateLimit();
     if (blocked) return blocked;
     return handleAccessSend(request, env, sendAccessMatch[1]);
   }
-  if (path2 === "/api/sends/access" && method === "POST") {
+  if (path3 === "/api/sends/access" && method === "POST") {
     const blocked = await enforcePublicRateLimit();
     if (blocked) return blocked;
     return handleAccessSendV2(request, env);
   }
-  const sendAccessFileV2Match = path2.match(/^\/api\/sends\/access\/file\/([^/]+)\/?$/i);
+  const sendAccessFileV2Match = path3.match(/^\/api\/sends\/access\/file\/([^/]+)\/?$/i);
   if (sendAccessFileV2Match && method === "POST") {
     const blocked = await enforcePublicRateLimit();
     if (blocked) return blocked;
     return handleAccessSendFileV2(request, env, sendAccessFileV2Match[1]);
   }
-  const sendAccessFileMatch = path2.match(/^\/api\/sends\/([^/]+)\/access\/file\/([^/]+)\/?$/i);
+  const sendAccessFileMatch = path3.match(/^\/api\/sends\/([^/]+)\/access\/file\/([^/]+)\/?$/i);
   if (sendAccessFileMatch && method === "POST") {
     const blocked = await enforcePublicRateLimit();
     if (blocked) return blocked;
     return handleAccessSendFile(request, env, sendAccessFileMatch[1], sendAccessFileMatch[2]);
   }
-  const sendDownloadMatch = path2.match(/^\/api\/sends\/([^/]+)\/([^/]+)\/?$/i);
+  const sendDownloadMatch = path3.match(/^\/api\/sends\/([^/]+)\/([^/]+)\/?$/i);
   if (sendDownloadMatch && method === "GET") {
     return handleDownloadSendFile(request, env, sendDownloadMatch[1], sendDownloadMatch[2]);
   }
-  if ((path2 === "/api/auth-requests" || path2 === "/api/auth-requests/" || path2 === "/auth-requests" || path2 === "/auth-requests/") && method === "POST") {
+  if ((path3 === "/api/auth-requests" || path3 === "/api/auth-requests/" || path3 === "/auth-requests" || path3 === "/auth-requests/") && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handleCreateAuthRequest(request, env);
   }
-  const authRequestResponseMatch = path2.match(/^\/(?:api\/)?auth-requests\/([a-f0-9-]+)\/response$/i);
+  const authRequestResponseMatch = path3.match(/^\/(?:api\/)?auth-requests\/([a-f0-9-]+)\/response$/i);
   if (authRequestResponseMatch && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handleGetAuthRequestResponse(request, env, authRequestResponseMatch[1]);
   }
-  if (path2 === "/identity/connect/token" && method === "POST") {
+  if (path3 === "/identity/connect/token" && method === "POST") {
     return handleToken(request, env);
   }
-  if (path2 === "/api/devices/knowndevice" && method === "GET") {
+  if (path3 === "/api/devices/knowndevice" && method === "GET") {
     const blocked = await enforcePublicRateLimit();
     if (blocked) return jsonResponse(false);
     return handleKnownDevice(request, env);
   }
-  const clearDeviceTokenMatch = path2.match(/^\/api\/devices\/identifier\/([^/]+)\/clear-token$/i);
+  const clearDeviceTokenMatch = path3.match(/^\/api\/devices\/identifier\/([^/]+)\/clear-token$/i);
   if (clearDeviceTokenMatch && (method === "PUT" || method === "POST")) {
     return new Response(null, { status: 200 });
   }
-  if ((path2 === "/identity/connect/revocation" || path2 === "/identity/connect/revoke") && method === "POST") {
+  if ((path3 === "/identity/connect/revocation" || path3 === "/identity/connect/revoke") && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handleRevocation(request, env);
   }
-  if (path2 === "/identity/accounts/prelogin" && method === "POST") {
+  if (path3 === "/identity/accounts/prelogin" && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handlePrelogin(request, env);
   }
-  if (path2 === "/identity/accounts/prelogin/password" && method === "POST") {
+  if (path3 === "/identity/accounts/prelogin/password" && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handlePrelogin(request, env);
   }
-  if (path2 === "/identity/accounts/webauthn/assertion-options" && method === "GET") {
+  if (path3 === "/identity/accounts/webauthn/assertion-options" && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handleGetAccountPasskeyAssertionOptions(request, env);
   }
-  if ((path2 === "/identity/accounts/recover-2fa" || path2 === "/api/accounts/recover-2fa") && method === "POST") {
+  if ((path3 === "/identity/accounts/recover-2fa" || path3 === "/api/accounts/recover-2fa") && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handleRecoverTwoFactor(request, env);
@@ -48916,12 +49018,12 @@ async function handlePublicRoute(request, env, path2, method, enforcePublicRateL
     "/api/two-factor/send-email-login",
     "/two-factor/send-email-login"
   ]);
-  if (publicMailBackedPaths.has(path2) && method === "POST") {
+  if (publicMailBackedPaths.has(path3) && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return unsupportedResponse("Email delivery is not supported by this server.");
   }
-  if (path2 === "/api/accounts/password-hint" && method === "POST") {
+  if (path3 === "/api/accounts/password-hint" && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     if (!isSameOriginWriteRequest(request)) {
@@ -48932,18 +49034,18 @@ async function handlePublicRoute(request, env, path2, method, enforcePublicRateL
     }
     return handleGetPasswordHint(request, env);
   }
-  if ((path2 === "/config" || path2 === "/api/config") && method === "GET") {
+  if ((path3 === "/config" || path3 === "/api/config") && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-read", LIMITS.rateLimit.publicReadRequestsPerMinute);
     if (blocked) return blocked;
     const origin = new URL(request.url).origin;
     return jsonResponse(buildConfigResponse(origin), 200, { "Cache-Control": "no-store" });
   }
-  if (path2 === "/api/version" && method === "GET") {
+  if (path3 === "/api/version" && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-read", LIMITS.rateLimit.publicReadRequestsPerMinute);
     if (blocked) return blocked;
     return jsonResponse(LIMITS.compatibility.bitwardenServerVersion);
   }
-  if (path2 === "/api/accounts/register" && method === "POST") {
+  if (path3 === "/api/accounts/register" && method === "POST") {
     const blocked = await enforcePublicRateLimit("register", LIMITS.rateLimit.registerRequestsPerMinute);
     if (blocked) return blocked;
     if (!isSameOriginWriteRequest(request)) {
@@ -48954,13 +49056,13 @@ async function handlePublicRoute(request, env, path2, method, enforcePublicRateL
     }
     return handleRegister(request, env);
   }
-  if (path2 === "/notifications/hub/negotiate" && method === "POST") {
+  if (path3 === "/notifications/hub/negotiate" && method === "POST") {
     return handleNotificationsNegotiate(request, env);
   }
-  if (path2 === "/notifications/hub" && method === "GET") {
+  if (path3 === "/notifications/hub" && method === "GET") {
     return handleNotificationsHub(request, env);
   }
-  if (path2 === "/notifications/anonymous-hub" && method === "GET") {
+  if (path3 === "/notifications/anonymous-hub" && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handleAnonymousNotificationsHub(request, env);
@@ -48975,32 +49077,32 @@ function jwtSecretUnsafeReason2(env) {
   if (secret.length < LIMITS.auth.jwtSecretMinLength) return "too_short";
   return null;
 }
-function canServeWithUnsafeJwtSecret(path2, method) {
+function canServeWithUnsafeJwtSecret(path3, method) {
   if (method === "OPTIONS") return true;
-  if (method === "GET" && (path2 === "/api/web-bootstrap" || path2 === "/web-bootstrap")) return true;
-  if (method === "GET" && (path2 === "/config" || path2 === "/api/config" || path2 === "/api/version")) return true;
-  if (method === "GET" && path2 === "/.well-known/appspecific/com.chrome.devtools.json") return true;
-  if (method === "GET" && path2 === "/fill-assist/manifest.json") return true;
-  if (method === "GET" && /^\/fill-assist\/[^/]+$/i.test(path2)) return true;
-  if (method === "GET" && (path2 === "/v1/assetlinks:check" || path2 === "/api/v1/assetlinks:check")) return true;
-  if (method === "GET" && /^\/icons\/[^/]+\/icon\.png$/i.test(path2)) return true;
+  if (method === "GET" && (path3 === "/api/web-bootstrap" || path3 === "/web-bootstrap")) return true;
+  if (method === "GET" && (path3 === "/config" || path3 === "/api/config" || path3 === "/api/version")) return true;
+  if (method === "GET" && path3 === "/.well-known/appspecific/com.chrome.devtools.json") return true;
+  if (method === "GET" && path3 === "/fill-assist/manifest.json") return true;
+  if (method === "GET" && /^\/fill-assist\/[^/]+$/i.test(path3)) return true;
+  if (method === "GET" && (path3 === "/v1/assetlinks:check" || path3 === "/api/v1/assetlinks:check")) return true;
+  if (method === "GET" && /^\/icons\/[^/]+\/icon\.png$/i.test(path3)) return true;
   return false;
 }
-function isImportBypassRequest(request, path2, method) {
+function isImportBypassRequest(request, path3, method) {
   if (request.headers.get("X-NodeWarden-Import") !== "1") return false;
   if (method === "POST") {
-    if (path2 === "/api/ciphers/import") return true;
-    if (/^\/api\/ciphers\/[a-f0-9-]+\/attachment\/v2$/i.test(path2)) return true;
-    if (/^\/api\/ciphers\/[a-f0-9-]+\/attachment\/[a-f0-9-]+$/i.test(path2)) return true;
+    if (path3 === "/api/ciphers/import") return true;
+    if (/^\/api\/ciphers\/[a-f0-9-]+\/attachment\/v2$/i.test(path3)) return true;
+    if (/^\/api\/ciphers\/[a-f0-9-]+\/attachment\/[a-f0-9-]+$/i.test(path3)) return true;
   }
   return false;
 }
 var BODY_LIMIT_METHODS = /* @__PURE__ */ new Set(["POST", "PUT", "PATCH", "DELETE"]);
-function isLargeUploadPath(path2) {
-  return /^\/api\/ciphers\/[a-f0-9-]+\/attachment\/[a-f0-9-]+$/i.test(path2) || /^\/api\/sends\/[a-f0-9-]+\/file\/[a-f0-9-]+$/i.test(path2) || path2 === "/api/admin/backup/import";
+function isLargeUploadPath(path3) {
+  return /^\/api\/ciphers\/[a-f0-9-]+\/attachment\/[a-f0-9-]+$/i.test(path3) || /^\/api\/sends\/[a-f0-9-]+\/file\/[a-f0-9-]+$/i.test(path3) || path3 === "/api/admin/backup/import";
 }
-async function enforceRequestBodyLimit(request, path2, method) {
-  if (!BODY_LIMIT_METHODS.has(method) || isLargeUploadPath(path2) || !request.body) {
+async function enforceRequestBodyLimit(request, path3, method) {
+  if (!BODY_LIMIT_METHODS.has(method) || isLargeUploadPath(path3) || !request.body) {
     return request;
   }
   const contentLengthRaw = request.headers.get("Content-Length");
@@ -49045,7 +49147,7 @@ async function enforceRequestBodyLimit(request, path2, method) {
 }
 async function handleRequest(request, env) {
   const url = new URL(request.url);
-  const path2 = url.pathname;
+  const path3 = url.pathname;
   const method = request.method;
   const clientId = getClientIdentifier(request);
   async function enforcePublicRateLimit(category = "public", maxRequests = LIMITS.rateLimit.publicRequestsPerMinute) {
@@ -49084,16 +49186,16 @@ async function handleRequest(request, env) {
     return handleCors(request, env);
   }
   try {
-    const bodyLimitResult = await enforceRequestBodyLimit(request, path2, method);
+    const bodyLimitResult = await enforceRequestBodyLimit(request, path3, method);
     if (bodyLimitResult instanceof Response) {
       return bodyLimitResult;
     }
     request = bodyLimitResult;
     const secretIssue = jwtSecretUnsafeReason2(env);
-    if (secretIssue && !canServeWithUnsafeJwtSecret(path2, method)) {
+    if (secretIssue && !canServeWithUnsafeJwtSecret(path3, method)) {
       return errorResponse("Server configuration error: JWT_SECRET is not set or too weak", 500);
     }
-    const publicResponse = await handlePublicRoute(request, env, path2, method, enforcePublicRateLimit);
+    const publicResponse = await handlePublicRoute(request, env, path3, method, enforcePublicRateLimit);
     if (publicResponse) return publicResponse;
     const auth = new AuthService(env);
     const authHeader = request.headers.get("Authorization");
@@ -49112,7 +49214,7 @@ async function handleRequest(request, env) {
     if (currentUser.status !== "active") {
       return errorResponse("Account is disabled", 403);
     }
-    if (!isImportBypassRequest(request, path2, method)) {
+    if (!isImportBypassRequest(request, path3, method)) {
       const rateLimit = new RateLimitService(env.DB);
       const rateLimitCheck = await rateLimit.consumeBudget(`${userId}:api`, LIMITS.rateLimit.apiRequestsPerMinute);
       if (!rateLimitCheck.allowed) {
@@ -49132,7 +49234,7 @@ async function handleRequest(request, env) {
         );
       }
     }
-    const authenticatedResponse = await handleAuthenticatedRoute(request, env, userId, currentUser, path2, method);
+    const authenticatedResponse = await handleAuthenticatedRoute(request, env, userId, currentUser, path3, method);
     if (authenticatedResponse) return authenticatedResponse;
     return errorResponse("Not found", 404);
   } catch (error) {
@@ -49174,9 +49276,9 @@ var BACKEND_EXACT_PATHS = /* @__PURE__ */ new Set([
   "/settings/domains"
 ]);
 function isBackendRequestPath(pathname) {
-  const path2 = pathname.toLowerCase();
-  if (BACKEND_EXACT_PATHS.has(path2)) return true;
-  return BACKEND_PATH_PREFIXES.some((prefix) => path2 === prefix || path2.startsWith(`${prefix}/`));
+  const path3 = pathname.toLowerCase();
+  if (BACKEND_EXACT_PATHS.has(path3)) return true;
+  return BACKEND_PATH_PREFIXES.some((prefix) => path3 === prefix || path3.startsWith(`${prefix}/`));
 }
 function isWebVaultHidden(env) {
   return String(env.HIDE_WEB_VAULT || "").trim() === "1";
@@ -49393,8 +49495,8 @@ var BackupTransferRunner = class {
       const storage = new StorageService(this.env.DB);
       const settings = await loadBackupSettings(storage, this.env, "UTC");
       const destination = requireBackupDestination(settings, body.destinationId || null);
-      const path2 = ensureRemoteRestoreCandidate(String(body.path || ""));
-      const restoreFileNameFromPath = path2.split("/").pop() || path2;
+      const path3 = ensureRemoteRestoreCandidate(String(body.path || ""));
+      const restoreFileNameFromPath = path3.split("/").pop() || path3;
       const targetDeviceIdentifier = String(body.targetDeviceIdentifier || "").trim() || null;
       const replaceExisting = !!body.replaceExisting;
       await notifyUserBackupRestoreProgress(
@@ -49411,8 +49513,8 @@ var BackupTransferRunner = class {
         },
         targetDeviceIdentifier
       );
-      const remoteFile = await downloadRemoteBackupFile(destination, path2);
-      const checksumOk = await verifyBackupArchiveFileNameChecksum(remoteFile.bytes, remoteFile.fileName || path2);
+      const remoteFile = await downloadRemoteBackupFile(destination, path3);
+      const checksumOk = await verifyBackupArchiveFileNameChecksum(remoteFile.bytes, remoteFile.fileName || path3);
       if (!checksumOk && !body.allowChecksumMismatch) {
         return badRequest("Remote backup file checksum does not match its filename");
       }
@@ -49422,7 +49524,7 @@ var BackupTransferRunner = class {
         actorUserId,
         remoteFile,
         destination,
-        path2,
+        path3,
         replaceExisting,
         !checksumOk,
         body.auditMetadata || null,
@@ -49499,9 +49601,9 @@ var BackupTransferRunner = class {
         const blobName = blobNames[i2];
         const file = await downloadRemoteBackupFile(body2.destination, `attachments/${blobName}`).catch(() => null);
         if (!file) continue;
-        const path2 = `files/${i2}.bin`;
-        entries.push({ blobName, path: path2 });
-        files[path2] = file.bytes;
+        const path3 = `files/${i2}.bin`;
+        entries.push({ blobName, path: path3 });
+        files[path3] = file.bytes;
       }
       files["manifest.json"] = encoder.encode(JSON.stringify({ version: 1, entries }));
       return new Response(zipSync(files), {
@@ -49626,11 +49728,11 @@ var MemoryDurableObjectStorage = class {
   arm() {
     this.disarm();
     if (this.alarmAt === null) return;
-    const delay = Math.min(Math.max(this.alarmAt - Date.now(), 0), 2147483647);
+    const delay2 = Math.min(Math.max(this.alarmAt - Date.now(), 0), 2147483647);
     this.alarmTimer = setTimeout(() => {
       this.alarmTimer = null;
       void this.fire();
-    }, delay);
+    }, delay2);
     this.alarmTimer.unref?.();
   }
   async fire() {
@@ -49786,8 +49888,91 @@ function createLocalBackupRunnerNamespace(getEnv) {
   );
 }
 
+// server/fs-r2.ts
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import path from "node:path";
+import { Readable } from "node:stream";
+var DEFAULT_CONTENT_TYPE2 = "application/octet-stream";
+function classifyReadError(error) {
+  const code = String(error?.code ?? "");
+  if (code === "ENOENT" || code === "ENOTDIR") return "missing";
+  return "fatal";
+}
+function resolveObjectPath(attachmentsDir, key) {
+  const normalized = String(key || "").replace(/^[/\\]+/, "");
+  const full = path.resolve(attachmentsDir, normalized);
+  const rel = path.relative(attachmentsDir, full);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error("Invalid object key");
+  return full;
+}
+function toBytes(value) {
+  if (typeof value === "string") return Promise.resolve(new TextEncoder().encode(value));
+  if (value instanceof ArrayBuffer) return Promise.resolve(new Uint8Array(value));
+  if (ArrayBuffer.isView(value)) {
+    return Promise.resolve(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+  }
+  if (value instanceof ReadableStream) {
+    return new Response(value).arrayBuffer().then((buffer) => new Uint8Array(buffer));
+  }
+  return Promise.resolve(new Uint8Array(0));
+}
+function createFsR2(attachmentsDir) {
+  return {
+    async put(key, value, options) {
+      const full = resolveObjectPath(attachmentsDir, key);
+      const bytes = await toBytes(value);
+      await fsp.mkdir(path.dirname(full), { recursive: true });
+      const meta = {
+        contentType: options?.httpMetadata?.contentType || DEFAULT_CONTENT_TYPE2,
+        customMetadata: options?.customMetadata || {},
+        size: bytes.byteLength
+      };
+      await fsp.writeFile(`${full}.meta.json`, JSON.stringify(meta));
+      await fsp.writeFile(full, bytes);
+    },
+    async get(key) {
+      const full = resolveObjectPath(attachmentsDir, key);
+      let stat;
+      try {
+        stat = await fsp.stat(full);
+      } catch (error) {
+        if (classifyReadError(error) === "missing") return null;
+        console.error("[attachments] stat failed; the attachment disk may be unavailable:", error);
+        throw error;
+      }
+      let meta = {};
+      try {
+        meta = JSON.parse(await fsp.readFile(`${full}.meta.json`, "utf8"));
+      } catch (error) {
+        if (classifyReadError(error) === "fatal") {
+          console.warn("[attachments] metadata for", key, "is unreadable; continuing without it:", error);
+        }
+      }
+      if (typeof meta.size === "number" && Number.isFinite(meta.size) && meta.size !== stat.size) {
+        console.warn(
+          `[attachments] refusing a truncated object "${key}": expected ${meta.size} bytes, found ${stat.size}`
+        );
+        return null;
+      }
+      const stream = fs.createReadStream(full);
+      return {
+        body: Readable.toWeb(stream),
+        size: stat.size,
+        httpMetadata: { contentType: meta.contentType || DEFAULT_CONTENT_TYPE2 },
+        customMetadata: meta.customMetadata || {}
+      };
+    },
+    async delete(key) {
+      const full = resolveObjectPath(attachmentsDir, key);
+      await fsp.rm(full, { force: true });
+      await fsp.rm(`${full}.meta.json`, { force: true });
+    }
+  };
+}
+
 // server/node-runtime.ts
-var __dirname = path.dirname(fileURLToPath(import.meta.url));
+var __dirname = path2.dirname(fileURLToPath(import.meta.url));
 var state = null;
 var sharedEnv = null;
 function applyEnvFromRecord(source) {
@@ -49800,27 +49985,27 @@ function applyEnvFromRecord(source) {
   }
 }
 function isInsideDirectory(child, parent) {
-  const rel = path.relative(parent, child);
-  return !rel.startsWith("..") && !path.isAbsolute(rel);
+  const rel = path2.relative(parent, child);
+  return !rel.startsWith("..") && !path2.isAbsolute(rel);
 }
 function resolveState(options) {
   const assets = options.assets || "disk";
-  let dataDir = path.resolve(
+  let dataDir = path2.resolve(
     options.dataDir || process.env.DATA_DIR || defaultDataDir(assets)
   );
   if (assets === "stub" && !isInsideDirectory(dataDir, os.tmpdir())) {
-    dataDir = path.join(os.tmpdir(), "nodewarden");
+    dataDir = path2.join(os.tmpdir(), "nodewarden");
   }
   return {
     assets,
     dataDir,
-    attachmentsDir: path.resolve(process.env.ATTACHMENTS_DIR || path.join(dataDir, "attachments")),
-    distDir: path.resolve(process.env.DIST_DIR || path.join(__dirname, "..", "dist"))
+    attachmentsDir: path2.resolve(process.env.ATTACHMENTS_DIR || path2.join(dataDir, "attachments")),
+    distDir: path2.resolve(process.env.DIST_DIR || path2.join(__dirname, "..", "dist"))
   };
 }
 function defaultDataDir(assets) {
-  if (assets === "stub") return path.join(os.tmpdir(), "nodewarden");
-  return path.join(__dirname, "..", "data");
+  if (assets === "stub") return path2.join(os.tmpdir(), "nodewarden");
+  return path2.join(__dirname, "..", "data");
 }
 function configureNodeRuntime(options = {}) {
   if (state) {
@@ -49832,8 +50017,8 @@ function configureNodeRuntime(options = {}) {
     return state;
   }
   state = resolveState(options);
-  fs.mkdirSync(state.dataDir, { recursive: true });
-  fs.mkdirSync(state.attachmentsDir, { recursive: true });
+  fs2.mkdirSync(state.dataDir, { recursive: true });
+  fs2.mkdirSync(state.attachmentsDir, { recursive: true });
   globalThis.caches = cachesShim;
   installDurableObjectGlobals();
   return state;
@@ -49843,16 +50028,16 @@ function getRuntimeInfo() {
 }
 function readKvFile(kvFile) {
   try {
-    return JSON.parse(fs.readFileSync(kvFile, "utf8"));
+    return JSON.parse(fs2.readFileSync(kvFile, "utf8"));
   } catch {
     return {};
   }
 }
 function writeKvFile(kvFile, data) {
-  fs.writeFileSync(kvFile, JSON.stringify(data), "utf8");
+  fs2.writeFileSync(kvFile, JSON.stringify(data), "utf8");
 }
 function createFileKv(dataDir) {
-  const kvFile = path.join(dataDir, "kv-store.json");
+  const kvFile = path2.join(dataDir, "kv-store.json");
   return {
     async get(key) {
       const data = readKvFile(kvFile);
@@ -49867,62 +50052,6 @@ function createFileKv(dataDir) {
       const data = readKvFile(kvFile);
       delete data[key];
       writeKvFile(kvFile, data);
-    }
-  };
-}
-function safeObjectPath(attachmentsDir, key) {
-  const normalized = key.replace(/^[/\\]+/, "");
-  const full = path.resolve(attachmentsDir, normalized);
-  const rel = path.relative(attachmentsDir, full);
-  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error("Invalid object key");
-  return full;
-}
-function createFsR2(attachmentsDir) {
-  return {
-    async put(key, value, options) {
-      const full = safeObjectPath(attachmentsDir, key);
-      fs.mkdirSync(path.dirname(full), { recursive: true });
-      let bytes;
-      if (typeof value === "string") bytes = new TextEncoder().encode(value);
-      else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
-      else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-      else if (value instanceof ReadableStream) {
-        const buf = await new Response(value).arrayBuffer();
-        bytes = new Uint8Array(buf);
-      } else {
-        bytes = new Uint8Array(0);
-      }
-      await fsp.writeFile(full, bytes);
-      const meta = {
-        contentType: options?.httpMetadata?.contentType || "application/octet-stream",
-        customMetadata: options?.customMetadata || {}
-      };
-      await fsp.writeFile(`${full}.meta.json`, JSON.stringify(meta));
-    },
-    async get(key) {
-      const full = safeObjectPath(attachmentsDir, key);
-      try {
-        const stat = await fsp.stat(full);
-        let meta = {};
-        try {
-          meta = JSON.parse(await fsp.readFile(`${full}.meta.json`, "utf8"));
-        } catch {
-        }
-        const stream = fs.createReadStream(full);
-        return {
-          body: Readable.toWeb(stream),
-          size: stat.size,
-          httpMetadata: { contentType: meta.contentType || "application/octet-stream" },
-          customMetadata: meta.customMetadata || {}
-        };
-      } catch {
-        return null;
-      }
-    },
-    async delete(key) {
-      const full = safeObjectPath(attachmentsDir, key);
-      await fsp.rm(full, { force: true });
-      await fsp.rm(`${full}.meta.json`, { force: true });
     }
   };
 }
@@ -49984,21 +50113,21 @@ async function serveAssets(request) {
     return new Response("Bad Request", { status: 400, headers: { "Content-Type": "text/plain; charset=utf-8" } });
   }
   if (rel === "/" || rel === "") rel = "/index.html";
-  const full = path.resolve(runtime.distDir, rel.replace(/^[/\\]+/, ""));
-  const contained = path.relative(runtime.distDir, full);
-  if (!contained || contained.startsWith("..") || path.isAbsolute(contained)) {
+  const full = path2.resolve(runtime.distDir, rel.replace(/^[/\\]+/, ""));
+  const contained = path2.relative(runtime.distDir, full);
+  if (!contained || contained.startsWith("..") || path2.isAbsolute(contained)) {
     return new Response("Forbidden", { status: 403 });
   }
   try {
-    const bytes = await fsp.readFile(full);
-    const ext = path.extname(full).toLowerCase();
+    const bytes = await fsp2.readFile(full);
+    const ext = path2.extname(full).toLowerCase();
     return new Response(bytes, {
       status: 200,
       headers: { "Content-Type": MIME[ext] || "application/octet-stream", "Cache-Control": ext === ".html" ? "no-cache" : "public, max-age=31536000, immutable" }
     });
   } catch {
     try {
-      const index = await fsp.readFile(path.join(runtime.distDir, "index.html"));
+      const index = await fsp2.readFile(path2.join(runtime.distDir, "index.html"));
       return new Response(index, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" } });
     } catch {
       return new Response("Web vault not built. Run `npm run build` first.", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } });

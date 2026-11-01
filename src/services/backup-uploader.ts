@@ -160,13 +160,47 @@ function toBasicAuthHeader(username: string, password: string): string {
   return `Basic ${token}`;
 }
 
+/**
+ * AWS canonical encoding (RFC 3986). `encodeURIComponent` leaves `!'()*` alone,
+ * which is not what the SigV4 canonical form allows, so they are escaped too.
+ */
+function encodeRfc3986(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+/** Code-point order, which is what AWS sorts with — `localeCompare` is not. */
+function compareCodePoints(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Canonical query string for SigV4.
+ *
+ * Built from the raw query rather than from `URLSearchParams`, because
+ * URLSearchParams re-encodes a space as `+`: the canonical form would then say
+ * `%20` while the wire request carried `+`, and S3/OSS/COS answer
+ * `SignatureDoesNotMatch`. Parsing the raw pairs keeps the two in step.
+ */
 function buildCanonicalQueryString(url: URL): string {
-  const params = Array.from(url.searchParams.entries()).sort(([aKey, aValue], [bKey, bValue]) => {
-    if (aKey === bKey) return aValue.localeCompare(bValue);
-    return aKey.localeCompare(bKey);
-  });
-  return params
-    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+  const raw = url.search.startsWith('?') ? url.search.slice(1) : url.search;
+  if (!raw) return '';
+  return raw
+    .split('&')
+    .filter(Boolean)
+    .map((pair) => {
+      const index = pair.indexOf('=');
+      const rawKey = index === -1 ? pair : pair.slice(0, index);
+      const rawValue = index === -1 ? '' : pair.slice(index + 1);
+      const decode = (part: string) => {
+        try {
+          return decodeURIComponent(part);
+        } catch {
+          return part;
+        }
+      };
+      return `${encodeRfc3986(decode(rawKey))}=${encodeRfc3986(decode(rawValue))}`;
+    })
+    .sort(compareCodePoints)
     .join('&');
 }
 
@@ -181,7 +215,9 @@ async function buildAwsV4Authorization(
 ): Promise<string> {
   const amzDate = headers['x-amz-date'];
   const shortDate = amzDate.slice(0, 8);
-  const headerEntries = Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value] as const).sort(([a], [b]) => a.localeCompare(b));
+  const headerEntries = Object.entries(headers)
+    .map(([name, value]) => [name.toLowerCase(), value] as const)
+    .sort(([a], [b]) => compareCodePoints(a, b));
   const canonicalHeaders = headerEntries
     .map(([name, value]) => `${name}:${String(value).trim().replace(/\s+/g, ' ')}`)
     .join('\n');
@@ -225,6 +261,7 @@ function ensureDestinationConfigReady(destination: BackupDestinationRecord): voi
     const config = destination.destination as S3BackupDestination;
     if (!String(config.endpoint || '').trim()) throw new Error('S3 endpoint is required');
     normalizeBackupEndpointUrl(String(config.endpoint || '').trim(), 'S3 endpoint');
+    assertProviderAddressingSupported(String(config.endpoint || '').trim(), String(config.addressingStyle || ''));
     if (!String(config.bucket || '').trim()) throw new Error('S3 bucket is required');
     if (!String(config.accessKeyId || '').trim()) throw new Error('S3 access key is required');
     if (!String(config.secretAccessKey || '')) throw new Error('S3 secret key is required');
@@ -472,6 +509,94 @@ function isBucketHostedS3Endpoint(endpoint: URL, bucket: string): boolean {
   return !!bucketName && (hostname === bucketName || hostname.startsWith(`${bucketName}.`));
 }
 
+/** Attempts per S3 request: PUT/GET/HEAD/DELETE are all idempotent. */
+const S3_MAX_ATTEMPTS = 3;
+
+/** Per-attempt timeout. A hung endpoint must not block the backup worker. */
+function s3RequestTimeoutMs(): number {
+  const configured = Number(
+    typeof process !== 'undefined' && process.env ? process.env.S3_REQUEST_TIMEOUT_MS : NaN
+  );
+  return Number.isFinite(configured) && configured >= 1_000 ? configured : 120_000;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * fetch() with a timeout and bounded retries.
+ *
+ * Retries cover what a backup actually hits on a flaky link: DNS/TCP resets,
+ * 429 and 5xx. The body is a Uint8Array, so replaying it is safe for every verb
+ * this module uses. Signature headers are not time-sensitive within the retry
+ * window (AWS allows ±15 minutes of skew).
+ */
+async function s3Fetch(url: URL, init: RequestInit): Promise<Response> {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= S3_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(url, { ...init, signal: AbortSignal.timeout(s3RequestTimeoutMs()) });
+      if ((response.status === 429 || response.status >= 500) && attempt < S3_MAX_ATTEMPTS) {
+        // Drain before retrying: an unread body keeps the socket alive.
+        await response.body?.cancel().catch(() => undefined);
+        await delay(200 * attempt * attempt);
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt === S3_MAX_ATTEMPTS) break;
+      await delay(200 * attempt * attempt);
+    }
+  }
+  throw new Error(
+    `S3 request failed after ${S3_MAX_ATTEMPTS} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`
+  );
+}
+
+/**
+ * Turn a non-2xx response into an error that names the provider's own code.
+ *
+ * `S3 upload failed: 403` is useless to an operator; `403 SignatureDoesNotMatch`
+ * says whether the keys, the region or the addressing style is wrong. Only the
+ * code/message pair is quoted — never the request headers, which carry the
+ * signature.
+ */
+async function throwS3Error(response: Response, action: string): Promise<never> {
+  let detail = '';
+  try {
+    const text = (await response.text()).slice(0, 2_000);
+    const code = /<Code>([^<]{1,100})<\/Code>/i.exec(text)?.[1];
+    const message = /<Message>([^<]{1,300})<\/Message>/i.exec(text)?.[1];
+    detail = [code, message].filter(Boolean).join(': ');
+  } catch {
+    // Body unreadable (HEAD, network cut): the status alone will have to do.
+  }
+  throw new Error(`S3 ${action} failed: ${response.status}${detail ? ` ${detail}` : ''}`);
+}
+
+/**
+ * Alibaba Cloud OSS is S3-compatible but accepts **only** virtual-hosted-style
+ * URLs — a path-style request is rejected outright. Catching it here turns a
+ * confusing 403 into an instruction the operator can act on.
+ */
+function assertProviderAddressingSupported(endpoint: string, addressingStyle: string): void {
+  if (addressingStyle === 'virtual-hosted-style') return;
+  let hostname = '';
+  try {
+    hostname = new URL(endpoint).hostname.toLowerCase();
+  } catch {
+    return;
+  }
+  if (/(^|\.)aliyuncs\.com$/.test(hostname)) {
+    throw new Error(
+      'Aliyun OSS only accepts virtual-hosted-style addressing: set the S3 addressing style to ' +
+        '"virtual-hosted-style" (path-style requests are rejected by OSS).'
+    );
+  }
+}
+
 function s3BucketBaseUrl(config: S3BackupDestination): URL {
   const endpoint = new URL(config.endpoint.replace(/\/+$/, ''));
   const bucket = config.bucket.trim();
@@ -519,7 +644,7 @@ async function signedS3Request(
     config.region || 'auto'
   );
 
-  return fetch(url, {
+  return s3Fetch(url, {
     method,
     headers: {
       Authorization: authorization,
@@ -542,7 +667,7 @@ async function putToS3(
   const response = await signedS3Request(config, 'PUT', url, bytes, options.contentType);
 
   if (!response.ok) {
-    throw new Error(`S3 upload failed: ${response.status}`);
+    await throwS3Error(response, 'upload');
   }
 }
 
@@ -563,15 +688,22 @@ async function listS3Entries(config: S3BackupDestination, relativePath: string):
   let continuationToken = '';
 
   do {
-    const url = s3BucketBaseUrl(config);
-    url.searchParams.set('list-type', '2');
-    url.searchParams.set('delimiter', '/');
-    if (targetPrefix) url.searchParams.set('prefix', targetPrefix);
-    if (continuationToken) url.searchParams.set('continuation-token', continuationToken);
+    // Encoded by hand, not via searchParams: URLSearchParams turns a space into
+    // '+', which S3 canonicalizes as a literal plus and signs differently.
+    const queryPairs: Array<[string, string]> = [
+      ['list-type', '2'],
+      ['delimiter', '/'],
+    ];
+    if (targetPrefix) queryPairs.push(['prefix', targetPrefix]);
+    if (continuationToken) queryPairs.push(['continuation-token', continuationToken]);
+    const queryString = queryPairs
+      .map(([key, value]) => `${encodeRfc3986(key)}=${encodeRfc3986(value)}`)
+      .join('&');
+    const url = new URL(`${s3BucketBaseUrl(config).toString().replace(/\/+$/, '')}?${queryString}`);
 
     const response = await signedS3Request(config, 'GET', url);
     if (!response.ok) {
-      throw new Error(`S3 listing failed: ${response.status}`);
+      await throwS3Error(response, 'listing');
     }
 
     const xml = await response.text();
@@ -641,7 +773,7 @@ async function downloadFromS3(config: S3BackupDestination, relativePath: string)
   const url = s3ObjectUrl(config, objectKey);
   const response = await signedS3Request(config, 'GET', url);
   if (!response.ok) {
-    throw new Error(`S3 download failed: ${response.status}`);
+    await throwS3Error(response, 'download');
   }
   return {
     provider: 's3',
@@ -657,7 +789,7 @@ async function deleteFromS3(config: S3BackupDestination, relativePath: string): 
   const url = s3ObjectUrl(config, objectKey);
   const response = await signedS3Request(config, 'DELETE', url);
   if (!response.ok && response.status !== 404) {
-    throw new Error(`S3 delete failed: ${response.status}`);
+    await throwS3Error(response, 'delete');
   }
 }
 
@@ -671,7 +803,7 @@ async function statS3File(config: S3BackupDestination, relativePath: string): Pr
   const response = await signedS3Request(config, 'HEAD', url);
   if (response.status === 404) return null;
   if (!response.ok) {
-    throw new Error(`S3 existence check failed: ${response.status}`);
+    await throwS3Error(response, 'existence check');
   }
   const size = Number(response.headers.get('Content-Length') || '');
   return {
