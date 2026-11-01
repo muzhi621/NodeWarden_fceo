@@ -8259,6 +8259,9 @@ function isDuplicateDdlError(error) {
   }
   return false;
 }
+function isReadOnlySql(sql) {
+  return /^\s*(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i.test(sql);
+}
 function isDdlStatement(sql) {
   return /^\s*(CREATE|ALTER|DROP)\b/i.test(sql);
 }
@@ -8276,7 +8279,7 @@ function toResult(rows, affectedRows, insertId) {
 function isMySqlDatabase(db) {
   return !!db && typeof db === "object" && db.dialect === "mysql";
 }
-var IGNORABLE_DDL_ERRNOS, IGNORABLE_DDL_CODES, RETRYABLE_CONN_CODES, RETRYABLE_PRECONNECT_CODES, CON_CAP_RETRY_DELAY_MS, READ_ONLY_SQL, MySqlStatement, MySqlDatabase;
+var IGNORABLE_DDL_ERRNOS, IGNORABLE_DDL_CODES, RETRYABLE_CONN_CODES, RETRYABLE_PRECONNECT_CODES, CON_CAP_RETRY_DELAY_MS, MySqlStatement, MySqlDatabase;
 var init_storage_mysql = __esm({
   "src/services/storage-mysql.ts"() {
     "use strict";
@@ -8305,7 +8308,6 @@ var init_storage_mysql = __esm({
       // in-flight query just to free one slot.
     ]);
     CON_CAP_RETRY_DELAY_MS = 200;
-    READ_ONLY_SQL = /^\s*(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i;
     MySqlStatement = class {
       constructor(db, translatedSql, originalSql) {
         this.db = db;
@@ -8446,7 +8448,7 @@ var init_storage_mysql = __esm({
             await new Promise((resolve) => setTimeout(resolve, CON_CAP_RETRY_DELAY_MS));
             return await pool.query(sql, params);
           }
-          const retryable = RETRYABLE_PRECONNECT_CODES.has(code) || RETRYABLE_CONN_CODES.has(code) && READ_ONLY_SQL.test(sql);
+          const retryable = RETRYABLE_PRECONNECT_CODES.has(code) || RETRYABLE_CONN_CODES.has(code) && isReadOnlySql(sql);
           if (retryable) {
             await this.close();
             return await (await this.getPool()).query(sql, params);
@@ -35727,6 +35729,10 @@ init_response();
 // src/services/db-config.ts
 var CONFIG_OBJECT_KEY = "__system__/db-config.json";
 var CONFIG_KV_KEY = "db-config:v1";
+var SYNC_STATUS_OBJECT_KEY = "__system__/db-sync-status.json";
+var SYNC_STATUS_KV_KEY = "db-sync-status:v1";
+var CONFIG_KEYS = { kv: CONFIG_KV_KEY, object: CONFIG_OBJECT_KEY };
+var SYNC_STATUS_KEYS = { kv: SYNC_STATUS_KV_KEY, object: SYNC_STATUS_OBJECT_KEY };
 var DEFAULT_CLUSTER_POLICY = {
   readSplit: false,
   syncMode: "native",
@@ -35818,49 +35824,54 @@ async function decryptJson(env, payload) {
     return null;
   }
 }
-async function readStoredPayload(env) {
+async function readStoredText(env, keys) {
   const store = getConfigStore(env);
   if (store === "kv") {
-    return await asKvLike(env.SETTINGS_KV).get(CONFIG_KV_KEY);
+    return await asKvLike(env.SETTINGS_KV).get(keys.kv);
   }
   if (store === "attachment-kv") {
-    return await asKvLike(env.ATTACHMENTS_KV).get(CONFIG_KV_KEY);
+    return await asKvLike(env.ATTACHMENTS_KV).get(keys.kv);
   }
   if (store === "r2") {
-    const object = await env.ATTACHMENTS.get(CONFIG_OBJECT_KEY);
+    const object = await env.ATTACHMENTS.get(keys.object);
     if (!object) return null;
-    const text = await new Response(object.body).text();
-    return text;
+    return await new Response(object.body).text();
   }
   return null;
 }
-async function writeStoredPayload(env, payload) {
+async function writeStoredText(env, keys, payload) {
   const store = getConfigStore(env);
   if (!store) return false;
   if (store === "kv") {
     const kv = asKvLike(env.SETTINGS_KV);
-    if (payload) await kv.put(CONFIG_KV_KEY, payload);
-    else await kv.delete(CONFIG_KV_KEY);
+    if (payload) await kv.put(keys.kv, payload);
+    else await kv.delete(keys.kv);
     return true;
   }
   if (store === "attachment-kv") {
     const kv = asKvLike(env.ATTACHMENTS_KV);
-    if (payload) await kv.put(CONFIG_KV_KEY, payload);
-    else await kv.delete(CONFIG_KV_KEY);
+    if (payload) await kv.put(keys.kv, payload);
+    else await kv.delete(keys.kv);
     return true;
   }
   if (store === "r2") {
     if (payload) {
-      await env.ATTACHMENTS.put(CONFIG_OBJECT_KEY, payload, {
+      await env.ATTACHMENTS.put(keys.object, payload, {
         httpMetadata: { contentType: "application/json" },
-        customMetadata: { purpose: "db-config" }
+        customMetadata: { purpose: keys === SYNC_STATUS_KEYS ? "db-sync-status" : "db-config" }
       });
     } else {
-      await env.ATTACHMENTS.delete(CONFIG_OBJECT_KEY);
+      await env.ATTACHMENTS.delete(keys.object);
     }
     return true;
   }
   return false;
+}
+async function readStoredPayload(env) {
+  return readStoredText(env, CONFIG_KEYS);
+}
+async function writeStoredPayload(env, payload) {
+  return writeStoredText(env, CONFIG_KEYS, payload);
 }
 var CONFIG_CACHE_TTL_MS = 3e4;
 var payloadCache = /* @__PURE__ */ new WeakMap();
@@ -35882,6 +35893,72 @@ async function readStoredPayloadCached(env) {
   const payload = await readStoredPayload(env);
   if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: now });
   return payload;
+}
+var SYNC_CACHE_TTL_MS = 5e3;
+var syncCache = /* @__PURE__ */ new WeakMap();
+function normalizeSyncState(raw) {
+  const input = asRecord(raw);
+  if (!input) return null;
+  const at = Number(input.at ?? 0);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  const cursors = asRecord(input.cursors);
+  const normalizedCursors = {};
+  if (cursors) {
+    for (const [table, cursor] of Object.entries(cursors)) {
+      if (!Array.isArray(cursor)) continue;
+      const values = cursor.filter(
+        (value) => value === null || ["string", "number", "boolean"].includes(typeof value)
+      );
+      if (values.length === cursor.length && values.length > 0) normalizedCursors[table] = values;
+    }
+  }
+  return {
+    at,
+    complete: input.complete === true,
+    truncated: input.truncated === true,
+    rowsWritten: Number(input.rowsWritten ?? 0) || 0,
+    tables: Number(input.tables ?? 0) || 0,
+    sourceId: typeof input.sourceId === "string" && input.sourceId ? input.sourceId : void 0,
+    cursors: Object.keys(normalizedCursors).length > 0 ? normalizedCursors : void 0
+  };
+}
+async function readSyncStates(env) {
+  const ref = cacheStoreRef(env);
+  const now = Date.now();
+  if (ref) {
+    const hit = syncCache.get(ref);
+    if (hit && hit.epoch === cacheEpoch && now - hit.at < SYNC_CACHE_TTL_MS) return hit.value;
+  }
+  const raw = await readStoredText(env, SYNC_STATUS_KEYS).catch(() => null);
+  const states = {};
+  if (raw) {
+    try {
+      const parsed = asRecord(JSON.parse(raw));
+      if (parsed) {
+        for (const [id, value] of Object.entries(parsed)) {
+          const state2 = normalizeSyncState(value);
+          if (state2) states[id] = state2;
+        }
+      }
+    } catch {
+      console.warn("[db-config] sync status payload is not valid JSON; ignoring it");
+    }
+  }
+  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: now, value: states });
+  return states;
+}
+async function saveNodeSyncState(env, nodeId, state2) {
+  const current = await readSyncStates(env);
+  const next = { ...current, [nodeId]: state2 };
+  const saved = await writeStoredText(env, SYNC_STATUS_KEYS, JSON.stringify(next));
+  const ref = cacheStoreRef(env);
+  if (saved && ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: next });
+  return saved;
+}
+async function clearSyncStates(env) {
+  await writeStoredText(env, SYNC_STATUS_KEYS, null).catch(() => false);
+  const ref = cacheStoreRef(env);
+  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: {} });
 }
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -36023,8 +36100,21 @@ function resolveDbConfigFromEnv(env) {
     connectionLimit: parsePort(env.DB_CONN_LIMIT, 5)
   };
 }
-function toResolvedNodes(config) {
-  return config.nodes.filter((node) => node.enabled).map((node) => ({ ...node, source: "runtime" })).sort((a, b) => {
+function toResolvedNodes(config, syncStates) {
+  const writeThrough = config.policy.syncMode === "write-through";
+  return config.nodes.filter((node) => node.enabled).map((node) => {
+    const syncStatus = syncStates[node.id];
+    return {
+      ...node,
+      source: "runtime",
+      syncStatus,
+      // In native mode the database replicates itself: whether a standby is
+      // filled is not something the app can judge. In write-through it is, and
+      // a replica that never completed a sync must not become a failover
+      // target (B-4).
+      syncReady: node.role === "primary" || !writeThrough ? void 0 : syncStatus?.complete === true
+    };
+  }).sort((a, b) => {
     if (a.role !== b.role) return a.role === "primary" ? -1 : 1;
     return a.priority - b.priority;
   });
@@ -36057,7 +36147,8 @@ async function resolveDbCluster(env) {
   }
   const runtime2 = await loadRuntimeConfig(env);
   if (runtime2) {
-    const nodes = toResolvedNodes(runtime2);
+    const syncStates = runtime2.policy.syncMode === "write-through" ? await readSyncStates(env) : {};
+    const nodes = toResolvedNodes(runtime2, syncStates);
     if (nodes.length > 0) {
       return { mode: "mysql", source: "runtime", nodes, policy: runtime2.policy };
     }
@@ -36108,7 +36199,9 @@ function maskNode(node) {
     database: node.database,
     ssl: node.ssl,
     connectionLimit: node.connectionLimit,
-    passwordSet: !!node.password
+    passwordSet: !!node.password,
+    syncStatus: node.syncStatus,
+    syncReady: node.syncReady
   };
 }
 function maskCluster(cluster) {
@@ -36138,7 +36231,6 @@ function hasConfigStore(env) {
 
 // src/services/db-cluster.ts
 init_storage_mysql();
-var READ_ONLY_SQL2 = /^\s*(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN|WITH\s+RECURSIVE)\b/i;
 var NODE_FAILURE_CODES = /* @__PURE__ */ new Set([
   "ECONNREFUSED",
   "ECONNRESET",
@@ -36167,6 +36259,29 @@ var NODE_FAILURE_ERRNOS = /* @__PURE__ */ new Set([
   2013
   // CR_SERVER_LOST
 ]);
+var AMBIGUOUS_WRITE_CODES = /* @__PURE__ */ new Set([
+  "ECONNRESET",
+  "EPIPE",
+  "PROTOCOL_CONNECTION_LOST",
+  "ER_CLIENT_INTERACTION_TIMEOUT",
+  "ETIMEDOUT"
+]);
+var AMBIGUOUS_WRITE_ERRNOS = /* @__PURE__ */ new Set([
+  2006,
+  // CR_SERVER_GONE_ERROR — the connection died at some point during the call
+  2013
+  // CR_SERVER_LOST
+]);
+var READ_ONLY_REJECTION_CODES = /* @__PURE__ */ new Set([
+  "ER_OPTION_PREVENTS_STATEMENT",
+  "ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION"
+]);
+var READ_ONLY_REJECTION_ERRNOS = /* @__PURE__ */ new Set([1290, 1792]);
+var WRITE_JOURNAL_MAX_ENTRIES = 2e3;
+var WRITE_JOURNAL_MAX_BYTES = 2e6;
+var JOURNAL_ENTRY_OVERHEAD = 96;
+var READ_YOUR_WRITES_MS = 1e3;
+var WRITE_BLOCKED_COOLDOWN_MS = 6e4;
 function nodeFailureMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -36179,8 +36294,56 @@ function isNodeLevelFailure(error) {
     message
   );
 }
+function isAmbiguousWriteFailure(error) {
+  const code = String(error?.code ?? "");
+  const errno = Number(error?.errno ?? 0);
+  return AMBIGUOUS_WRITE_CODES.has(code) || AMBIGUOUS_WRITE_ERRNOS.has(errno);
+}
+function isReadOnlyRejection(error) {
+  const code = String(error?.code ?? "");
+  const errno = Number(error?.errno ?? 0);
+  if (READ_ONLY_REJECTION_CODES.has(code) || READ_ONLY_REJECTION_ERRNOS.has(errno)) return true;
+  return /--read-only option|read[- ]only transaction|READ ONLY/i.test(nodeFailureMessage(error));
+}
+var DbClusterUnavailableError = class extends Error {
+  code = "ERR_DB_CLUSTER_UNAVAILABLE";
+  status = 503;
+  constructor(message) {
+    super(message);
+    this.name = "DbClusterUnavailableError";
+  }
+};
+var DbClusterWriteUnconfirmedError = class extends Error {
+  code = "ERR_DB_CLUSTER_WRITE_UNCONFIRMED";
+  status = 503;
+  constructor(nodeLabel, cause) {
+    super(
+      `\u5199\u5165\u5DF2\u53D1\u9001\u5230\u8282\u70B9\u300C${nodeLabel}\u300D\uFF0C\u4F46\u8FDE\u63A5\u5728\u8FD4\u56DE\u7ED3\u679C\u524D\u4E2D\u65AD\uFF0C\u65E0\u6CD5\u786E\u8BA4\u662F\u5426\u5DF2\u63D0\u4EA4\u3002\u4E3A\u907F\u514D\u91CD\u590D\u5199\u5165\uFF0C\u672C\u6B21\u6CA1\u6709\u5728\u5176\u4ED6\u8282\u70B9\u91CD\u653E\uFF1B\u8BF7\u7A0D\u540E\u7528\u76F8\u540C\u4E3B\u952E\u91CD\u8BD5\u6216\u6838\u5BF9\u6570\u636E\u3002`
+    );
+    this.name = "DbClusterWriteUnconfirmedError";
+    this.cause = cause;
+  }
+};
 function defaultNodeFactory(config) {
   return new MySqlDatabase(config);
+}
+function estimateBytes(statements) {
+  let total = 0;
+  for (const statement of statements) {
+    total += statement.sql.length + JOURNAL_ENTRY_OVERHEAD;
+    for (const param of statement.params) {
+      if (param === null || param === void 0) {
+        total += 4;
+      } else if (typeof param === "string") {
+        total += param.length + 8;
+      } else if (param instanceof Uint8Array) {
+        total += param.byteLength + 16;
+      } else {
+        total += 16;
+      }
+    }
+  }
+  return total;
 }
 var ClusterStatement = class {
   constructor(cluster, sql) {
@@ -36218,6 +36381,14 @@ var MySqlClusterDatabase = class {
   nodes;
   policy;
   readCursor = 0;
+  /** Sequence of the last committed write (0 = nothing written yet). */
+  writeSeq = 0;
+  /** Committed writes, kept so a node that was down can be caught up. */
+  journal = /* @__PURE__ */ new Map();
+  journalBytes = 0;
+  /** Node that currently holds the latest data (sticky across a failover). */
+  activeWriterId = null;
+  lastWriteAt = 0;
   constructor(specs, policy, createDb = defaultNodeFactory) {
     this.policy = policy;
     const ordered = [...specs].sort((a, b) => {
@@ -36238,7 +36409,12 @@ var MySqlClusterDatabase = class {
       }),
       failures: 0,
       downUntil: 0,
-      syncErrors: 0
+      syncErrors: 0,
+      appliedSeq: 0,
+      missedWrites: 0,
+      needsFullSync: false,
+      writeBlockedUntil: 0,
+      replayChain: Promise.resolve()
     }));
   }
   getPolicy() {
@@ -36253,6 +36429,30 @@ var MySqlClusterDatabase = class {
   nodeDatabases() {
     return this.nodes.map((node) => ({ id: node.spec.id, db: node.db }));
   }
+  /**
+   * Write watermarks, for the admin sync guard: syncing "backwards" (from a node
+   * that missed writes into one that has them) would undo committed data (B-2).
+   */
+  writeWatermarks() {
+    return {
+      writeSeq: this.writeSeq,
+      nodes: this.nodes.map((node) => ({ id: node.spec.id, appliedSeq: node.appliedSeq }))
+    };
+  }
+  /**
+   * Record that `id` now holds everything (the admin ran a complete sync).
+   *
+   * Also clears the journal gap flag: the operator just paid for a full copy, so
+   * the node is usable again without a restart.
+   */
+  markNodeSynced(id) {
+    const node = this.nodes.find((entry) => entry.spec.id === id);
+    if (!node) return;
+    node.appliedSeq = this.writeSeq;
+    node.needsFullSync = false;
+    node.spec = { ...node.spec, syncReady: true };
+    this.clearBehind(node);
+  }
   nodeHealth() {
     const now = Date.now();
     return this.nodes.map((node) => ({
@@ -36260,14 +36460,21 @@ var MySqlClusterDatabase = class {
       label: node.spec.label,
       role: node.spec.role,
       priority: node.spec.priority,
-      available: this.policy.failoverEnabled ? node.downUntil <= now : node.spec.role === "primary",
+      available: node.downUntil <= now,
       failures: node.failures,
       lastError: node.lastError,
       lastOkAt: node.lastOkAt,
       lastFailureAt: node.lastFailureAt,
       downUntil: node.downUntil > now ? node.downUntil : void 0,
       syncErrors: node.syncErrors,
-      lastSyncError: node.lastSyncError
+      lastSyncError: node.lastSyncError,
+      lag: Math.max(0, this.writeSeq - node.appliedSeq),
+      appliedSeq: node.appliedSeq,
+      missedWrites: node.missedWrites,
+      behindSince: node.behindSince,
+      needsFullSync: node.needsFullSync,
+      writeBlocked: node.writeBlockedUntil > now,
+      syncReady: node.spec.syncReady
     }));
   }
   primaryNode() {
@@ -36289,27 +36496,96 @@ var MySqlClusterDatabase = class {
       );
     }
   }
-  /**
-   * Nodes to try, best first.
-   *
-   * When everything is tripped the list is *not* empty: the node whose cooldown
-   * ends first is retried anyway (half-open). Returning an empty list would turn
-   * one bad minute into a permanently failed instance.
-   */
-  candidates(kind) {
-    if (!this.policy.failoverEnabled) {
-      return [this.primaryNode()];
+  /** A read-only server is not failing — it just cannot be a write target. */
+  markWriteBlocked(node, error) {
+    const first = node.writeBlockedUntil <= Date.now();
+    node.writeBlockedUntil = Date.now() + WRITE_BLOCKED_COOLDOWN_MS;
+    node.lastError = nodeFailureMessage(error);
+    if (first) {
+      console.warn(
+        `[db-cluster] node "${node.spec.label}" rejected a write as read-only; it stays out of the write candidates for ${WRITE_BLOCKED_COOLDOWN_MS}ms`
+      );
     }
+  }
+  markBehind(node) {
+    if (node.behindSince === void 0) node.behindSince = Date.now();
+    node.missedWrites = Math.max(node.missedWrites, this.writeSeq - node.appliedSeq);
+  }
+  clearBehind(node) {
+    node.behindSince = void 0;
+    node.missedWrites = 0;
+  }
+  markNeedsFullSync(node) {
+    this.markBehind(node);
+    if (node.needsFullSync) return;
+    node.needsFullSync = true;
+    console.warn(
+      `[db-cluster] node "${node.spec.label}" is ${this.writeSeq - node.appliedSeq} writes behind and the journal no longer covers the gap; it stays out of rotation until a full sync is run from the admin page.`
+    );
+  }
+  isCaughtUp(node) {
+    if (this.policy.syncMode !== "write-through") return true;
+    return node.appliedSeq >= this.writeSeq;
+  }
+  canAcceptWrites(node) {
+    if (node.spec.syncReady === false) return false;
+    if (node.needsFullSync) return false;
+    return node.writeBlockedUntil <= Date.now();
+  }
+  /** Everything is down: retry the node whose cooldown ends first (half-open). */
+  availablePool() {
     const now = Date.now();
-    const isAvailable = (node) => node.downUntil <= now;
-    const healthy = this.nodes.filter(isAvailable);
-    const pool = healthy.length > 0 ? healthy : [...this.nodes].sort((a, b) => a.downUntil - b.downUntil).slice(0, 1);
-    if (kind === "write") return pool;
-    if (!this.policy.readSplit) {
-      return pool.sort((a, b) => a.spec.role === b.spec.role ? 0 : a.spec.role === "primary" ? -1 : 1);
+    const up = this.nodes.filter((node) => node.downUntil <= now);
+    if (up.length > 0) return up;
+    return [...this.nodes].sort((a, b) => a.downUntil - b.downUntil).slice(0, 1);
+  }
+  /**
+   * Nodes to write through, best first.
+   *
+   * The primary is *not* automatically first: a primary that was down missed
+   * writes and must not get traffic back until it has caught up (B-1). While it
+   * is behind, the node that kept receiving writes stays the writer.
+   */
+  writeCandidates() {
+    if (!this.policy.failoverEnabled) return [this.primaryNode()];
+    const pool = this.availablePool();
+    const eligible = pool.filter((node) => this.canAcceptWrites(node));
+    if (eligible.length === 0) {
+      throw new DbClusterUnavailableError(
+        "\u6CA1\u6709\u53EF\u5199\u7684\u6570\u636E\u5E93\u8282\u70B9\uFF1A\u6240\u6709\u8282\u70B9\u90FD\u843D\u540E\u4E8E\u6700\u65B0\u5199\u5165\u6216\u5904\u4E8E\u53EA\u8BFB\u72B6\u6001\u3002\u8BF7\u5148\u5728 /admin/database \u6267\u884C\u300C\u540C\u6B65\u6570\u636E\u300D\u8865\u9F50\u843D\u540E\u7684\u8282\u70B9\u3002"
+      );
     }
-    const replicas = pool.filter((node) => node.spec.role === "replica");
-    const primaries = pool.filter((node) => node.spec.role === "primary");
+    const caughtUp = eligible.filter((node) => this.isCaughtUp(node));
+    return this.orderForWrite(caughtUp.length > 0 ? caughtUp : eligible);
+  }
+  orderForWrite(list) {
+    const primary = this.primaryNode();
+    const stickyId = this.activeWriterId && !this.isCaughtUp(primary) && list.some((node) => node.spec.id === this.activeWriterId) ? this.activeWriterId : null;
+    return [...list].sort((a, b) => {
+      if (stickyId) {
+        if (a.spec.id === stickyId) return -1;
+        if (b.spec.id === stickyId) return 1;
+      }
+      if (a.spec.role !== b.spec.role) return a.spec.role === "primary" ? -1 : 1;
+      return a.spec.priority - b.spec.priority;
+    });
+  }
+  readCandidates() {
+    if (!this.policy.failoverEnabled) return [this.primaryNode()];
+    const pool = this.availablePool();
+    const ready = pool.filter((node) => node.spec.syncReady !== false);
+    const base = ready.length > 0 ? ready : pool;
+    const fresh = base.filter((node) => this.isCaughtUp(node));
+    const candidates = fresh.length > 0 ? fresh : base;
+    if (!this.policy.readSplit) {
+      return [...candidates].sort((a, b) => a.spec.role === b.spec.role ? 0 : a.spec.role === "primary" ? -1 : 1);
+    }
+    if (Date.now() - this.lastWriteAt < READ_YOUR_WRITES_MS) {
+      const writer = candidates.find((node) => node.spec.id === this.activeWriterId);
+      if (writer) return [writer, ...candidates.filter((node) => node !== writer)];
+    }
+    const replicas = candidates.filter((node) => node.spec.role === "replica");
+    const primaries = candidates.filter((node) => node.spec.role === "primary");
     if (replicas.length === 0) return primaries;
     const start = this.readCursor % replicas.length;
     this.readCursor += 1;
@@ -36322,60 +36598,198 @@ var MySqlClusterDatabase = class {
     if (mode === "all") return statement.all();
     return statement.first();
   }
+  async applyEntry(node, entry) {
+    if (entry.statements.length === 1) {
+      const [only] = entry.statements;
+      await this.runOnNode(node, only.sql, only.params, "run");
+      return;
+    }
+    const local = entry.statements.map((statement) => {
+      const prepared = node.db.prepare(statement.sql);
+      if (statement.params.length > 0) prepared.bind(...statement.params);
+      return prepared;
+    });
+    await node.db.batch(local);
+  }
+  /**
+   * Bring `node` up to `targetSeq` by replaying the journal in commit order.
+   *
+   * Runs on the node's replay chain, so two concurrent requests cannot apply
+   * sequence 7 before sequence 6. Returns false when the node cannot be caught
+   * up (transport failure, or the journal no longer holds the missing entries).
+   */
+  catchUp(node, targetSeq = this.writeSeq) {
+    if (node.appliedSeq >= targetSeq) {
+      if (node.needsFullSync) return Promise.resolve(false);
+      this.clearBehind(node);
+      return Promise.resolve(true);
+    }
+    const run = async () => {
+      while (node.appliedSeq < targetSeq) {
+        const next = this.journal.get(node.appliedSeq + 1);
+        if (!next) {
+          this.markNeedsFullSync(node);
+          return false;
+        }
+        try {
+          await this.applyEntry(node, next);
+        } catch (error) {
+          if (isDuplicateKey(error)) {
+            console.warn(
+              `[db-cluster] node "${node.spec.label}" already had the row from write #${next.seq}; treating the replay as applied`
+            );
+          } else {
+            node.syncErrors += 1;
+            node.lastSyncError = nodeFailureMessage(error);
+            if (isNodeLevelFailure(error)) this.markFailure(node, error);
+            this.markBehind(node);
+            console.warn(
+              `[db-cluster] node "${node.spec.label}" could not be caught up (${nodeFailureMessage(error)}); it stays behind until the replay succeeds or the node is re-synced`
+            );
+            return false;
+          }
+        }
+        node.appliedSeq = next.seq;
+        if (this.isCaughtUp(node)) this.clearBehind(node);
+      }
+      return true;
+    };
+    const chained = node.replayChain.then(run, run);
+    node.replayChain = chained.then(
+      () => void 0,
+      () => void 0
+    );
+    return chained;
+  }
+  /**
+   * Append a committed write to the journal and advance the watermark.
+   *
+   * The sequence is assigned and the entry stored without an `await` in
+   * between, so the journal is always dense (1..writeSeq) and two concurrent
+   * requests cannot interleave their numbering.
+   */
+  recordWrite(node, statements) {
+    this.activeWriterId = node.spec.id;
+    this.lastWriteAt = Date.now();
+    if (this.policy.syncMode !== "write-through") return 0;
+    const seq = this.writeSeq + 1;
+    this.writeSeq = seq;
+    node.appliedSeq = seq;
+    this.clearBehind(node);
+    const bytes = estimateBytes(statements);
+    this.journal.set(seq, { seq, statements, bytes });
+    this.journalBytes += bytes;
+    this.trimJournal();
+    return seq;
+  }
+  trimJournal() {
+    while (this.journal.size > WRITE_JOURNAL_MAX_ENTRIES || this.journalBytes > WRITE_JOURNAL_MAX_BYTES) {
+      const oldest = this.journal.keys().next();
+      if (oldest.done) return;
+      const entry = this.journal.get(oldest.value);
+      if (!entry) return;
+      this.journal.delete(oldest.value);
+      this.journalBytes = Math.max(0, this.journalBytes - entry.bytes);
+      for (const node of this.nodes) {
+        if (node.appliedSeq < entry.seq) this.markNeedsFullSync(node);
+      }
+    }
+  }
+  /** Replay sequences up to `seq` on every other node (write-through only). */
+  async replicate(seq, source, failedThisRequest) {
+    if (this.policy.syncMode !== "write-through") return;
+    const now = Date.now();
+    const targets = this.nodes.filter(
+      (node) => node !== source && node.downUntil <= now && node.writeBlockedUntil <= now && !failedThisRequest.has(node.spec.id)
+    );
+    if (targets.length === 0) return;
+    const runs = targets.map((node) => this.catchUp(node, seq));
+    if (this.policy.syncAsync) {
+      void Promise.allSettled(runs);
+      return;
+    }
+    await Promise.allSettled(runs);
+  }
   async execute(sql, params, mode) {
-    const isRead = mode !== "run" && READ_ONLY_SQL2.test(sql);
-    const candidates = this.candidates(isRead ? "read" : "write");
+    const isRead = mode !== "run" && isReadOnlySql(sql);
+    return isRead ? this.executeRead(sql, params, mode) : this.executeWrite(sql, params, mode);
+  }
+  async executeRead(sql, params, mode) {
+    const candidates = this.readCandidates();
     let lastError = null;
-    const failedThisRequest = /* @__PURE__ */ new Set();
     for (const node of candidates) {
       try {
         const result = await this.runOnNode(node, sql, params, mode);
         this.markOk(node);
-        if (!isRead) await this.replicate(sql, params, node, failedThisRequest);
         return result;
       } catch (error) {
         lastError = error;
         if (!isNodeLevelFailure(error)) throw error;
         this.markFailure(node, error);
-        failedThisRequest.add(node.spec.id);
         console.warn(
-          `[db-cluster] node "${node.spec.label}" failed (${nodeFailureMessage(error)}); trying the next node`
+          `[db-cluster] read on "${node.spec.label}" failed (${nodeFailureMessage(error)}); trying the next node`
         );
       }
     }
-    throw lastError instanceof Error ? lastError : new Error("[db-cluster] every configured database node failed");
+    throw lastError instanceof Error ? lastError : new DbClusterUnavailableError("\u6240\u6709\u6570\u636E\u5E93\u8282\u70B9\u90FD\u65E0\u6CD5\u54CD\u5E94\u8BFB\u8BF7\u6C42\u3002");
+  }
+  async executeWrite(sql, params, mode) {
+    const candidates = this.writeCandidates();
+    let lastError = null;
+    const failedThisRequest = /* @__PURE__ */ new Set();
+    for (const node of candidates) {
+      if (!await this.catchUp(node)) {
+        lastError = new DbClusterUnavailableError(
+          `\u8282\u70B9\u300C${node.spec.label}\u300D\u843D\u540E\u4E8E\u6700\u65B0\u5199\u5165\u4E14\u65E0\u6CD5\u81EA\u52A8\u8865\u9F50\uFF0C\u5DF2\u8DF3\u8FC7\uFF1B\u8BF7\u6267\u884C\u300C\u540C\u6B65\u6570\u636E\u300D\u3002`
+        );
+        continue;
+      }
+      try {
+        const result = await this.runOnNode(node, sql, params, mode);
+        this.markOk(node);
+        const seq = this.recordWrite(node, [{ sql, params }]);
+        await this.replicate(seq, node, failedThisRequest);
+        return result;
+      } catch (error) {
+        lastError = error;
+        if (isNodeLevelFailure(error)) failedThisRequest.add(node.spec.id);
+        this.handleWriteFailure(node, error);
+      }
+    }
+    throw this.finalWriteError(lastError);
   }
   /**
-   * Replay a committed write on the other nodes.
-   *
-   * Failures never surface to the caller: the primary already committed, so
-   * throwing here would report a failure for a write that actually happened.
-   * They are recorded per node and shown in the admin health panel instead.
+   * Turn whatever the last attempt produced into something the caller can act
+   * on. A raw "The MySQL server is running with the --read-only option" tells the
+   * user nothing about what to do (C-1).
    */
-  async replicate(sql, params, source, failedThisRequest) {
-    if (this.policy.syncMode !== "write-through") return;
-    const targets = this.nodes.filter(
-      (node) => node !== source && node.downUntil <= Date.now() && !failedThisRequest.has(node.spec.id)
-    );
-    if (targets.length === 0) return;
-    const apply = async (node) => {
-      try {
-        await this.runOnNode(node, sql, params, "run");
-        this.markOk(node);
-      } catch (error) {
-        node.syncErrors += 1;
-        node.lastSyncError = nodeFailureMessage(error);
-        if (isNodeLevelFailure(error)) this.markFailure(node, error);
-        console.warn(
-          `[db-cluster] replica "${node.spec.label}" fell behind (${nodeFailureMessage(error)}). The primary write is kept; re-sync this node from the primary.`
-        );
-      }
-    };
-    if (this.policy.syncAsync) {
-      void Promise.allSettled(targets.map(apply));
+  finalWriteError(lastError) {
+    if (isReadOnlyRejection(lastError)) {
+      return new DbClusterUnavailableError(
+        "\u5F53\u524D\u53EA\u80FD\u8FDE\u5230\u53EA\u8BFB\u526F\u672C\uFF0C\u65E0\u6CD5\u5199\u5165\uFF1A\u8BF7\u786E\u8BA4\u4E3B\u5E93\u5728\u7EBF\u5E76\u5DF2\u6062\u590D\uFF0C\u6216\u628A\u526F\u5E93\u540C\u6B65\u65B9\u5F0F\u6539\u4E3A\u300C\u5E94\u7528\u5C42\u5B9E\u65F6\u53CC\u5199\u300D\u540E\u518D\u505A\u6545\u969C\u5207\u6362\u3002"
+      );
+    }
+    if (lastError instanceof Error) return lastError;
+    return new DbClusterUnavailableError("\u6240\u6709\u6570\u636E\u5E93\u8282\u70B9\u90FD\u65E0\u6CD5\u63A5\u53D7\u5199\u5165\u3002");
+  }
+  /**
+   * Decide what a failed write means. May throw (SQL error, unconfirmed write).
+   * Returning normally means "try the next node".
+   */
+  handleWriteFailure(node, error) {
+    if (isReadOnlyRejection(error)) {
+      this.markWriteBlocked(node, error);
+      console.warn(
+        `[db-cluster] node "${node.spec.label}" is read-only; trying the next node for this write`
+      );
       return;
     }
-    await Promise.allSettled(targets.map(apply));
+    if (!isNodeLevelFailure(error)) throw error;
+    this.markFailure(node, error);
+    if (isAmbiguousWriteFailure(error)) throw new DbClusterWriteUnconfirmedError(node.spec.label, error);
+    console.warn(
+      `[db-cluster] node "${node.spec.label}" failed (${nodeFailureMessage(error)}); trying the next node`
+    );
   }
   prepare(sql) {
     return new ClusterStatement(this, sql);
@@ -36388,10 +36802,16 @@ var MySqlClusterDatabase = class {
       }
       return { sql: clusterStatement.getSql(), params: clusterStatement.getParams() };
     });
-    const candidates = this.candidates("write");
+    const candidates = this.writeCandidates();
     let lastError = null;
     const failedThisRequest = /* @__PURE__ */ new Set();
     for (const node of candidates) {
+      if (!await this.catchUp(node)) {
+        lastError = new DbClusterUnavailableError(
+          `\u8282\u70B9\u300C${node.spec.label}\u300D\u843D\u540E\u4E8E\u6700\u65B0\u5199\u5165\u4E14\u65E0\u6CD5\u81EA\u52A8\u8865\u9F50\uFF0C\u5DF2\u8DF3\u8FC7\uFF1B\u8BF7\u6267\u884C\u300C\u540C\u6B65\u6570\u636E\u300D\u3002`
+        );
+        continue;
+      }
       try {
         const local = entries.map((entry) => {
           const statement = node.db.prepare(entry.sql);
@@ -36400,53 +36820,28 @@ var MySqlClusterDatabase = class {
         });
         const results = await node.db.batch(local);
         this.markOk(node);
-        await this.replicateBatch(entries, node, failedThisRequest);
+        const seq = this.recordWrite(node, entries);
+        await this.replicate(seq, node, failedThisRequest);
         return results;
       } catch (error) {
         lastError = error;
-        if (!isNodeLevelFailure(error)) throw error;
-        this.markFailure(node, error);
-        failedThisRequest.add(node.spec.id);
-        console.warn(`[db-cluster] batch on "${node.spec.label}" failed; trying the next node`);
+        if (isNodeLevelFailure(error)) failedThisRequest.add(node.spec.id);
+        this.handleWriteFailure(node, error);
       }
     }
-    throw lastError instanceof Error ? lastError : new Error("[db-cluster] every configured database node failed");
-  }
-  /** Same contract as replicate(), for a transactional batch. */
-  async replicateBatch(entries, source, failedThisRequest) {
-    if (this.policy.syncMode !== "write-through") return;
-    const targets = this.nodes.filter(
-      (node) => node !== source && node.downUntil <= Date.now() && !failedThisRequest.has(node.spec.id)
-    );
-    if (targets.length === 0) return;
-    const apply = async (node) => {
-      try {
-        const local = entries.map((entry) => {
-          const statement = node.db.prepare(entry.sql);
-          if (entry.params.length > 0) statement.bind(...entry.params);
-          return statement;
-        });
-        await node.db.batch(local);
-        this.markOk(node);
-      } catch (error) {
-        node.syncErrors += 1;
-        node.lastSyncError = nodeFailureMessage(error);
-        if (isNodeLevelFailure(error)) this.markFailure(node, error);
-        console.warn(
-          `[db-cluster] replica "${node.spec.label}" rejected a replayed batch (${nodeFailureMessage(error)})`
-        );
-      }
-    };
-    if (this.policy.syncAsync) {
-      void Promise.allSettled(targets.map(apply));
-      return;
-    }
-    await Promise.allSettled(targets.map(apply));
+    throw this.finalWriteError(lastError);
   }
   async close() {
     await Promise.allSettled(this.nodes.map((node) => node.db.close()));
   }
 };
+function isDuplicateKey(error) {
+  const errno = Number(error?.errno ?? 0);
+  const code = String(error?.code ?? "");
+  if (code) return code === "ER_DUP_ENTRY";
+  if (errno === 1062) return true;
+  return /Duplicate entry .* for key|UNIQUE constraint failed/i.test(nodeFailureMessage(error));
+}
 function isMySqlClusterDatabase(db) {
   return !!db && typeof db === "object" && db.clusterNodes !== void 0;
 }
@@ -36485,7 +36880,9 @@ function toSpecs(cluster) {
     database: node.database,
     ssl: node.ssl,
     connectionLimit: node.connectionLimit,
-    connectTimeoutMs: 1e4
+    connectTimeoutMs: 1e4,
+    // Keeps an unsynced standby out of rotation (see ClusterNodeSpec).
+    syncReady: node.syncReady
   }));
 }
 async function getDatabase(env) {
@@ -36543,7 +36940,9 @@ async function getDatabaseStatus(env) {
     if (cluster.mode === "mysql") {
       const row = await db.prepare("SELECT VERSION() AS version").first();
       const nodes = db.nodeHealth?.();
-      const degraded = !!nodes?.some((node) => node.role !== "primary" && node.syncErrors > 0);
+      const degraded = !!nodes?.some(
+        (node) => node.role !== "primary" && (node.syncErrors > 0 || node.needsFullSync || node.lag > 0 || node.syncReady === false)
+      );
       const status2 = {
         mode: "mysql",
         source: cluster.source,
@@ -36579,11 +36978,18 @@ var SYNC_DEFAULTS = {
   maxRowsPerTable: 2e4,
   maxDurationMs: 45e3
 };
+var MIN_BUDGET_MS = 250;
 function quoteIdent(name) {
   return `\`${name.replace(/`/g, "``")}\``;
 }
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+function isPacketTooLarge(error) {
+  const errno = Number(error?.errno ?? 0);
+  const code = String(error?.code ?? "");
+  if (errno === 1153 || code === "ER_NET_PACKET_TOO_LARGE") return true;
+  return /max_allowed_packet|Packet for query is too large/i.test(errorMessage(error));
 }
 async function discoverTables(db) {
   const result = await db.prepare(
@@ -36597,18 +37003,55 @@ async function discoverColumns(db, table) {
   ).bind(table).all();
   return (result.results ?? []).map((row) => String(row.name ?? "")).filter((name) => name.length > 0);
 }
-function buildUpsertSql(table, columns, rowCount) {
+async function discoverPrimaryKey(db, table) {
+  try {
+    const result = await db.prepare(
+      "SELECT COLUMN_NAME AS name FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY' ORDER BY ORDINAL_POSITION"
+    ).bind(table).all();
+    return (result.results ?? []).map((row) => String(row.name ?? "")).filter((name) => name.length > 0);
+  } catch {
+    return [];
+  }
+}
+function buildUpsertSql(table, columns, rowCount, mode) {
   const columnList = columns.map(quoteIdent).join(", ");
   const rowPlaceholder = `(${columns.map(() => "?").join(", ")})`;
   const values = Array.from({ length: rowCount }, () => rowPlaceholder).join(", ");
-  const updates = columns.map((column) => `${quoteIdent(column)} = VALUES(${quoteIdent(column)})`).join(", ");
+  const updates = mode === "overwrite" ? columns.map((column) => `${quoteIdent(column)} = VALUES(${quoteIdent(column)})`).join(", ") : (
+    // No-op update: keeps the existing row untouched. `col = col` is valid in
+    // ON DUPLICATE KEY UPDATE and refers to the stored value.
+    `${quoteIdent(columns[0])} = ${quoteIdent(columns[0])}`
+  );
   return `INSERT INTO ${quoteIdent(table)} (${columnList}) VALUES ${values} ON DUPLICATE KEY UPDATE ${updates}`;
+}
+function isCursorScalar(value) {
+  return value === null || ["string", "number", "boolean"].includes(typeof value);
+}
+async function countRows(db, table) {
+  try {
+    const row = await db.prepare(`SELECT COUNT(*) AS n FROM ${quoteIdent(table)}`).first();
+    if (!row) return null;
+    const value = Number(row.n);
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
 }
 async function syncTable(source, target, table, options = {}, startedAt = Date.now()) {
   const chunkSize = Math.max(1, options.chunkSize ?? SYNC_DEFAULTS.chunkSize);
   const maxRows = Math.max(1, options.maxRowsPerTable ?? SYNC_DEFAULTS.maxRowsPerTable);
-  const maxDurationMs = Math.max(1e3, options.maxDurationMs ?? SYNC_DEFAULTS.maxDurationMs);
-  const result = { table, columns: 0, rowsRead: 0, rowsWritten: 0, truncated: false };
+  const requestedMs = Math.max(MIN_BUDGET_MS, options.maxDurationMs ?? SYNC_DEFAULTS.maxDurationMs);
+  const budgetEnd = Math.min(startedAt + requestedMs, options.deadline ?? Number.POSITIVE_INFINITY);
+  const mode = options.mode === "overwrite" ? "overwrite" : "merge";
+  const verifyCounts = options.verifyCounts !== false;
+  const result = {
+    table,
+    columns: 0,
+    rowsRead: 0,
+    rowsWritten: 0,
+    truncated: false,
+    paging: "keyset"
+  };
   try {
     const columns = await discoverColumns(source, table);
     if (columns.length === 0) {
@@ -36616,31 +37059,78 @@ async function syncTable(source, target, table, options = {}, startedAt = Date.n
       return result;
     }
     result.columns = columns.length;
+    const keys = await discoverPrimaryKey(source, table);
+    if (keys.length === 0) result.paging = "offset";
     const selectList = columns.map(quoteIdent).join(", ");
+    const keyList = keys.map(quoteIdent).join(", ");
+    const keyParams = keys.map(() => "?").join(", ");
+    const savedCursor = options.cursors?.[table];
+    let cursor = null;
     let offset = 0;
+    if (Array.isArray(savedCursor) && savedCursor.length > 0) {
+      if (result.paging === "keyset" && savedCursor.length === keys.length) cursor = savedCursor;
+      else if (result.paging === "offset") offset = Number(savedCursor[0]) || 0;
+    }
+    let limit = Math.min(chunkSize, maxRows);
+    let cursorOut;
     for (; ; ) {
       if (result.rowsRead >= maxRows) {
         result.truncated = true;
-        return result;
+        break;
       }
-      if (Date.now() - startedAt > maxDurationMs) {
+      if (Date.now() > budgetEnd) {
         result.truncated = true;
-        return result;
+        break;
       }
-      const limit = Math.min(chunkSize, maxRows - result.rowsRead);
-      const rows = await source.prepare(`SELECT ${selectList} FROM ${quoteIdent(table)} ORDER BY 1 LIMIT ${limit} OFFSET ${offset}`).all();
+      limit = Math.max(1, Math.min(limit, chunkSize, maxRows - result.rowsRead));
+      const where = cursor ? `WHERE (${keyList}) > (${keyParams})` : "";
+      const orderBy = result.paging === "keyset" ? `ORDER BY ${keyList}` : "ORDER BY 1";
+      const tail2 = result.paging === "offset" ? ` OFFSET ${offset}` : "";
+      const statement = source.prepare(
+        `SELECT ${selectList} FROM ${quoteIdent(table)}${where ? ` ${where}` : ""} ${orderBy} LIMIT ${limit}${tail2}`
+      );
+      if (where) statement.bind(...cursor);
+      const rows = await statement.all();
       const batch = rows.results ?? [];
-      if (batch.length === 0) return result;
+      if (batch.length === 0) break;
       const params = [];
       for (const row of batch) {
         for (const column of columns) params.push(row[column] ?? null);
       }
-      await target.prepare(buildUpsertSql(table, columns, batch.length)).bind(...params).run();
+      try {
+        await target.prepare(buildUpsertSql(table, columns, batch.length, mode)).bind(...params).run();
+      } catch (error) {
+        if (isPacketTooLarge(error) && limit > 1) {
+          limit = Math.max(1, Math.floor(limit / 2));
+          continue;
+        }
+        throw error;
+      }
       result.rowsRead += batch.length;
       result.rowsWritten += batch.length;
-      offset += batch.length;
-      if (batch.length < limit) return result;
+      if (result.paging === "keyset") {
+        const last = batch[batch.length - 1];
+        const next = keys.map((key) => last[key] ?? null);
+        cursor = next;
+        cursorOut = next.every(isCursorScalar) ? next : void 0;
+      } else {
+        offset += batch.length;
+        cursorOut = [offset];
+      }
+      if (batch.length < limit) break;
     }
+    if (result.truncated) result.nextCursor = cursorOut;
+    if (!result.truncated && verifyCounts) {
+      const sourceRows = await countRows(source, table);
+      const targetRows = await countRows(target, table);
+      if (sourceRows !== null) result.sourceRows = sourceRows;
+      if (targetRows !== null) result.targetRows = targetRows;
+      if (sourceRows !== null && targetRows !== null) {
+        result.countMatches = sourceRows === targetRows;
+        if (targetRows > sourceRows) result.orphanRows = targetRows - sourceRows;
+      }
+    }
+    return result;
   } catch (error) {
     result.error = errorMessage(error);
     return result;
@@ -36648,32 +37138,66 @@ async function syncTable(source, target, table, options = {}, startedAt = Date.n
 }
 async function syncDatabase(source, target, options = {}) {
   const startedAt = Date.now();
+  const requestedMs = Math.max(MIN_BUDGET_MS, options.maxDurationMs ?? SYNC_DEFAULTS.maxDurationMs);
+  const deadline = Math.min(startedAt + requestedMs, options.deadline ?? Number.POSITIVE_INFINITY);
   let tables;
   try {
     tables = options.tables ?? await discoverTables(source);
   } catch (error) {
     return {
       ok: false,
-      tables: [{ table: "*", columns: 0, rowsRead: 0, rowsWritten: 0, truncated: false, error: errorMessage(error) }],
+      complete: false,
+      tables: [
+        {
+          table: "*",
+          columns: 0,
+          rowsRead: 0,
+          rowsWritten: 0,
+          truncated: false,
+          paging: "keyset",
+          error: errorMessage(error)
+        }
+      ],
       rowsRead: 0,
       rowsWritten: 0,
       truncated: false,
-      durationMs: Date.now() - startedAt
+      durationMs: Date.now() - startedAt,
+      cursors: {}
     };
   }
   const results = [];
   for (const table of tables) {
-    results.push(await syncTable(source, target, table, options, Date.now()));
+    if (Date.now() >= deadline) {
+      results.push({
+        table,
+        columns: 0,
+        rowsRead: 0,
+        rowsWritten: 0,
+        truncated: true,
+        paging: "keyset"
+      });
+      continue;
+    }
+    results.push(
+      await syncTable(source, target, table, { ...options, deadline }, Date.now())
+    );
   }
   const rowsRead = results.reduce((sum, entry) => sum + entry.rowsRead, 0);
   const rowsWritten = results.reduce((sum, entry) => sum + entry.rowsWritten, 0);
+  const cursors = {};
+  for (const entry of results) {
+    if (entry.nextCursor) cursors[entry.table] = entry.nextCursor;
+  }
+  const ok = results.every((entry) => !entry.error);
   return {
-    ok: results.every((entry) => !entry.error),
+    ok,
+    complete: ok && results.every((entry) => !entry.truncated && entry.countMatches !== false),
     tables: results,
     rowsRead,
     rowsWritten,
     truncated: results.some((entry) => entry.truncated),
-    durationMs: Date.now() - startedAt
+    durationMs: Date.now() - startedAt,
+    cursors
   };
 }
 
@@ -37160,6 +37684,7 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
     await clearRuntimeConfig(env);
     await resetDatabaseCache();
     resetDbLifecycle();
+    await clearSyncStates(env);
     await auditDbConfigChange(env, actorUser, "admin.db_config.cleared", null);
     return jsonResponse({ ok: true, mode: "d1", effective: true });
   }
@@ -37229,20 +37754,32 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
   }
   const envOverride = !!resolveDbConfigFromEnv(env);
   await auditDbConfigChange(env, actorUser, "admin.db_config.saved", cluster);
+  let syncPending = [];
+  if (cluster.policy.syncMode === "write-through") {
+    const states = await readSyncStates(env);
+    syncPending = cluster.nodes.filter((node) => node.enabled && node.role === "replica" && states[node.id]?.complete !== true).map((node) => node.id);
+  }
+  const syncWarning = syncPending.length > 0 ? `${syncPending.length} \u4E2A\u526F\u5E93\u5C1A\u672A\u5B8C\u6210\u540C\u6B65\uFF0C\u6545\u969C\u5207\u6362\u524D\u8BF7\u5148\u70B9\u300C\u540C\u6B65\u6570\u636E\u5230\u526F\u5E93\u300D\uFF0C\u5426\u5219\u63A5\u7BA1\u65F6\u4F1A\u7F3A\u5C11\u5386\u53F2\u6570\u636E\u3002` : void 0;
+  const warning = [
+    envOverride ? "DB_* \u73AF\u5883\u53D8\u91CF\u4F18\u5148\u4E8E\u8FD0\u884C\u65F6\u914D\u7F6E\uFF1A\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5F53\u524D\u751F\u6548\u7684\u4ECD\u662F\u73AF\u5883\u53D8\u91CF\u6307\u5411\u7684\u6570\u636E\u5E93\u3002" : null,
+    schemaError ? `\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5EFA\u8868\u5931\u8D25\uFF1A${schemaError}` : null,
+    syncWarning
+  ].filter((entry) => !!entry).join(" ");
   return jsonResponse({
     ok: true,
     mode: "mysql",
     saved: true,
     effective: !envOverride && schemaReady,
-    warning: envOverride ? "DB_* \u73AF\u5883\u53D8\u91CF\u4F18\u5148\u4E8E\u8FD0\u884C\u65F6\u914D\u7F6E\uFF1A\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5F53\u524D\u751F\u6548\u7684\u4ECD\u662F\u73AF\u5883\u53D8\u91CF\u6307\u5411\u7684\u6570\u636E\u5E93\u3002" : schemaError ? `\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5EFA\u8868\u5931\u8D25\uFF1A${schemaError}` : void 0,
+    warning: warning || void 0,
     schemaReady,
+    syncPending: syncPending.length > 0 ? syncPending : void 0,
     latencyMs: Math.max(...probes.map((result) => result.latencyMs), 0),
     version: probes.find((result) => result.role === "primary")?.version,
     nodes: probes,
     cluster: maskCluster({
       mode: "mysql",
       source: "runtime",
-      nodes: cluster.nodes.map((node) => ({ ...node, source: "runtime" })),
+      nodes: cluster.nodes.map((node) => ({ ...node, source: "runtime", syncStatus: void 0 })),
       policy: cluster.policy
     })
   });
@@ -37250,6 +37787,9 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
 async function handleAdminSyncDbCluster(request, env, actorUser) {
   const body = await readJsonBody3(request);
   const requested = Array.isArray(body.targetIds) ? body.targetIds.map((id) => String(id)) : null;
+  const requestedSource = typeof body.sourceId === "string" && body.sourceId.trim() ? body.sourceId.trim() : null;
+  const mode = body.mode === "overwrite" ? "overwrite" : "merge";
+  const forced = wantsForce(request) || body.force === true;
   const cluster = await resolveDbCluster(env);
   if (cluster.mode !== "mysql" || cluster.nodes.length === 0) {
     return errorResponse("\u5F53\u524D\u6CA1\u6709\u914D\u7F6E\u5916\u63A5 MySQL \u8282\u70B9\uFF0C\u65E0\u9700\u540C\u6B65\u3002", 400);
@@ -37266,14 +37806,38 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
   }
   const handles = db.nodeDatabases();
   const primaryId = primaryNodeOf(cluster)?.id;
-  const primary = handles.find((node) => node.id === primaryId) ?? handles[0];
-  if (!primary) return errorResponse("\u627E\u4E0D\u5230\u4E3B\u5E93\u8282\u70B9\u3002", 400);
+  const primaryHandle = handles.find((node) => node.id === primaryId) ?? handles[0];
+  if (!primaryHandle) return errorResponse("\u627E\u4E0D\u5230\u4E3B\u5E93\u8282\u70B9\u3002", 400);
+  const sourceId = requestedSource ?? primaryHandle.id;
+  const source = handles.find((node) => node.id === sourceId);
+  if (!source) {
+    return errorResponse(`\u672A\u77E5\u7684\u540C\u6B65\u6E90\u8282\u70B9\uFF1A${sourceId}`, 400);
+  }
+  const sourceSpec = cluster.nodes.find((node) => node.id === source.id);
+  if (sourceSpec && sourceSpec.enabled === false) {
+    return errorResponse(`\u540C\u6B65\u6E90\u8282\u70B9\u300C${sourceSpec.label}\u300D\u5DF2\u505C\u7528\u3002`, 400);
+  }
   const targets = handles.filter(
-    (node) => node.id !== primary.id && (!requested || requested.includes(node.id))
+    (node) => node.id !== source.id && (!requested || requested.includes(node.id))
   );
   if (targets.length === 0) {
-    return errorResponse("\u6CA1\u6709\u53EF\u540C\u6B65\u7684\u526F\u5E93\u8282\u70B9\uFF08\u8BF7\u5148\u6DFB\u52A0\u5E76\u542F\u7528\u526F\u5E93\uFF09\u3002", 400);
+    return errorResponse("\u6CA1\u6709\u53EF\u540C\u6B65\u7684\u76EE\u6807\u8282\u70B9\uFF08\u6E90\u8282\u70B9\u4E0D\u80FD\u540C\u65F6\u4F5C\u4E3A\u76EE\u6807\uFF0C\u8BF7\u5148\u6DFB\u52A0\u5E76\u542F\u7528\u526F\u5E93\uFF09\u3002", 400);
   }
+  const watermarks = db.writeWatermarks();
+  const appliedOf = (id) => watermarks.nodes.find((node) => node.id === id)?.appliedSeq ?? 0;
+  const sourceSeq = appliedOf(source.id);
+  if (mode === "overwrite" && !forced) {
+    const newer = targets.find((target) => appliedOf(target.id) > sourceSeq);
+    if (newer) {
+      const newerLabel = cluster.nodes.find((node) => node.id === newer.id)?.label ?? newer.id;
+      const sourceLabel = sourceSpec?.label ?? source.id;
+      return errorResponse(
+        `\u76EE\u6807\u8282\u70B9\u300C${newerLabel}\u300D\u6BD4\u6E90\u8282\u70B9\u300C${sourceLabel}\u300D\u66F4\u65B0\uFF1A\u5B83\u5DF2\u7ECF\u63A5\u6536\u4E86\u6E90\u8282\u70B9\u6CA1\u6709\u7684\u5199\u5165\u3002\u7528\u300C\u8986\u76D6\u5DF2\u6709\u884C\u300D\u4F1A\u628A\u8F83\u65B0\u7684\u6570\u636E\u6539\u56DE\u65E7\u503C\u3002\u8BF7\u6539\u7528\u9ED8\u8BA4\u7684\u300C\u53EA\u8865\u7F3A\u5931\u884C\u300D\uFF0C\u6216\u628A\u540C\u6B65\u6E90\u6539\u6210\u300C` + newerLabel + "\u300D\uFF0C\u786E\u8BA4\u65E0\u8BEF\u540E\u518D\u52A0 ?force=1 \u5F3A\u5236\u8986\u76D6\u3002",
+        409
+      );
+    }
+  }
+  const storedStates = await readSyncStates(env);
   const deadline = Date.now() + 9e4;
   const reports = [];
   for (const target of targets) {
@@ -37284,6 +37848,7 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
         id: target.id,
         label: spec?.label ?? target.id,
         ok: false,
+        complete: false,
         rowsRead: 0,
         rowsWritten: 0,
         truncated: false,
@@ -37293,16 +37858,39 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
       });
       continue;
     }
-    const result = await syncDatabase(primary.db, target.db, { maxDurationMs: Math.min(45e3, remaining) });
+    const previous = storedStates[target.id];
+    const cursors = previous && previous.sourceId === source.id ? previous.cursors : void 0;
+    const result = await syncDatabase(source.db, target.db, {
+      maxDurationMs: Math.min(45e3, remaining),
+      deadline,
+      mode,
+      cursors
+    });
+    const complete = result.ok && result.complete;
+    const countsMismatch = result.tables.filter((table) => table.countMatches === false).map((table) => table.table);
+    const orphanRows = result.tables.reduce((sum, table) => sum + (table.orphanRows ?? 0), 0);
+    await saveNodeSyncState(env, target.id, {
+      at: Date.now(),
+      complete,
+      truncated: result.truncated,
+      rowsWritten: result.rowsWritten,
+      tables: result.tables.length,
+      sourceId: source.id,
+      cursors: complete ? void 0 : result.cursors
+    });
+    if (complete) db.markNodeSynced(target.id);
     reports.push({
       id: target.id,
       label: spec?.label ?? target.id,
       ok: result.ok,
+      complete,
       rowsRead: result.rowsRead,
       rowsWritten: result.rowsWritten,
       truncated: result.truncated,
       durationMs: result.durationMs,
-      tables: result.tables
+      tables: result.tables,
+      countsMismatch: countsMismatch.length > 0 ? countsMismatch : void 0,
+      orphanRows: orphanRows > 0 ? orphanRows : void 0
     });
   }
   const ok = reports.every((report) => report.ok);
@@ -37315,6 +37903,9 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
   return jsonResponse(
     {
       ok,
+      source: { id: source.id, label: sourceSpec?.label ?? source.id },
+      mode,
+      complete: reports.every((report) => report.complete),
       targets: reports,
       rowsWritten: reports.reduce((sum, report) => sum + report.rowsWritten, 0),
       truncated: reports.some((report) => report.truncated)
@@ -37332,6 +37923,7 @@ async function handleAdminClearDbConfig(request, env, actorUser) {
   await clearRuntimeConfig(env);
   await resetDatabaseCache();
   resetDbLifecycle();
+  await clearSyncStates(env);
   await auditDbConfigChange(env, actorUser, "admin.db_config.cleared", null);
   return jsonResponse({ ok: true, mode: "d1" });
 }
@@ -48062,6 +48654,11 @@ async function handleRequest(request, env) {
     if (isDuplicateKeyError(error)) {
       console.warn("Request rejected: duplicate key", error instanceof Error ? error.message : error);
       return conflictResponse(conflictMessageFor(error));
+    }
+    const clusterStatus = Number(error?.status ?? 0);
+    if (clusterStatus === 503 && error instanceof Error) {
+      console.error("[db-cluster] request failed:", error.message);
+      return errorResponse(error.message, 503);
     }
     console.error("Request error:", error);
     return errorResponse("Internal server error", 500);
