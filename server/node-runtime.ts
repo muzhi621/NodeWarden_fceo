@@ -23,7 +23,6 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import { handleRequest } from '../src/router';
@@ -38,6 +37,14 @@ import {
   createLocalNotificationsHubNamespace,
   installDurableObjectGlobals,
 } from './local-durable-objects';
+// The filesystem-backed attachment bucket lives in its own module so it can be
+// unit-tested without booting the whole runtime.
+import { createFsR2 } from './fs-r2';
+import {
+  describeAttachmentsProblem,
+  probeAttachmentsDir,
+  type AttachmentsProbeResult,
+} from './attachments-probe';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -61,11 +68,15 @@ interface RuntimeState {
   assets: AssetsMode;
   dataDir: string;
   attachmentsDir: string;
+  /** True when ATTACHMENTS_DIR came from the environment (so a mount is expected). */
+  attachmentsFromEnv: boolean;
   distDir: string;
 }
 
 let state: RuntimeState | null = null;
 let sharedEnv: Env | null = null;
+let attachmentsProbe: AttachmentsProbeResult | null = null;
+let attachmentsProbeRun: Promise<AttachmentsProbeResult> | null = null;
 
 // ---------------------------------------------------------------------------
 // Environment plumbing
@@ -107,10 +118,18 @@ function resolveState(options: NodeRuntimeOptions): RuntimeState {
     // the stored config on the next cold start, so stub mode forces /tmp.
     dataDir = path.join(os.tmpdir(), 'nodewarden');
   }
+  const defaultAttachments = path.join(dataDir, 'attachments');
+  const configuredAttachments = process.env.ATTACHMENTS_DIR;
+  // A mount is only expected when the operator pointed somewhere *else*:
+  // fc-entry.mjs always exports ATTACHMENTS_DIR, but to the default path, and
+  // warning about it on every boot on FC would train people to ignore the log.
+  const attachmentsFromEnv =
+    !!configuredAttachments && path.resolve(configuredAttachments) !== path.resolve(defaultAttachments);
   return {
     assets,
     dataDir,
-    attachmentsDir: path.resolve(process.env.ATTACHMENTS_DIR || path.join(dataDir, 'attachments')),
+    attachmentsDir: path.resolve(configuredAttachments || defaultAttachments),
+    attachmentsFromEnv,
     distDir: path.resolve(process.env.DIST_DIR || path.join(__dirname, '..', 'dist')),
   };
 }
@@ -152,6 +171,37 @@ export function configureNodeRuntime(options: NodeRuntimeOptions = {}): RuntimeS
   (globalThis as { caches?: unknown }).caches = cachesShim;
   installDurableObjectGlobals();
   return state;
+}
+
+/**
+ * Verify the attachment disk once per process, waiting briefly for a mount that
+ * comes up just after the container starts.
+ *
+ * Without this the "bucket mount is missing" case is indistinguishable from a
+ * healthy install: uploads succeed, land on the container disk, and vanish on
+ * the next redeploy. The result is logged once and reported by /healthz.
+ */
+export async function ensureAttachmentsProbe(): Promise<AttachmentsProbeResult> {
+  const runtime = configureNodeRuntime();
+  if (attachmentsProbe) return attachmentsProbe;
+  if (!attachmentsProbeRun) {
+    attachmentsProbeRun = probeAttachmentsDir(runtime.attachmentsDir, {
+      expectMount: runtime.attachmentsFromEnv,
+      // A FUSE mount is often still connecting when the entry module runs.
+      attempts: runtime.attachmentsFromEnv ? 6 : 1,
+      delayMs: 500,
+    }).then((result) => {
+      attachmentsProbe = result;
+      const problem = describeAttachmentsProblem(result);
+      if (!problem) {
+        console.log(`[attachments] storage ready at ${result.dir}`);
+      } else {
+        console.error(`[attachments] ${problem}`);
+      }
+      return result;
+    });
+  }
+  return attachmentsProbeRun;
 }
 
 export function getRuntimeInfo(): RuntimeState {
@@ -197,69 +247,6 @@ function createFileKv(dataDir: string) {
 // ---------------------------------------------------------------------------
 // Filesystem-backed R2-compatible bucket (attachments / send files)
 // ---------------------------------------------------------------------------
-
-function safeObjectPath(attachmentsDir: string, key: string): string {
-  // Containment check via path.relative: a plain startsWith() also accepts
-  // sibling directories such as "/data/attachments-evil".
-  const normalized = key.replace(/^[/\\]+/, '');
-  const full = path.resolve(attachmentsDir, normalized);
-  const rel = path.relative(attachmentsDir, full);
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('Invalid object key');
-  return full;
-}
-
-function createFsR2(attachmentsDir: string) {
-  return {
-    async put(key: string, value: unknown, options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }): Promise<void> {
-      const full = safeObjectPath(attachmentsDir, key);
-      fs.mkdirSync(path.dirname(full), { recursive: true });
-      let bytes: Uint8Array;
-      if (typeof value === 'string') bytes = new TextEncoder().encode(value);
-      else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
-      else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-      else if (value instanceof ReadableStream) {
-        const buf = await new Response(value).arrayBuffer();
-        bytes = new Uint8Array(buf);
-      } else {
-        bytes = new Uint8Array(0);
-      }
-      await fsp.writeFile(full, bytes);
-      const meta = {
-        contentType: options?.httpMetadata?.contentType || 'application/octet-stream',
-        customMetadata: options?.customMetadata || {},
-      };
-      await fsp.writeFile(`${full}.meta.json`, JSON.stringify(meta));
-    },
-    async get(key: string): Promise<{ body: ReadableStream; size: number; httpMetadata: { contentType: string }; customMetadata: Record<string, string> } | null> {
-      const full = safeObjectPath(attachmentsDir, key);
-      try {
-        // Stream, don't slurp: attachments can be large and FC instances are small
-        // (0.5 GB). Reading the file into a Buffer first doubled peak memory.
-        const stat = await fsp.stat(full);
-        let meta: { contentType?: string; customMetadata?: Record<string, string> } = {};
-        try {
-          meta = JSON.parse(await fsp.readFile(`${full}.meta.json`, 'utf8'));
-        } catch {
-          // no meta
-        }
-        const stream = fs.createReadStream(full);
-        return {
-          body: Readable.toWeb(stream) as unknown as ReadableStream,
-          size: stat.size,
-          httpMetadata: { contentType: meta.contentType || 'application/octet-stream' },
-          customMetadata: meta.customMetadata || {},
-        };
-      } catch {
-        return null;
-      }
-    },
-    async delete(key: string): Promise<void> {
-      const full = safeObjectPath(attachmentsDir, key);
-      await fsp.rm(full, { force: true });
-      await fsp.rm(`${full}.meta.json`, { force: true });
-    },
-  };
-}
 
 // ---------------------------------------------------------------------------
 // caches.* shim (in-memory)
@@ -426,8 +413,18 @@ async function handleHealthz(env: Env): Promise<Response> {
     // Public endpoint: never echo raw driver errors (host, user, schema names).
     console.error('[healthz] database unavailable:', status.error);
   }
+  // Only the status word is exposed: the path itself would leak the container
+  // layout, and an operator reads the details from the startup log.
+  const attachments = await ensureAttachmentsProbe().catch(() => null);
   return jsonResponse(
-    { ok: status.ok, db: status.ok ? 'up' : 'down', mode: status.mode, source: status.source, runtime: 'node' },
+    {
+      ok: status.ok,
+      db: status.ok ? 'up' : 'down',
+      mode: status.mode,
+      source: status.source,
+      runtime: 'node',
+      attachments: attachments?.status ?? 'unknown',
+    },
     status.ok ? 200 : 503
   );
 }
@@ -436,6 +433,10 @@ export async function pipeline(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   let pathname = url.pathname;
   if (pathname.length > 1) pathname = pathname.replace(/\/+$/, '');
+
+  // Runs once per process: proves the attachment disk accepts writes before a
+  // single upload reports success against a mount that is not there.
+  await ensureAttachmentsProbe();
 
   if (pathname === '/internal/cron/backup' && request.method === 'POST') {
     return handleCronTick(request, env);

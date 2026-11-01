@@ -157,15 +157,21 @@ async function run() {
     assert.ok(!JSON.stringify(body).includes('Access denied'), 'raw driver error leaked');
   });
 
-  // Without a database every backend route stops at the DB gate with a
-  // controlled 500 (same as on FC); with one it must answer for real.
+  // Without a database every backend route stops at the DB gate; with one it
+  // must answer for real.
+  //
+  // The gate has two shapes and both are correct: a cluster-level refusal (no
+  // D1, no DB_* vars, no stored config) carries its own 503 and an operator-
+  // facing message, while a generic latched init failure answers 500 with
+  // "Database not initialized". Asserting only the second shape is what made
+  // this suite red after the round-6 change.
   const expectBackendOk = (res, body) => {
     if (withDb) {
       assert.equal(res.status, 200, `${res.status} ${body}`);
       return;
     }
-    assert.equal(res.status, 500);
-    assert.match(body, /Database not initialized/);
+    assert.ok([500, 503].includes(res.status), `status ${res.status} ${body}`);
+    assert.match(body, /Database not initialized|没有配置外接 MySQL/);
   };
 
   check('GET /api/config is served like on the Worker', async () => {
@@ -190,14 +196,15 @@ async function run() {
       },
     });
     assert.ok(res.headers.get('access-control-allow-methods'), 'missing allow-methods');
-    // An unauthenticated preflight must never reach the DB: 200/204 on Workers,
-    // and the DB gate's controlled 500 is acceptable without a database.
-    assert.ok([200, 204, 500].includes(res.status), `status ${res.status}`);
+    // An unauthenticated preflight must never reach the DB: 200/204 on Workers.
+    // On this runtime the DB gate (500/503) is still acceptable without a
+    // database — what matters is that CORS headers come back and nothing throws.
+    assert.ok([200, 204, 500, 503].includes(res.status), `status ${res.status}`);
   });
 
   check('unauthenticated /api/sync is rejected (401/400), never a crash', async () => {
     const res = await call('/api/sync');
-    assert.ok([401, 400, 500].includes(res.status), `status ${res.status}`);
+    assert.ok([401, 400, 500, 503].includes(res.status), `status ${res.status}`);
     const text = await res.text();
     assert.ok(!text.includes('Cannot read properties of null'), text);
   });

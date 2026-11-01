@@ -8,7 +8,7 @@
 - 要找某个变量 → [第五节 环境变量总表](#五环境变量总表)
 - 平台专属细节（FC 规格、EdgeOne 限制、定时备份）→ 仍以两份平台文档为准
 
-> 本文对应版本 **v1.8.4**。每个 [Release](https://github.com/muzhi621/NodeWarden_fceo/releases) 都附带
+> 本文对应版本 **v1.8.5**。每个 [Release](https://github.com/muzhi621/NodeWarden_fceo/releases) 都附带
 > 可直接上传的 `nodewarden-fc.zip`（前端 + 后端 bundle + mysql2 依赖，免构建）。
 
 ---
@@ -148,7 +148,7 @@ docker run -d --name nodewarden -p 8787:8787 \
   -e DATA_DIR=/data \
   -e JWT_SECRET="$(openssl rand -base64 32)" \
   -e DB_HOST=... -e DB_USER=... -e DB_PASSWORD=... -e DB_NAME=... \
-  nodewarden:1.8.4
+  nodewarden:1.8.5
 ```
 
 ```yaml
@@ -282,7 +282,7 @@ rclone mount nw-oss:nodewarden /mnt/obj \
 ```yaml
 services:
   nodewarden:
-    image: nodewarden:1.8.4
+    image: nodewarden:1.8.5
     ports: ["8787:8787"]
     devices:
       - /dev/fuse:/dev/fuse          # 必需
@@ -328,6 +328,14 @@ ATTACHMENTS_DIR=/mnt/oss/nodewarden/attachments
 - 没开 `kernel_cache`/vfs 缓存时，每次下载都会产生一次 GET 与流量；
 - 对象存储无 POSIX 完整语义（rename/append 缺失），本应用不用这些操作，但**不要**把 MySQL 数据文件、
   `kv-store.json` 之类放上去；
+- 上传被打断（实例回收、挂载掉线、客户端断开）时，落盘的是**半截文件**：应用会先写
+  `<key>.meta.json`（带 `incomplete` 标记），传完再把最终字节数写回去；读取时只要看到标记还在、
+  或长度对不上，就当作不存在（404）而不是把损坏的附件发出去，重新上传即可覆盖；
+- 启动时会做一次**挂载体检**：目录不可写、或 `ATTACHMENTS_DIR` 存在但不是独立挂载点（也就是
+  「以为挂了、其实还在容器盘上」），日志会打一条 error，`/healthz` 的 `attachments` 字段变成
+  `not-mounted` / `missing` / `unwritable`。看到它就别开始用——此时上传的附件在下次重部署时全丢；
+- 挂载**掉线**（EIO/ETIMEDOUT/ENOTCONN）与「对象确实不存在」是两种答案：前者返回 5xx 并打日志，
+  后者才是 404。看到 5xx 先查挂载，别急着重传；
 - 对象存储挂载不适合高并发小文件场景，个人密码库的量级完全够用。
 
 #### 3.6.6 Serverless 上挂不了怎么办：用备份中心把 OSS/COS 当目标
@@ -340,13 +348,19 @@ FC / EdgeOne 没有 FUSE，但**备份中心支持 S3 兼容目标**，OSS 与 C
 | `endpoint` | `https://oss-cn-hangzhou.aliyuncs.com` | `https://cos.ap-guangzhou.myqcloud.com` |
 | `bucket` | `my-bucket` | `my-bucket-1250000000` |
 | `region` | `oss-cn-hangzhou` | `ap-guangzhou` |
-| `addressingStyle` | `virtual-hosted`（默认）或 `path` | `virtual-hosted`（默认）或 `path` |
+| `addressingStyle` | **必须 `virtual-hosted`** | `virtual-hosted`（推荐）或 `path` |
 | `rootPath` | 例如 `nodewarden` | 例如 `nodewarden` |
 | `accessKeyId` / `secretAccessKey` | 建议用只授权该桶的子账号 AK | 同左（建议子账号 + 最小权限策略） |
 
-> 端点必须带 `https://`；`path` 风格在自建/兼容端点（MinIO、R2）上更保险。
-> 这条路的语义是**定时备份**，不是实时存储：附件仍在实例本地（或 NAS），
+> 端点必须带 `https://`。阿里云 OSS **只接受 virtual-hosted 风格**（path 风格会直接 403），
+> 选错时后台会明确报错让你切换；自建 MinIO / Cloudflare R2 用 `path` 更稳（也是配置默认值）。
+> 腾讯云 COS 两种都支持，按上面的表格填即可。
+> 这条路是**定时备份**，不是实时存储：附件仍在实例本地（或 NAS），
 > 对象存储里是可供还原的快照。定期还原演练一次，确认附件也在快照里。
+>
+> 备份包是在内存里组装完再上传的，所以真正的上限是实例内存，而不是 S3 的单对象 5 GB；
+> 走的是普通 PUT 而不是分片上传，`>5 GB` 的单对象在协议层就发不上去（当前量级够用）。
+> 上传带 120 秒单请求超时与 3 次重试，超时可用 `S3_REQUEST_TIMEOUT_MS` 调整。
 
 ---
 
@@ -413,7 +427,7 @@ npm run start:node               # 默认 http://localhost:8787
 |---|---|---|---|
 | `JWT_SECRET` | — | 全部 | **必填**，≥32 位随机串 |
 | `PORT` | `8787`（FC 包内 `9000`） | F/N | 监听端口 |
-| `MAX_BODY_MB` | `100` | 全部 | 请求体上限，超限 413。EdgeOne 建议 `5`（平台 6 MB） |
+| `MAX_BODY_MB` | `100` | 全部 | 请求体上限，超限 413。EdgeOne 建议 `5`（平台 6 MB）。自建/FC 上请求体是**流式**转交的，不会整包进内存；声明了超限的 `Content-Length` 会在读取前就被拒绝 |
 | `HIDE_WEB_VAULT` | 关闭 | W/F/N | 设为 `1` 时只提供 API，不提供网页版 |
 | `DIST_DIR` | `<repo>/dist` | F/N | 前端静态文件目录 |
 | `REQUEST_TIMEOUT_MS` | `300000` | N | Node HTTP 服务端请求超时 |
@@ -432,6 +446,8 @@ npm run start:node               # 默认 http://localhost:8787
 | `DB_SSL_CA` | — | F/N | 私有 CA 的 PEM 路径（比关校验更安全）；EdgeOne 无持久文件，不可用 |
 | `DB_CONN_LIMIT` | `5` | F/E/N | 连接池上限；函数环境别调大 |
 | `DB_HOST_ALLOWLIST` | 空 | 全部 | 逗号分隔的域名/IP/CIDR 白名单。后台「测试连接」默认**拒绝内网地址**，自建库在内网时必须填 |
+| `BACKUP_ENDPOINT_ALLOWLIST` | 空 | 全部 | 同上，但作用于**备份目的地**。自建 MinIO 在 `127.0.0.1` / 内网 NAS 上时填它，否则备份目标会以「host is not allowed」被拒 |
+| `S3_REQUEST_TIMEOUT_MS` | `120000` | 全部 | 单次 S3 请求超时；每个请求最多重试 3 次（429/5xx/网络中断） |
 | `DB_CONFIG_KEY` | — | W/F/N | 后台保存配置的加密主密钥（AES-256-GCM）。不设就只能用环境变量 |
 | `DB_TIMEZONE` | `Z` | F/E/N | 时间戳本身是 epoch 毫秒，一般不用改 |
 
@@ -440,7 +456,7 @@ npm run start:node               # 默认 http://localhost:8787
 | 变量 / 绑定 | 默认 | 平台 | 说明 |
 |---|---|---|---|
 | `DATA_DIR` | `<repo>/data`（FC 包 `/tmp/nodewarden`） | F/N | 数据目录：后台保存的配置、节点同步记录、写入水位、本地 KV 文件。**必须指向持久盘**才能跨重启/缩容保留 |
-| `ATTACHMENTS_DIR` | `${DATA_DIR}/attachments` | F/N | 附件与 Send 文件的实际落盘目录。想单独挂一块盘时设 |
+| `ATTACHMENTS_DIR` | `${DATA_DIR}/attachments` | F/N | 附件与 Send 文件的实际落盘目录。想单独挂一块盘时设。指向**非默认位置**时启动会检查它是不是独立挂载点，结果写进日志与 `/healthz` 的 `attachments` 字段 |
 | `ATTACHMENTS`（R2 绑定） | — | W | 附件存储，R2 模式必需 |
 | `SETTINGS_KV`（KV 绑定） | — | W | 配置存储，优先级最高 |
 | `ATTACHMENTS_KV`（KV 绑定） | — | W | KV 模式的附件存储；恢复 KV 模式备份时必需 |
@@ -483,12 +499,14 @@ npm run start:node               # 默认 http://localhost:8787
 
 ```bash
 curl -s https://<你的地址>/healthz
-# 期望：{"ok":true,"db":"up","mode":"mysql","source":"env","runtime":"node"}
+# 期望：{"ok":true,"db":"up","mode":"mysql","source":"env","runtime":"node","attachments":"ok"}
 # Workers 上 mode 可能是 d1；db:down 时先看 5.2 的 TLS 与白名单两项
+# attachments 不是 ok（missing / not-mounted / unwritable）= 附件盘有问题，先修它再上线
 ```
 
 - [ ] `/admin/database` 直接刷新能打开（不是整页 404，也不是白屏）
 - [ ] 能注册管理员、网页端登录、保存并同步一条密码
+- [ ] `/healthz` 里 `attachments` 是 `ok`（设了 `ATTACHMENTS_DIR` 时尤其要确认）
 - [ ] 上传一个附件 → **重启实例/等缩容** → 同一个附件还能下载（这一步才证明存储挂载生效）
 - [ ] 后台改一次数据库设置 → 重启 → 设置还在（证明 `DATA_DIR` 持久）
 - [ ] `MAX_BODY_MB` 不超过平台上限（EdgeOne 6 MB）

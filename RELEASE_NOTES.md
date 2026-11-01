@@ -21,6 +21,70 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.5 - Correct S3 Signatures and a Verified Attachment Disk
+
+### Added
+
+1. **A startup check that the attachment disk is really a disk.** Pointing `ATTACHMENTS_DIR` at a directory that exists but is not a mount (or is not writable) used to accept uploads onto the container's own disk, which are then lost when the instance is recycled — silently, with no error anywhere. It is now checked once at boot, logged at error level with what to do about it, and reported by `/healthz` as `attachments`: `ok`, `missing`, `not-mounted` or `unwritable`. The check only runs when the directory was moved away from the default, so nobody who left it alone pays for it. Commit: [1fa4e61](https://github.com/muzhi621/NodeWarden_fceo/commit/1fa4e61140a0d2561d5e94b3a99fc3c744cea755).
+
+1. **`BACKUP_ENDPOINT_ALLOWLIST`, so self-hosted object storage can be used at all.** The strict SSRF policy rejected every backup endpoint that was not a public address, which ruled out a MinIO on `127.0.0.1` or a NAS on a private range — the two most common self-hosted targets. The variable accepts exact hosts, `*.suffix` wildcards and IPv4 CIDR blocks, and is unset by default: nothing loosens unless you list it, and cloud metadata and link-local addresses stay blocked either way. Commit: [e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b).
+
+1. **An S3 test server that verifies SigV4 with its own implementation.** `scripts/s3-test-server.ts` re-derives the signature independently of the code under test, so canonicalisation bugs fail the suite instead of passing through a mock that agrees with whatever the client sent. Ten cases cover round trips, spaces and non-ASCII keys, continuation tokens, sub-prefixes, retention, error detail and addressing styles. Commit: [e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b).
+
+### Improved
+
+1. **Uploads no longer sit in memory.** The Node runtime used to read the whole request into a buffer before the pipeline saw a byte, so a single 100 MB attachment pinned 100 MB of the instance on top of whatever the storage layer then used. The socket is handed over as a stream and piped straight to the file. The size ceiling moved into the body pipeline: a declared `Content-Length` over `MAX_BODY_MB` is refused before anything is read, and a chunked upload that grows past it is cut off mid-stream with 413. Commit: [1fa4e61](https://github.com/muzhi621/NodeWarden_fceo/commit/1fa4e61140a0d2561d5e94b3a99fc3c744cea755).
+
+1. **Backup requests now explain themselves, time out, and retry.** A failing upload used to come back as a bare status code. The provider's own `<Code>` and `<Message>` are now surfaced, so a 403 tells you whether the problem is the keys, the region or the addressing style. Requests carry a timeout (`S3_REQUEST_TIMEOUT_MS`, 120 s by default), and 429, 5xx and network failures are retried up to three times with the response body cancelled first. Commit: [e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b).
+
+1. **OSS is told up front that it only speaks virtual-hosted-style.** Aliyun OSS rejects path-style requests, and the normalisation default was path-style, so the operator got an unexplained 403 on every request. The combination is now refused before anything is sent, with a message naming the setting to change, and the addressing table in the docs says the same thing. Commit: [e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b).
+
+### Fixed
+
+1. **S3 signatures failed on any path containing a space or non-ASCII characters.** The canonical query string was built with `URLSearchParams`, which encodes a space as `+`, while the signature covered `%20` — so an upload prefix like `我的 备份` produced `SignatureDoesNotMatch` every single time. The canonical string is now built from the raw query with RFC 3986 encoding. Keys and headers are also sorted by code point rather than `localeCompare`, whose ICU collation orders punctuation differently from AWS and broke the signature for some parameter combinations only. Commit: [e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b).
+
+1. **Half-written attachments were served as valid files.** An upload interrupted mid-write left a short file with either no metadata or metadata written afterwards, and a self-consistent length, so the download looked fine and the attachment was silently truncated. The sidecar is now written first with an `incomplete` marker and rewritten with the byte count that was counted while streaming; an interrupted upload is never served. Files restored by copying (no sidecar) are still readable, so existing data does not disappear. Commits: [e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b), [1fa4e61](https://github.com/muzhi621/NodeWarden_fceo/commit/1fa4e61140a0d2561d5e94b3a99fc3c744cea755).
+
+1. **A broken mount looked like deleted files.** Only `ENOENT` and `ENOTDIR` mean "no such attachment" now; `EIO`, `ETIMEDOUT`, `EACCES` and `ENOTCONN` are rethrown, so a dropped FUSE mount answers 5xx instead of telling every client that their files were deleted. Commit: [e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b).
+
+1. **Object keys containing `&` or `<` were listed under names that could not be downloaded.** ListObjectsV2 was parsed with a tag-based XML reader, so an unescaped metacharacter truncated the key on read: the file appeared in the backup list under a wrong name and could neither be downloaded nor deleted. Listing now requests `encoding-type=url` and percent-decodes the result. Commit: [1fa4e61](https://github.com/muzhi621/NodeWarden_fceo/commit/1fa4e61140a0d2561d5e94b3a99fc3c744cea755).
+
+1. **Four EdgeOne smoke assertions had been red on `main` since round six.** The no-database gate has answered 503 with an operator-facing message since then, but the smoke script still expected 500. The assertions now accept the documented behaviour, and `test:edgeone` is 21/21 again. Commit: [e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b).
+
+---
+
+# v1.8.5 - 修正 S3 签名，并让附件盘能自证
+
+### 新增
+
+1. **启动时确认附件盘真的是块盘。** 过去把 `ATTACHMENTS_DIR` 指到一个「目录存在、但其实没挂上」的位置，上传会照常成功——文件落在容器自己的盘上，实例回收即消失，而且哪里都不报错。现在启动时检查一次：能不能写、是不是独立挂载点；结果按 error 级别记一条日志（写明该怎么办），并在 `/healthz` 的 `attachments` 字段报告 `ok` / `missing` / `not-mounted` / `unwritable`。该检查只在目录被改成非默认值时才跑，没动过这个变量的人不受影响。提交：[1fa4e61](https://github.com/muzhi621/NodeWarden_fceo/commit/1fa4e61140a0d2561d5e94b3a99fc3c744cea755)。
+
+1. **`BACKUP_ENDPOINT_ALLOWLIST`，让自建对象存储真正能用。** 严格 SSRF 策略会拒绝一切非公网地址，于是 `127.0.0.1` 上的 MinIO、内网段的 NAS 这两类最常见的自建目标根本配不上。该变量支持精确主机名、`*.后缀` 通配和 IPv4 CIDR，默认不设——你不写就什么都不放开，云元数据地址与 link-local 始终保持拦截。提交：[e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b)。
+
+1. **一个自己验签的 S3 测试服务器。** `scripts/s3-test-server.ts` 独立实现 SigV4 校验，不与被测代码共用一份逻辑，签名规范化写错时测试会红，而不是被一个「客户端发什么就认什么」的桩糊过去。10 个用例覆盖往返读写、空格与非 ASCII 键、续页令牌、子前缀、保留策略、错误详情和地址样式。提交：[e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b)。
+
+### 改进
+
+1. **上传不再整包进内存。** 过去 Node 运行时会把整个请求先读成 Buffer，管线才拿到第一个字节，一个 100 MB 的附件就额外占住 100 MB 实例内存，之后存储层还要再占一份。现在 socket 直接交给流处理，一路管道写进文件。大小上限移到请求体管线里：`Content-Length` 声明的长度超过 `MAX_BODY_MB` 会在读取前就被拒，分块上传涨过上限则在传输中途截断并返回 413。提交：[1fa4e61](https://github.com/muzhi621/NodeWarden_fceo/commit/1fa4e61140a0d2561d5e94b3a99fc3c744cea755)。
+
+1. **备份出错会说话了，也会超时和重试。** 上传失败过去只回一个状态码。现在把服务商自己的 `<Code>` 和 `<Message>` 透出来，403 能直接看出是密钥、区域还是地址样式的问题。请求带超时（`S3_REQUEST_TIMEOUT_MS`，默认 120 秒），429、5xx 与网络故障最多重试三次，重试前先取消响应体。提交：[e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b)。
+
+1. **阿里云 OSS 只支持 virtual-hosted-style，现在会提前拦住。** OSS 不接受 path-style 请求，而配置归一化的默认值恰好是 path-style，于是每个请求都吃一个没有解释的 403。这个组合现在在发请求之前就被拒绝，并提示该改哪个设置，文档里的地址样式对照表也一并改正。提交：[e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b)。
+
+### 修复
+
+1. **路径里带空格或中文时，S3 签名必然失败。** 规范查询串用 `URLSearchParams` 生成，它把空格编成 `+`，而签名覆盖的是 `%20`，所以像 `我的 备份` 这样的上传前缀每次都会 `SignatureDoesNotMatch`。现在按原始查询串手工做 RFC 3986 编码。键与请求头的排序也改成按码点，不再用 `localeCompare`——它的 ICU 排序对符号的处理与 AWS 不同，只会在某些参数组合下偶发失败。提交：[e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b)。
+
+1. **写了一半的附件会被当成正常文件下载。** 上传中途断掉会留下一个短文件，元数据要么没有、要么事后才写，长度自洽，于是下载看起来成功，附件其实被截断。现在先写带 `incomplete` 标记的元数据，上传过程中边写边数字节，完成后再改写成真实长度；中断的上传永远不会被提供下载。用拷贝方式恢复、没有元数据的文件仍然可读，已有数据不会集体消失。提交：[e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b)、[1fa4e61](https://github.com/muzhi621/NodeWarden_fceo/commit/1fa4e61140a0d2561d5e94b3a99fc3c744cea755)。
+
+1. **挂载坏掉不再被当成「文件被删了」。** 现在只有 `ENOENT` 和 `ENOTDIR` 代表「没有这个附件」，`EIO`、`ETIMEDOUT`、`EACCES`、`ENOTCONN` 一律抛出去，FUSE 掉线时返回 5xx，而不是告诉每个客户端他们的文件已被删除。提交：[e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b)。
+
+1. **对象键里含 `&` 或 `<` 时，列表显示的名字下载不到。** ListObjectsV2 原先用标签式 XML 解析，未转义的元字符会在读取时把键截断：文件以错误的名字出现在备份列表里，既下不下来也删不掉。列表现在请求 `encoding-type=url` 并对结果做百分号解码。提交：[1fa4e61](https://github.com/muzhi621/NodeWarden_fceo/commit/1fa4e61140a0d2561d5e94b3a99fc3c744cea755)。
+
+1. **EdgeOne 有 4 条冒烟断言从第六轮起在 `main` 上就是红的。** 无数据库时接口早已改为返回 503 并带运维提示，冒烟脚本却仍在断言 500。断言已改为接受文档化的行为，`test:edgeone` 恢复 21/21。提交：[e5a4365](https://github.com/muzhi621/NodeWarden_fceo/commit/e5a4365eae830d165d1df0b4d7740c503128310b)。
+
+---
+
 # v1.8.4 - Trustworthy Failover, Explicit Switchover, and a Complete Deployment Guide
 
 ### Added
