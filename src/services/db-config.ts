@@ -88,6 +88,15 @@ export type DbRuntimeConfig = DbRuntimeConfigV2;
 /** One resolved node, flattened with the config source for display. */
 export interface ResolvedDbNode extends DbNodeConfig {
   source: 'env' | 'runtime';
+  /** Persisted sync bookkeeping (write-through replicas). */
+  syncStatus?: DbNodeSyncState;
+  /**
+   * Whether this node may be used at all. `false` means a write-through replica
+   * that has never completed a sync — it is kept out of rotation instead of
+   * taking over as an empty database. `undefined` means "not applicable"
+   * (primary, native replication, env-only config).
+   */
+  syncReady?: boolean;
 }
 
 export interface ResolvedDbCluster {
@@ -110,6 +119,10 @@ export interface MaskedDbNode {
   ssl: boolean;
   connectionLimit: number;
   passwordSet: boolean;
+  /** Last sync run for this node, when one is recorded. */
+  syncStatus?: DbNodeSyncState;
+  /** False: a write-through replica that has never completed a sync. */
+  syncReady?: boolean;
 }
 
 export interface MaskedDbCluster {
@@ -149,6 +162,41 @@ export interface MaskedDbConfig {
 
 const CONFIG_OBJECT_KEY = '__system__/db-config.json';
 const CONFIG_KV_KEY = 'db-config:v1';
+
+/**
+ * Per-node sync bookkeeping lives in its own object: it is written by the sync
+ * endpoint, has no secrets, and must survive a process restart — a standby that
+ * was synced once stays usable, and one that never was stays out of rotation
+ * (B-4: "can this node take over?" has to be an answerable question).
+ */
+const SYNC_STATUS_OBJECT_KEY = '__system__/db-sync-status.json';
+const SYNC_STATUS_KV_KEY = 'db-sync-status:v1';
+
+interface StoreKeys {
+  kv: string;
+  object: string;
+}
+
+const CONFIG_KEYS: StoreKeys = { kv: CONFIG_KV_KEY, object: CONFIG_OBJECT_KEY };
+const SYNC_STATUS_KEYS: StoreKeys = { kv: SYNC_STATUS_KV_KEY, object: SYNC_STATUS_OBJECT_KEY };
+
+/** What the admin page needs to answer "is this standby ready?". */
+export interface DbNodeSyncState {
+  /** When the last sync run finished. */
+  at: number;
+  /** Walked every table to the end and the row counts matched. */
+  complete: boolean;
+  /** Hit a row cap / the time budget: more runs are needed. */
+  truncated: boolean;
+  rowsWritten: number;
+  tables: number;
+  /** Node the rows were copied from (cursors are only valid for that source). */
+  sourceId?: string;
+  /** Resume positions for the tables that were cut short (B-3). */
+  cursors?: Record<string, Array<string | number | boolean | null>>;
+}
+
+export type DbSyncStates = Record<string, DbNodeSyncState>;
 
 /**
  * Safe defaults. `native` is deliberate: two nodes configured against a real
@@ -260,50 +308,57 @@ async function decryptJson(env: Env, payload: string): Promise<unknown | null> {
   }
 }
 
-async function readStoredPayload(env: Env): Promise<string | null> {
+async function readStoredText(env: Env, keys: StoreKeys): Promise<string | null> {
   const store = getConfigStore(env);
   if (store === 'kv') {
-    return await asKvLike(env.SETTINGS_KV)!.get(CONFIG_KV_KEY);
+    return await asKvLike(env.SETTINGS_KV)!.get(keys.kv);
   }
   if (store === 'attachment-kv') {
-    return await asKvLike(env.ATTACHMENTS_KV)!.get(CONFIG_KV_KEY);
+    return await asKvLike(env.ATTACHMENTS_KV)!.get(keys.kv);
   }
   if (store === 'r2') {
-    const object = await env.ATTACHMENTS!.get(CONFIG_OBJECT_KEY);
+    const object = await env.ATTACHMENTS!.get(keys.object);
     if (!object) return null;
-    const text = await new Response(object.body as ReadableStream).text();
-    return text;
+    return await new Response(object.body as ReadableStream).text();
   }
   return null;
 }
 
-async function writeStoredPayload(env: Env, payload: string | null): Promise<boolean> {
+async function writeStoredText(env: Env, keys: StoreKeys, payload: string | null): Promise<boolean> {
   const store = getConfigStore(env);
   if (!store) return false;
   if (store === 'kv') {
     const kv = asKvLike(env.SETTINGS_KV)!;
-    if (payload) await kv.put(CONFIG_KV_KEY, payload);
-    else await kv.delete(CONFIG_KV_KEY);
+    if (payload) await kv.put(keys.kv, payload);
+    else await kv.delete(keys.kv);
     return true;
   }
   if (store === 'attachment-kv') {
     const kv = asKvLike(env.ATTACHMENTS_KV)!;
-    if (payload) await kv.put(CONFIG_KV_KEY, payload);
-    else await kv.delete(CONFIG_KV_KEY);
+    if (payload) await kv.put(keys.kv, payload);
+    else await kv.delete(keys.kv);
     return true;
   }
   if (store === 'r2') {
     if (payload) {
-      await env.ATTACHMENTS!.put(CONFIG_OBJECT_KEY, payload, {
+      await env.ATTACHMENTS!.put(keys.object, payload, {
         httpMetadata: { contentType: 'application/json' },
-        customMetadata: { purpose: 'db-config' },
+        customMetadata: { purpose: keys === SYNC_STATUS_KEYS ? 'db-sync-status' : 'db-config' },
       });
     } else {
-      await env.ATTACHMENTS!.delete(CONFIG_OBJECT_KEY);
+      await env.ATTACHMENTS!.delete(keys.object);
     }
     return true;
   }
   return false;
+}
+
+async function readStoredPayload(env: Env): Promise<string | null> {
+  return readStoredText(env, CONFIG_KEYS);
+}
+
+async function writeStoredPayload(env: Env, payload: string | null): Promise<boolean> {
+  return writeStoredText(env, CONFIG_KEYS, payload);
 }
 
 // Reading the stored payload costs a KV/R2 round trip + an AES-GCM decrypt, and
@@ -345,6 +400,85 @@ async function readStoredPayloadCached(env: Env): Promise<string | null> {
   const payload = await readStoredPayload(env);
   if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: now });
   return payload;
+}
+
+// Sync bookkeeping is read on every request (the cluster needs it to decide
+// whether a standby may take over), so it is cached separately with a shorter
+// TTL: a sync pressed in the admin page must show up almost immediately.
+const SYNC_CACHE_TTL_MS = 5_000;
+const syncCache = new WeakMap<object, { epoch: number; at: number; value: DbSyncStates }>();
+
+function normalizeSyncState(raw: unknown): DbNodeSyncState | null {
+  const input = asRecord(raw);
+  if (!input) return null;
+  const at = Number(input.at ?? 0);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  const cursors = asRecord(input.cursors);
+  const normalizedCursors: Record<string, Array<string | number | boolean | null>> = {};
+  if (cursors) {
+    for (const [table, cursor] of Object.entries(cursors)) {
+      if (!Array.isArray(cursor)) continue;
+      const values = cursor.filter(
+        (value): value is string | number | boolean | null =>
+          value === null || ['string', 'number', 'boolean'].includes(typeof value)
+      );
+      if (values.length === cursor.length && values.length > 0) normalizedCursors[table] = values;
+    }
+  }
+  return {
+    at,
+    complete: input.complete === true,
+    truncated: input.truncated === true,
+    rowsWritten: Number(input.rowsWritten ?? 0) || 0,
+    tables: Number(input.tables ?? 0) || 0,
+    sourceId: typeof input.sourceId === 'string' && input.sourceId ? input.sourceId : undefined,
+    cursors: Object.keys(normalizedCursors).length > 0 ? normalizedCursors : undefined,
+  };
+}
+
+export async function readSyncStates(env: Env): Promise<DbSyncStates> {
+  const ref = cacheStoreRef(env);
+  const now = Date.now();
+  if (ref) {
+    const hit = syncCache.get(ref);
+    if (hit && hit.epoch === cacheEpoch && now - hit.at < SYNC_CACHE_TTL_MS) return hit.value;
+  }
+  const raw = await readStoredText(env, SYNC_STATUS_KEYS).catch(() => null);
+  const states: DbSyncStates = {};
+  if (raw) {
+    try {
+      const parsed = asRecord(JSON.parse(raw));
+      if (parsed) {
+        for (const [id, value] of Object.entries(parsed)) {
+          const state = normalizeSyncState(value);
+          if (state) states[id] = state;
+        }
+      }
+    } catch {
+      // A corrupt status blob must not break database resolution: an unreadable
+      // record simply means "no node is known to be synced".
+      console.warn('[db-config] sync status payload is not valid JSON; ignoring it');
+    }
+  }
+  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: now, value: states });
+  return states;
+}
+
+/** Record the outcome of a sync run for one node. */
+export async function saveNodeSyncState(env: Env, nodeId: string, state: DbNodeSyncState): Promise<boolean> {
+  const current = await readSyncStates(env);
+  const next: DbSyncStates = { ...current, [nodeId]: state };
+  const saved = await writeStoredText(env, SYNC_STATUS_KEYS, JSON.stringify(next));
+  const ref = cacheStoreRef(env);
+  if (saved && ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: next });
+  return saved;
+}
+
+/** Drop every node's sync record (used when the cluster config is cleared). */
+export async function clearSyncStates(env: Env): Promise<void> {
+  await writeStoredText(env, SYNC_STATUS_KEYS, null).catch(() => false);
+  const ref = cacheStoreRef(env);
+  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: {} });
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -524,10 +658,23 @@ export function resolveDbConfigFromEnv(env: Env): ResolvedDbConfig | null {
   };
 }
 
-function toResolvedNodes(config: DbRuntimeConfigV2): ResolvedDbNode[] {
+function toResolvedNodes(config: DbRuntimeConfigV2, syncStates: DbSyncStates): ResolvedDbNode[] {
+  const writeThrough = config.policy.syncMode === 'write-through';
   return config.nodes
     .filter((node) => node.enabled)
-    .map((node) => ({ ...node, source: 'runtime' as const }))
+    .map((node) => {
+      const syncStatus = syncStates[node.id];
+      return {
+        ...node,
+        source: 'runtime' as const,
+        syncStatus,
+        // In native mode the database replicates itself: whether a standby is
+        // filled is not something the app can judge. In write-through it is, and
+        // a replica that never completed a sync must not become a failover
+        // target (B-4).
+        syncReady: node.role === 'primary' || !writeThrough ? undefined : syncStatus?.complete === true,
+      };
+    })
     .sort((a, b) => {
       // Primary first, then the configured failover order.
       if (a.role !== b.role) return a.role === 'primary' ? -1 : 1;
@@ -564,7 +711,8 @@ export async function resolveDbCluster(env: Env): Promise<ResolvedDbCluster> {
 
   const runtime = await loadRuntimeConfig(env);
   if (runtime) {
-    const nodes = toResolvedNodes(runtime);
+    const syncStates = runtime.policy.syncMode === 'write-through' ? await readSyncStates(env) : {};
+    const nodes = toResolvedNodes(runtime, syncStates);
     if (nodes.length > 0) {
       return { mode: 'mysql', source: 'runtime', nodes, policy: runtime.policy };
     }
@@ -608,7 +756,7 @@ export async function resolveDbConfig(env: Env): Promise<ResolvedDbConfig> {
   };
 }
 
-export function maskNode(node: DbNodeConfig): MaskedDbNode {
+export function maskNode(node: DbNodeConfig & { syncStatus?: DbNodeSyncState; syncReady?: boolean }): MaskedDbNode {
   return {
     id: node.id,
     label: node.label,
@@ -622,6 +770,8 @@ export function maskNode(node: DbNodeConfig): MaskedDbNode {
     ssl: node.ssl,
     connectionLimit: node.connectionLimit,
     passwordSet: !!node.password,
+    syncStatus: node.syncStatus,
+    syncReady: node.syncReady,
   };
 }
 

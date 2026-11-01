@@ -60,6 +60,8 @@ function toSpecs(cluster: ResolvedDbCluster): ClusterNodeSpec[] {
     ssl: node.ssl,
     connectionLimit: node.connectionLimit,
     connectTimeoutMs: 10_000,
+    // Keeps an unsynced standby out of rotation (see ClusterNodeSpec).
+    syncReady: node.syncReady,
   }));
 }
 
@@ -143,8 +145,14 @@ export async function getDatabaseStatus(env: Env): Promise<DatabaseStatus> {
       const row = await db.prepare('SELECT VERSION() AS version').first<{ version: string }>();
       const nodes = (db as unknown as { nodeHealth?: () => NodeHealthSnapshot[] }).nodeHealth?.();
       // A replica that cannot keep up with replayed writes is not a reason to
-      // report the whole database as down — but it must be visible.
-      const degraded = !!nodes?.some((node) => node.role !== 'primary' && node.syncErrors > 0);
+      // report the whole database as down — but it must be visible. A node that
+      // is behind on the write watermark counts too: it will answer with stale
+      // rows and cannot take over until it is caught up or re-synced.
+      const degraded = !!nodes?.some(
+        (node) =>
+          node.role !== 'primary' &&
+          (node.syncErrors > 0 || node.needsFullSync || node.lag > 0 || node.syncReady === false)
+      );
       const status: DatabaseStatus = {
         mode: 'mysql',
         source: cluster.source,

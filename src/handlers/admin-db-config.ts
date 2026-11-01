@@ -28,9 +28,13 @@ import {
   resolveDbConfig,
   resolveDbConfigFromEnv,
   saveRuntimeConfig,
+  readSyncStates,
+  saveNodeSyncState,
+  clearSyncStates,
   type DbClusterPolicy,
   type DbNodeConfig,
   type DbRuntimeConfigV2,
+  type DbSyncStates,
 } from '../services/db-config';
 import { resetDatabaseCache, getDatabase, peekClusterHealth } from '../services/storage-factory';
 import { isMySqlClusterDatabase } from '../services/db-cluster';
@@ -624,6 +628,8 @@ export async function handleAdminSaveDbConfig(request: Request, env: Env, actorU
     // Drop a possibly latched dbInitError with the config: the next request
     // re-resolves from env/D1 and must not inherit the old failure (C-1).
     resetDbLifecycle();
+    // Sync records describe nodes that no longer exist.
+    await clearSyncStates(env);
     await auditDbConfigChange(env, actorUser, 'admin.db_config.cleared', null);
     return jsonResponse({ ok: true, mode: 'd1', effective: true });
   }
@@ -716,24 +722,41 @@ export async function handleAdminSaveDbConfig(request: Request, env: Env, actorU
   const envOverride = !!resolveDbConfigFromEnv(env);
   await auditDbConfigChange(env, actorUser, 'admin.db_config.saved', cluster);
 
+  // A write-through replica that never completed a sync is not a failover
+  // target (B-4). Saying so here is the only chance to warn *before* the day it
+  // matters; the standalone sync panel would never be opened otherwise.
+  let syncPending: string[] = [];
+  if (cluster.policy.syncMode === 'write-through') {
+    const states = await readSyncStates(env);
+    syncPending = cluster.nodes
+      .filter((node) => node.enabled && node.role === 'replica' && states[node.id]?.complete !== true)
+      .map((node) => node.id);
+  }
+  const syncWarning =
+    syncPending.length > 0
+      ? `${syncPending.length} 个副库尚未完成同步，故障切换前请先点「同步数据到副库」，否则接管时会缺少历史数据。`
+      : undefined;
+  const warning = [envOverride ? 'DB_* 环境变量优先于运行时配置：配置已保存，但当前生效的仍是环境变量指向的数据库。' : null,
+    schemaError ? `配置已保存，但建表失败：${schemaError}` : null,
+    syncWarning]
+    .filter((entry): entry is string => !!entry)
+    .join(' ');
+
   return jsonResponse({
     ok: true,
     mode: 'mysql',
     saved: true,
     effective: !envOverride && schemaReady,
-    warning: envOverride
-      ? 'DB_* 环境变量优先于运行时配置：配置已保存，但当前生效的仍是环境变量指向的数据库。'
-      : schemaError
-        ? `配置已保存，但建表失败：${schemaError}`
-        : undefined,
+    warning: warning || undefined,
     schemaReady,
+    syncPending: syncPending.length > 0 ? syncPending : undefined,
     latencyMs: Math.max(...probes.map((result) => result.latencyMs), 0),
     version: probes.find((result) => result.role === 'primary')?.version,
     nodes: probes,
     cluster: maskCluster({
       mode: 'mysql',
       source: 'runtime',
-      nodes: cluster.nodes.map((node) => ({ ...node, source: 'runtime' as const })),
+      nodes: cluster.nodes.map((node) => ({ ...node, source: 'runtime' as const, syncStatus: undefined })),
       policy: cluster.policy,
     }),
   });
@@ -743,16 +766,22 @@ interface TargetSyncReport {
   id: string;
   label: string;
   ok: boolean;
+  /** Every table walked to the end and the row counts agreed. */
+  complete: boolean;
   rowsRead: number;
   rowsWritten: number;
   truncated: boolean;
   durationMs: number;
   tables: ClusterSyncResult['tables'];
+  /** Tables whose row count differs between source and target (S1). */
+  countsMismatch?: string[];
+  /** Rows present on the target but not on the source (S2). */
+  orphanRows?: number;
   error?: string;
 }
 
 /**
- * Copy the primary's existing rows onto the standby nodes.
+ * Copy rows from one node onto the others (backfill / repair).
  *
  * Write-through replication starts at the moment the cluster is configured, so
  * a node added to a deployment that already holds data would come up empty and
@@ -762,10 +791,22 @@ interface TargetSyncReport {
  *
  * Only meaningful for `write-through`: a native MySQL replica is read-only and
  * already filled by the server, so writing to it would just fail.
+ *
+ * `sourceId` picks the node the rows are read *from*. It defaults to the
+ * primary, which is wrong the moment a failover happened: the standby then holds
+ * writes the primary never saw, and copying primary → standby would rewrite the
+ * newer rows with older ones (B-2). Callers can point the copy at the node that
+ * actually received the writes, and the default `merge` mode never overwrites an
+ * existing row at all.
  */
 export async function handleAdminSyncDbCluster(request: Request, env: Env, actorUser: User): Promise<Response> {
   const body = await readJsonBody(request);
   const requested = Array.isArray(body.targetIds) ? body.targetIds.map((id) => String(id)) : null;
+  const requestedSource = typeof body.sourceId === 'string' && body.sourceId.trim() ? body.sourceId.trim() : null;
+  // 'merge' (default) only inserts missing rows; 'overwrite' is the explicit
+  // repair path that replaces existing values.
+  const mode = body.mode === 'overwrite' ? 'overwrite' : 'merge';
+  const forced = wantsForce(request) || body.force === true;
 
   const cluster = await resolveDbCluster(env);
   if (cluster.mode !== 'mysql' || cluster.nodes.length === 0) {
@@ -786,18 +827,49 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
 
   const handles = db.nodeDatabases();
   const primaryId = primaryNodeOf(cluster)?.id;
-  const primary = handles.find((node) => node.id === primaryId) ?? handles[0];
-  if (!primary) return errorResponse('找不到主库节点。', 400);
+  const primaryHandle = handles.find((node) => node.id === primaryId) ?? handles[0];
+  if (!primaryHandle) return errorResponse('找不到主库节点。', 400);
 
-  const targets = handles.filter(
-    (node) => node.id !== primary.id && (!requested || requested.includes(node.id))
-  );
-  if (targets.length === 0) {
-    return errorResponse('没有可同步的副库节点（请先添加并启用副库）。', 400);
+  const sourceId = requestedSource ?? primaryHandle.id;
+  const source = handles.find((node) => node.id === sourceId);
+  if (!source) {
+    return errorResponse(`未知的同步源节点：${sourceId}`, 400);
+  }
+  const sourceSpec = cluster.nodes.find((node) => node.id === source.id);
+  if (sourceSpec && sourceSpec.enabled === false) {
+    return errorResponse(`同步源节点「${sourceSpec.label}」已停用。`, 400);
   }
 
+  const targets = handles.filter(
+    (node) => node.id !== source.id && (!requested || requested.includes(node.id))
+  );
+  if (targets.length === 0) {
+    return errorResponse('没有可同步的目标节点（源节点不能同时作为目标，请先添加并启用副库）。', 400);
+  }
+
+  // Writing "backwards" (from a node that missed writes into the one that has
+  // them) is the destructive case. In `merge` mode an existing row is never
+  // touched, so it cannot lose data; `overwrite` can, hence the guard.
+  const watermarks = db.writeWatermarks();
+  const appliedOf = (id: string) => watermarks.nodes.find((node) => node.id === id)?.appliedSeq ?? 0;
+  const sourceSeq = appliedOf(source.id);
+  if (mode === 'overwrite' && !forced) {
+    const newer = targets.find((target) => appliedOf(target.id) > sourceSeq);
+    if (newer) {
+      const newerLabel = cluster.nodes.find((node) => node.id === newer.id)?.label ?? newer.id;
+      const sourceLabel = sourceSpec?.label ?? source.id;
+      return errorResponse(
+        `目标节点「${newerLabel}」比源节点「${sourceLabel}」更新：它已经接收了源节点没有的写入。` +
+          '用「覆盖已有行」会把较新的数据改回旧值。请改用默认的「只补缺失行」，' +
+          '或把同步源改成「' + newerLabel + '」，确认无误后再加 ?force=1 强制覆盖。',
+        409
+      );
+    }
+  }
+
+  const storedStates = await readSyncStates(env);
   // Sequential, with a shared budget: parallel copies would multiply the load on
-  // the primary and could push the request past the platform timeout.
+  // the source and could push the request past the platform timeout.
   const deadline = Date.now() + 90_000;
   const reports: TargetSyncReport[] = [];
   for (const target of targets) {
@@ -808,6 +880,7 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
         id: target.id,
         label: spec?.label ?? target.id,
         ok: false,
+        complete: false,
         rowsRead: 0,
         rowsWritten: 0,
         truncated: false,
@@ -817,16 +890,49 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       });
       continue;
     }
-    const result = await syncDatabase(primary.db, target.db, { maxDurationMs: Math.min(45_000, remaining) });
+
+    // Resume only when the previous run copied from the same source: a cursor is
+    // a position in *that* node's key space.
+    const previous = storedStates[target.id];
+    const cursors = previous && previous.sourceId === source.id ? previous.cursors : undefined;
+    const result = await syncDatabase(source.db, target.db, {
+      maxDurationMs: Math.min(45_000, remaining),
+      deadline,
+      mode,
+      cursors,
+    });
+
+    const complete = result.ok && result.complete;
+    const countsMismatch = result.tables
+      .filter((table) => table.countMatches === false)
+      .map((table) => table.table);
+    const orphanRows = result.tables.reduce((sum, table) => sum + (table.orphanRows ?? 0), 0);
+
+    // Persist the outcome so "is this standby ready?" survives a restart and can
+    // be shown before the next failover (B-4).
+    await saveNodeSyncState(env, target.id, {
+      at: Date.now(),
+      complete,
+      truncated: result.truncated,
+      rowsWritten: result.rowsWritten,
+      tables: result.tables.length,
+      sourceId: source.id,
+      cursors: complete ? undefined : result.cursors,
+    });
+    if (complete) db.markNodeSynced(target.id);
+
     reports.push({
       id: target.id,
       label: spec?.label ?? target.id,
       ok: result.ok,
+      complete,
       rowsRead: result.rowsRead,
       rowsWritten: result.rowsWritten,
       truncated: result.truncated,
       durationMs: result.durationMs,
       tables: result.tables,
+      countsMismatch: countsMismatch.length > 0 ? countsMismatch : undefined,
+      orphanRows: orphanRows > 0 ? orphanRows : undefined,
     });
   }
 
@@ -841,6 +947,9 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
   return jsonResponse(
     {
       ok,
+      source: { id: source.id, label: sourceSpec?.label ?? source.id },
+      mode,
+      complete: reports.every((report) => report.complete),
       targets: reports,
       rowsWritten: reports.reduce((sum, report) => sum + report.rowsWritten, 0),
       truncated: reports.some((report) => report.truncated),
@@ -862,6 +971,7 @@ export async function handleAdminClearDbConfig(request: Request, env: Env, actor
   // Same as in the save path: a latched init error must not survive the
   // operator's "go back to D1/env" action (C-1).
   resetDbLifecycle();
+  await clearSyncStates(env);
   await auditDbConfigChange(env, actorUser, 'admin.db_config.cleared', null);
   return jsonResponse({ ok: true, mode: 'd1' });
 }

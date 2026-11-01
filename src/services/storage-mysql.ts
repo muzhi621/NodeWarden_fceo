@@ -124,8 +124,22 @@ const RETRYABLE_PRECONNECT_CODES = new Set([
  */
 const CON_CAP_RETRY_DELAY_MS = 200;
 
-/** Statements with no side effects — the only ones worth replaying after a reset. */
-const READ_ONLY_SQL = /^\s*(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i;
+/**
+ * Statements with no side effects.
+ *
+ * Shared with the cluster adapter (replica routing) on purpose: the two used to
+ * carry slightly different regexes, and a statement classified as read-only by
+ * one and as a write by the other is exactly how a write ends up on a read-only
+ * replica — or gets replayed after a lost connection.
+ *
+ * `WITH ...` is deliberately NOT treated as read-only: MySQL accepts
+ * `WITH ... UPDATE/DELETE`, so a CTE prefix proves nothing. The cost of being
+ * strict is that a CTE read is not retried after a reset and not sent to a
+ * replica; the cost of being loose is a duplicated write.
+ */
+export function isReadOnlySql(sql: string): boolean {
+  return /^\s*(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i.test(sql);
+}
 
 function isDdlStatement(sql: string): boolean {
   return /^\s*(CREATE|ALTER|DROP)\b/i.test(sql);
@@ -313,7 +327,7 @@ export class MySqlDatabase implements D1LikeDatabase {
       // are safe for anything.
       const retryable =
         RETRYABLE_PRECONNECT_CODES.has(code) ||
-        (RETRYABLE_CONN_CODES.has(code) && READ_ONLY_SQL.test(sql));
+        (RETRYABLE_CONN_CODES.has(code) && isReadOnlySql(sql));
       if (retryable) {
         // One retry after forcing a fresh pool.
         await this.close();

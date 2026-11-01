@@ -219,6 +219,15 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       console.warn('Request rejected: duplicate key', error instanceof Error ? error.message : error);
       return conflictResponse(conflictMessageFor(error));
     }
+    // Cluster-level availability problems have a message worth showing: "no node
+    // can take the write, sync first" is actionable, "Internal server error" is
+    // not. Same for a write whose outcome is unknown — retrying it blindly is
+    // how a row ends up inserted twice (C-2).
+    const clusterStatus = Number((error as { status?: number })?.status ?? 0);
+    if (clusterStatus === 503 && error instanceof Error) {
+      console.error('[db-cluster] request failed:', error.message);
+      return errorResponse(error.message, 503);
+    }
     console.error('Request error:', error);
     return errorResponse('Internal server error', 500);
   }
