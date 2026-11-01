@@ -92,7 +92,8 @@
 
 > 只设 `DATA_DIR` 就够了（`ATTACHMENTS_DIR` 默认是 `${DATA_DIR}/attachments`）。
 > **不要**把 `DATA_DIR` 指向代码目录——FC 代码目录只读。
-> OSS 不能当文件系统用（`ossfs` 对小文件一致性差）；要放对象存储请用应用内备份中心的 WebDAV/S3。
+> FC 没有 `/dev/fuse`，**不能**用 ossfs/cosfs 把 OSS/COS 挂成目录；对象存储请走应用内备份中心的 S3 兼容目标
+> （OSS/COS 的 endpoint、bucket、region 填法见 [DEPLOY.md 3.6.6](DEPLOY.md#366-serverless-上挂不了怎么办用备份中心把-oss-cos-当目标)）。
 
 ## 四、上传部署步骤
 1. FC 控制台 → 创建函数（**Web 函数**）。

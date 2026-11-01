@@ -165,6 +165,8 @@ npm run dev:kv
 > Node 运行时用 `DATA_DIR`（附件在同目录的 `attachments/` 下，可用 `ATTACHMENTS_DIR` 单独指定），
 > **FC 默认写在 `/tmp`，实例回收就丢，必须挂 NAS 并改这两个变量**；Workers 则用 R2 `ATTACHMENTS`
 > 与 KV `SETTINGS_KV` 绑定。EdgeOne Pages 没有持久盘（`DATA_DIR` 会被强制改写），只适合当入口。
+> 想把**阿里云 OSS / 腾讯云 COS** 挂成附件盘（仅 VPS/Docker 可行，FC 没有 FUSE 设备），
+> 见 [DEPLOY.md 3.6](DEPLOY.md#36-把阿里云-oss--腾讯云-cos-当附件盘fuse-挂载)；Serverless 上请改用备份中心的 S3 兼容目标。
 >
 > 与本家（上游）行为的三处差异，升级前务必知道：
 > - **TLS 默认校验证书**：自签库设 `DB_SSL_INSECURE=1`，更好的是把 `DB_SSL_CA` 指向 PEM；

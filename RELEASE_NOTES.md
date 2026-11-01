@@ -21,6 +21,66 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.4 - Trustworthy Failover, Explicit Switchover, and a Complete Deployment Guide
+
+### Added
+
+1. **Switch the writer explicitly, with three gates.** Standby cards in Admin → Database settings now have a "Switch to primary" button backed by `POST /api/admin/db-config/promote`. It verifies connectivity, then that the database itself reports writable (`@@GLOBAL.read_only` / `super_read_only`, so a read-only replica is refused instead of becoming a primary that rejects every write), then — in `write-through` mode — that the node completed a sync with no watermark lag. A refusal returns 409 and lists every unmet condition; `?force=1` overrides it and says what data will be missing. After a successful switch the roles swap, priorities are renumbered, and a demoted node that was level keeps a sync record so it can still serve reads or take over again. Commits: [176b9f9](https://github.com/muzhi621/NodeWarden_fceo/commit/176b9f9bc4ebc63220607e9fcd51e5d8034c0c72), [df8d80e](https://github.com/muzhi621/NodeWarden_fceo/commit/df8d80ea0ad591705e044b992c046a61b3c50308).
+
+1. **A consolidated deployment guide with the storage chapter that was missing.** New `DEPLOY.md` covers all four targets (Cloudflare Workers, EdgeOne Pages, Alibaba Cloud FC, self-hosted/Docker) in one place, including where attachments and admin-page settings actually live and what to set so they survive a restart: R2 `ATTACHMENTS` and KV `SETTINGS_KV` on Workers, a NAS mount plus `DATA_DIR` / `ATTACHMENTS_DIR` on FC, and a volume mount for Docker. It also documents the D1/R2 to Node migration step that nobody had written down — attachments do not travel with the database and must be copied by hand — plus mounting Alibaba Cloud OSS or Tencent COS as the attachment disk with ossfs, cosfs or rclone (self-hosted only; serverless has no FUSE device, so those deployments use the backup centre's S3-compatible target instead), a full environment-variable table and an acceptance checklist. Commits: [138a8c7](https://github.com/muzhi621/NodeWarden_fceo/commit/138a8c76a9e36893b8e416f7a366481d5d4be6e6), [8669772](https://github.com/muzhi621/NodeWarden_fceo/commit/866977213d543c1c515b4e272d19496b337ca787).
+
+### Improved
+
+1. **Access-control failures are now actionable instead of a crash.** A saved cluster config whose nodes are all disabled used to fall through to the D1 binding, which does not exist on the Node runtime, so every request died on `undefined.prepare`. It now returns 503 with a message naming how many nodes exist and what to do, visible both in `/healthz` and as a banner on the admin page. Raw driver errors still come back as a generic 500, so host names and credentials never leak. Commit: [2bfbf3a](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfbf3a124082b8b1d240a68cd4e3ec61df6d33e).
+
+1. **An unreachable standby no longer slows every request.** Schema initialisation against a standby that is down used to be retried on every single request with no backoff, so a perfectly healthy primary paid a connection timeout per request whenever a standby was offline. Failures now back off from 30 seconds, doubling to a five-minute cap, and reset on the first success. Commit: [243f998](https://github.com/muzhi621/NodeWarden_fceo/commit/243f9984b170755b2606a44f67fdc3783815af8e).
+
+1. **Sync results stopped overstating progress.** A merge sync re-sends the whole table on every run, and `FOUND_ROWS` makes "inserted" and "already there" both report one affected row, so the old row count said nothing about progress. The added-row count is now measured from the target's own `COUNT(*)` before and after, and the page reads "added N rows (M already existed, not overwritten)". Overwrite and truncated runs report no number rather than a misleading one. Commit: [176b9f9](https://github.com/muzhi621/NodeWarden_fceo/commit/176b9f9bc4ebc63220607e9fcd51e5d8034c0c72).
+
+1. **A standby that finishes syncing on another instance becomes usable immediately.** The connection-pool cache key ignored readiness, so a pool created before the sync kept refusing the standby even after `resolveDbCluster` reported it ready. The cached adapter now refreshes its readiness on every hit.
+
+### Fixed
+
+1. **A restart no longer makes a lagging standby look caught up.** Write watermarks only existed in process memory, so a restart reset every node to "0 == 0, therefore current" and the next failover silently lost whatever the standby had missed — in a reproduced case, four rows with a reported lag of zero and no warning. The "who is behind" relation is now persisted, and nodes that were behind are marked as needing a full sync, because the in-memory journal that could have bridged the gap no longer exists. Commit: [2bfbf3a](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfbf3a124082b8b1d240a68cd4e3ec61df6d33e).
+
+1. **A completed sync no longer masks writes it did not copy.** `markNodeSynced()` pinned the watermark to the current write sequence, but the default merge sync never overwrites an existing row. A standby that missed an `UPDATE` was reported as level while permanently diverged (reproduced: primary `v2`, standby `v1`, `lag=0`). It now advances only to the watermark captured when the sync started, leaving the difference to the journal. Commit: [2bfbf3a](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfbf3a124082b8b1d240a68cd4e3ec61df6d33e).
+
+1. **Repointing a standby at a new database invalidates its "already synced" verdict.** The sync record was keyed by node id alone, and the UI keeps the id when you change host or database (that is how the password is preserved), so a brand-new empty database inherited the old verdict and could take over immediately. Records now carry a `host|port|database` fingerprint, and stale records are deleted when the config is saved. Legacy records without a fingerprint are still trusted so upgrading does not invalidate a working setup. Commit: [2bfbf3a](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfbf3a124082b8b1d240a68cd4e3ec61df6d33e).
+
+1. **Regression tests now cover the boundaries where all of the above lived.** The existing cluster suite passed while these bugs shipped, because every one of them happened across a restart or a changed node identity. New suites cover restarts and watermarks, the promote gates, the zero-enabled-node case, and inserted-versus-resent counts, and the real-MySQL end-to-end script now switches the writer and asserts that the next write lands on the new primary and is replayed to the old one. Commit: [3c143a2](https://github.com/muzhi621/NodeWarden_fceo/commit/3c143a2f763ef60bac4b3ec205410f1d92e49b79).
+
+---
+
+# v1.8.4 - 可靠的主副库切换、显式提升，以及一份完整的部署教程
+
+### 新增
+
+1. **显式切换主库，切换前三道校验。** 数据库设置里的副库卡片新增「切换主库」按钮（`POST /api/admin/db-config/promote`）。切换前依次确认：目标节点连得上；数据库自己报告可写（`@@GLOBAL.read_only` / `super_read_only`，只读副本会被当场挡回，而不是切成一个拒绝所有写入的主库）；`write-through` 模式下该节点已完成同步且写入水位无落后。任一项不满足返回 409 并列出全部缺口，`?force=1` 才强制切换，并写明会缺哪部分数据。切换成功后角色互换、优先级重排，原本与水位持平的原主库会保留一条同步记录，仍可承接读请求或再次接管。提交：[176b9f9](https://github.com/muzhi621/NodeWarden_fceo/commit/176b9f9bc4ebc63220607e9fcd51e5d8034c0c72)、[df8d80e](https://github.com/muzhi621/NodeWarden_fceo/commit/df8d80ea0ad591705e044b992c046a61b3c50308)。
+
+1. **一份汇总部署教程，补上一直缺的存储章节。** 新增 `DEPLOY.md`，把四种部署方式（Cloudflare Workers、EdgeOne Pages、阿里云 FC、自建/Docker）收到一处，重点讲清「附件和管理页配置到底存在哪、怎么配才能在重启后还在」：Workers 用 R2 `ATTACHMENTS` 与 KV `SETTINGS_KV` 绑定，FC 挂 NAS 并设 `DATA_DIR` / `ATTACHMENTS_DIR`，Docker 挂卷。同时补上了过去没人写的一步——从 D1/R2 迁到 Node 运行时，**附件不会跟着数据库走，必须手动拷贝**——以及把阿里云 OSS / 腾讯云 COS 挂成附件盘的完整教程（ossfs、cosfs、rclone 三条路，仅自建/Docker 可行：Serverless 没有 FUSE 设备，这类部署改用备份中心的 S3 兼容目标），另附完整的环境变量总表与上线自检清单。提交：[138a8c7](https://github.com/muzhi621/NodeWarden_fceo/commit/138a8c76a9e36893b8e416f7a366481d5d4be6e6)、[8669772](https://github.com/muzhi621/NodeWarden_fceo/commit/866977213d543c1c515b4e272d19496b337ca787)。
+
+### 改进
+
+1. **没有可用数据库时给出可执行的错误，而不是崩溃。** 保存过集群配置但节点全部停用时，旧逻辑会回落到 D1 绑定——Node 运行时根本没有这个绑定，于是每个请求都死在 `undefined.prepare`，日志里只有一句没人看得懂的话。现在统一返回 503，直接说明配置里有几个节点、全部停用、该去哪里启用，`/healthz` 与管理页顶部都会显示。驱动原始错误仍然只返回通用 500，不会泄露主机名与凭据。提交：[2bfbf3a](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfbf3a124082b8b1d240a68cd4e3ec61df6d33e)。
+
+1. **副库不可达时不再拖慢每一个请求。** 旧逻辑对连不上的副库会在**每个请求**上重试建表且没有退避，主库完全健康也要为每次请求付一次连接超时。现在失败后从 30 秒起退避、逐次翻倍、封顶 5 分钟，首次成功后立即复位。提交：[243f998](https://github.com/muzhi621/NodeWarden_fceo/commit/243f9984b170755b2606a44f67fdc3783815af8e)。
+
+1. **同步结果不再夸大进度。** 「只补缺失行」模式每次都会整表重发，而 `FOUND_ROWS` 让「新插入」和「已存在」都返回 1 行，旧的行数统计说明不了任何问题。现在按目标库同步前后的 `COUNT(*)` 差值给出真正新增的行数，页面显示「新增 N 行（另 M 行已存在，未覆盖）」；覆盖模式与被截断的轮次不再给数字，而不是给一个误导值。提交：[176b9f9](https://github.com/muzhi621/NodeWarden_fceo/commit/176b9f9bc4ebc63220607e9fcd51e5d8034c0c72)。
+
+1. **另一个实例完成同步后，本实例立即放行该副库。** 连接池缓存键不包含就绪状态，先建好的池会一直拒绝这个副库，即使配置层已经判定它可以接管（多实例部署下很常见）。现在命中缓存时会刷新就绪状态。
+
+### 修复
+
+1. **重启后落后的副库不再被当成"已追平"。** 写入水位只存在于进程内存，重启后所有节点归零为「0 == 0，所以是最新的」，下一次故障切换就会悄悄丢掉它没来得及同步的数据——实测丢 4 行、`lag=0`、没有任何告警。「谁落后」这一关系现在会持久化，落后的节点标记为需要完整同步（可以用来补齐的内存补写日志已经不跨进程存在了）。提交：[2bfbf3a](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfbf3a124082b8b1d240a68cd4e3ec61df6d33e)。
+
+1. **「同步完成」不再掩盖没被复制过去的写入。** `markNodeSynced()` 会把水位直接拉到当前写入序号，而默认的「只补缺失行」并不会覆盖已存在的行。于是漏掉过一次 `UPDATE` 的副库被报告为 `lag=0`，实际已经永久分叉（实测：主库 `v2`、副库 `v1`，`lag=0`）。现在只把水位推进到同步开始的那一刻，差额留给补写日志。提交：[2bfbf3a](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfbf3a124082b8b1d240a68cd4e3ec61df6d33e)。
+
+1. **把副库改指到别的库后，旧的「已同步」自动作废。** 同步记录只以节点 id 为键，而后台改 host 或库名时 id 是不变的（保留密码就靠这个），于是一个全新的空库继承了旧的「已同步」判定，可以在故障时立刻接管。现在记录带 `host|port|database` 指纹，保存配置时主动清理失效记录；没有指纹的历史记录仍然信任，升级不会把原本正常的部署变成"未同步"。提交：[2bfbf3a](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfbf3a124082b8b1d240a68cd4e3ec61df6d33e)。
+
+1. **上面这些问题现在有回归测试兜底。** 原有 18 个集群用例全部通过时，这些缺陷照样发布了出去，因为它们都发生在「重启」和「换节点身份」这两个测试从未跨越的边界上。新增用例覆盖：重启与水位持久化、切换主库的三道校验、全部节点停用、以及「新增行 vs 重发行」的计数；真库 E2E 也加上了切换主库的整段流程，并断言下一笔写入落在新主库且回放到旧主库。提交：[3c143a2](https://github.com/muzhi621/NodeWarden_fceo/commit/3c143a2f763ef60bac4b3ec205410f1d92e49b79)。
+
+---
+
 # v1.8.1 - Expanded Generators, Safer Vault Editing, and Client Compatibility
 
 ### Added

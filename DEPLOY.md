@@ -20,6 +20,7 @@
 | 适合 | 已有 CF 账号、想要平台内置存储 | 国内访问、免费额度高、当 Web 入口 | 国内主力、要挂持久盘 | 完全可控、局域网自用 |
 | 业务数据 | D1（默认）或外接 MySQL | 必须外接 MySQL | 必须外接 MySQL | 必须外接 MySQL |
 | 附件持久性 | ✅ R2 | ❌ 只有 `/tmp`，实例回收即丢 | ⚠️ 默认 `/tmp`；**挂 NAS 后持久** | ✅ 本地磁盘/卷 |
+| OSS/COS 当附件盘 | ❌（用 R2） | ❌ | ❌ 无 FUSE，改用 NAS 或备份中心 | ✅ ossfs / cosfs / rclone（[3.6](#36-把阿里云-oss--腾讯云-cos-当附件盘fuse-挂载)） |
 | 配置存储 | ✅ KV / R2 | ❌ 无（只能用 `DB_*` 环境变量） | ⚠️ 默认 `/tmp`；挂 NAS 后持久 | ✅ `DATA_DIR` |
 | 多节点主副库 | ✅ | ❌ 不支持 | ✅（建议单实例写） | ✅ |
 | 实时推送 | ✅ WebSocket | ❌ 轮询 | ❌ 轮询（501） | ✅ WebSocket |
@@ -124,8 +125,9 @@ ATTACHMENTS_DIR = /tmp/nodewarden/attachments
 > 想区分「配置目录」和「附件目录」也可以只设 `DATA_DIR`：`ATTACHMENTS_DIR` 默认就是
 > `${DATA_DIR}/attachments`。FC 上**不要**把 `DATA_DIR` 指向代码目录（只读）。
 >
-> OSS 不能直接当文件系统用（`ossfs` 对小文件追加/重命名一致性差），附件请用 NAS；
-> 真要放 OSS，走应用内的备份中心（WebDAV/S3）而不是挂载。
+> OSS 不能直接当文件系统用（`ossfs` 对 rename/append 的支持不完整，而 FC 本身也不给 FUSE 设备）；
+> 在 FC 上要放对象存储请用应用内备份中心的 WebDAV/S3。想在 VPS/Docker 上真把 OSS/COS 挂成附件盘，
+> 见 [3.6](#36-把阿里云-oss--腾讯云-cos-当附件盘fuse-挂载)。
 
 ### 3.3 EdgeOne Pages：没有持久盘，别指望附件留下来
 
@@ -178,6 +180,173 @@ npx wrangler r2 object list nodewarden-attachments --json > keys.json
 ```
 
 漏了这一步的表现是：附件列表还在、点下载提示 404 —— 记录在库里，文件没跟过来。
+
+### 3.6 把阿里云 OSS / 腾讯云 COS 当附件盘（FUSE 挂载）
+
+先看能不能挂 —— 这一步决定你有没有这条路：
+
+| 运行环境 | 能否用 ossfs / cosfs 挂 OSS/COS | 该怎么做 |
+|---|---|---|
+| 阿里云 FC | ❌ 无 `/dev/fuse`、不能给特权容器 | 挂 **NAS**（[3.2](#32-阿里云-fc挂-nas-才能持久化附件)）；对象存储只能当**备份目标**（[3.6.6](#366-serverless-上挂不了怎么办用备份中心把-oss-cos-当目标)） |
+| EdgeOne Pages | ❌ 同上，且只有 `/tmp` | 同上，或干脆只当入口 |
+| 自建 VPS（有 root） | ✅ ossfs / cosfs / rclone 都可以 | 本文 [3.6.1](#361-阿里云-ossossfs)、[3.6.2](#362-腾讯云-coscosfs) |
+| Docker | ✅ 但要显式放行 FUSE 设备与权限 | 见 [3.6.4](#364-docker-里挂-oss-完整示例) 的 `--device /dev/fuse --cap-add SYS_ADMIN` |
+
+**为什么这个应用能挂在对象存储上**：附件读写的实际文件操作只有三种 ——
+写入是新文件（数据 + 同名 `.meta.json` 记录 content-type）、读取是 `stat` + 顺序读、删除是 `rm`。
+**没有用到 `rename`、`append`、硬链接、目录遍历**，而这四项恰好是 ossfs/cosfs 最难保证的。
+所以 FUSE 挂载是安全的，代价是：每个附件占 **2 个对象**，且没开缓存时每次下载都要回源（流量与延迟）。
+
+#### 3.6.1 阿里云 OSS（ossfs）
+
+```bash
+# 1) 安装（Ubuntu/Debian；ossfs 2.0 需要 FUSE3，功能与稳定性都更好）
+#    官方文档：help.aliyun.com → 对象存储 OSS → 常用工具 → ossfs
+sudo apt install -y fuse3
+# 按官方提供的 .deb / .rpm 包安装，或从源码构建
+ossfs --version
+
+# 2) 凭据文件（只有本机 root 可读）
+echo "my-bucket:LTAI5t********:yourAccessSecret" | sudo tee /etc/passwd-ossfs
+sudo chmod 640 /etc/passwd-ossfs
+
+# 3) 挂载（同 region 的 ECS 用内网 endpoint，不计公网流量）
+sudo mkdir -p /mnt/oss
+sudo ossfs my-bucket /mnt/oss \
+  -o url=https://oss-cn-hangzhou-internal.aliyuncs.com \
+  -o allow_other -o umask=000 \
+  -o kernel_cache -o max_stat_cache_size=10000
+```
+
+开机自动挂载（`/etc/fstab`）：
+
+```
+my-bucket  /mnt/oss  fuse.ossfs  _netdev,allow_other,umask=000,url=https://oss-cn-hangzhou-internal.aliyuncs.com  0 0
+```
+
+> `allow_other` 需要 `/etc/fuse.conf` 里有 `user_allow_other`（用 root 挂载时一般已满足）。
+> 挂载点是桶的**根**：应用的 `ATTACHMENTS_DIR` 指向桶内某个前缀即可，例如 `/mnt/oss/nodewarden/attachments`。
+> 官方的「OSS 挂载到本地」也叫 `ossfs`，1.x 与 2.x 参数略有差异，报 `unrecognized option` 时换另一个版本的参数写法。
+
+#### 3.6.2 腾讯云 COS（cosfs）
+
+```bash
+# 1) 安装 cosfs（官方 GitHub tencentyun/cosfs，按 README 编译或装包）
+cosfs --version
+
+# 2) 凭据文件：注意桶名要带 APPID 后缀
+echo "my-bucket-1250000000:AKID********:yourSecretKey" | sudo tee /etc/passwd-cosfs
+sudo chmod 640 /etc/passwd-cosfs
+
+# 3) 挂载（同地域内网域名可省公网流量）
+sudo mkdir -p /mnt/cos
+sudo cosfs my-bucket-1250000000 /mnt/cos \
+  -ourl=https://cos.ap-guangzhou.myqcloud.com \
+  -o allow_other -o umask=000 -o dbglevel=warn \
+  -o enable_noobj_cache
+```
+
+`/etc/fstab`：
+
+```
+my-bucket-1250000000  /mnt/cos  fuse.cosfs  _netdev,allow_other,umask=000,url=https://cos.ap-guangzhou.myqcloud.com  0 0
+```
+
+> 桶名格式是 `<名字>-<APPID>`，少了 `-1250000000` 这截会报桶不存在。
+> 内网域名形如 `https://cos.ap-guangzhou.myqcloud.com`（同地域 CVM 走内网自动解析），跨地域请用公网域名。
+
+#### 3.6.3 通用方案：rclone mount（OSS 与 COS 同一套命令）
+
+不想装两个工具、或者想加本地缓存时用 rclone，两边都支持：
+
+```bash
+rclone config
+# n) 新建 → 选 s3 → provider 选 Alibaba（OSS）或 TencentCOS（COS）
+#    access_key_id / secret_access_key 填入 AK/SK，endpoint 填对应地域域名
+
+mkdir -p /mnt/obj
+rclone mount nw-oss:nodewarden /mnt/obj \
+  --vfs-cache-mode writes \
+  --vfs-cache-max-size 2G \
+  --allow-other \
+  --daemon
+```
+
+>`--vfs-cache-mode writes` 会先写本地缓存再上传，避免小文件半途失败；读多的话再加
+>`--vfs-cache-mode full` 与 `--vfs-cache-max-age`，代价是占本地磁盘。
+
+#### 3.6.4 Docker 里挂 OSS（完整示例）
+
+容器内挂 FUSE 需要两件事：把 `/dev/fuse` 透进去、给 `SYS_ADMIN` 能力。
+
+```yaml
+services:
+  nodewarden:
+    image: nodewarden:1.8.4
+    ports: ["8787:8787"]
+    devices:
+      - /dev/fuse:/dev/fuse          # 必需
+    cap_add:
+      - SYS_ADMIN                    # 必需
+    security_opt:
+      - apparmor:unconfined          # 宿主机启用了 AppArmor 时需要
+    volumes:
+      - nw-data:/data                # DATA_DIR：本地盘，别放对象存储
+      - /mnt/oss:/mnt/oss:shared     # 宿主机先挂好 OSS，再共享进容器
+    environment:
+      DATA_DIR: /data
+      ATTACHMENTS_DIR: /mnt/oss/nodewarden/attachments
+volumes:
+  nw-data:
+```
+
+> **只把 `ATTACHMENTS_DIR` 放对象存储，`DATA_DIR` 留在本地盘。**
+> 原因：`DATA_DIR` 里是 `kv-store.json`（每次写入都把整个 JSON 重写一遍）和节点同步记录，
+> 放到 FUSE 上既慢又容易读到写了一半的内容。这么做还有一个额外好处——挂载掉线时，
+> 配置和登录态不受影响，只是附件暂时读不到。
+
+#### 3.6.5 接到 NodeWarden 并验证
+
+```bash
+# 只换附件目录（推荐）
+ATTACHMENTS_DIR=/mnt/oss/nodewarden/attachments
+
+# 或者连 DATA_DIR 一起放到挂载点（不推荐，理由见上）
+# DATA_DIR=/mnt/oss/nodewarden
+# ATTACHMENTS_DIR=/mnt/oss/nodewarden/attachments
+```
+
+验证顺序（和 NAS 一样，必须跨重启）：
+
+1. 启动 → 上传一个附件 → 在挂载点里应能看到**两个对象**：`<key>` 与 `<key>.meta.json`；
+2. **重启容器/服务**（或 `umount` 后重新挂载）→ 再下载同一个附件；
+3. 能下载 = 生效；404 且挂载点里没有对象 = 应用还在写本地目录，检查变量是否生效（`DATA_DIR` 拼错最常见）。
+
+成本与性能提醒：
+
+- 每个附件 2 个对象 → 请求数翻倍，OSS/COS 的**请求费**（尤其 PUT/GET 次数）比容量费更容易超；
+- 没开 `kernel_cache`/vfs 缓存时，每次下载都会产生一次 GET 与流量；
+- 对象存储无 POSIX 完整语义（rename/append 缺失），本应用不用这些操作，但**不要**把 MySQL 数据文件、
+  `kv-store.json` 之类放上去；
+- 对象存储挂载不适合高并发小文件场景，个人密码库的量级完全够用。
+
+#### 3.6.6 Serverless 上挂不了怎么办：用备份中心把 OSS/COS 当目标
+
+FC / EdgeOne 没有 FUSE，但**备份中心支持 S3 兼容目标**，OSS 与 COS 都能直接当备份目的地
+（附件同步也在备份范围内）。在管理后台 → 备份中心 → 新建目标 → 选 S3：
+
+| 字段 | 阿里云 OSS | 腾讯云 COS |
+|---|---|---|
+| `endpoint` | `https://oss-cn-hangzhou.aliyuncs.com` | `https://cos.ap-guangzhou.myqcloud.com` |
+| `bucket` | `my-bucket` | `my-bucket-1250000000` |
+| `region` | `oss-cn-hangzhou` | `ap-guangzhou` |
+| `addressingStyle` | `virtual-hosted`（默认）或 `path` | `virtual-hosted`（默认）或 `path` |
+| `rootPath` | 例如 `nodewarden` | 例如 `nodewarden` |
+| `accessKeyId` / `secretAccessKey` | 建议用只授权该桶的子账号 AK | 同左（建议子账号 + 最小权限策略） |
+
+> 端点必须带 `https://`；`path` 风格在自建/兼容端点（MinIO、R2）上更保险。
+> 这条路的语义是**定时备份**，不是实时存储：附件仍在实例本地（或 NAS），
+> 对象存储里是可供还原的快照。定期还原演练一次，确认附件也在快照里。
 
 ---
 
