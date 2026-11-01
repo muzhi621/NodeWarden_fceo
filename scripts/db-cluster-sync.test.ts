@@ -365,3 +365,62 @@ test('a table without a primary key falls back to offset paging', async () => {
   assert.equal(result.rowsWritten, 3);
   assert.match(source.selects[1], /OFFSET 2/);
 });
+
+test('merge mode reports the rows it added, not the rows it re-sent', async () => {
+  // The whole table is re-sent on every sync (that is how a repair works), so
+  // "rows written" says nothing about progress. `rowsInserted` is measured from
+  // the target's own count before and after.
+  const columns = { t: ['id', 'v'] };
+  const sourceRows = Array.from({ length: 5 }, (_, index) => ({ id: `k${index}`, v: 'src' }));
+  const source = new FakeNode(['t'], columns, { t: sourceRows.map((row) => ({ ...row })) });
+  const target = new FakeNode(['t'], columns, {
+    t: sourceRows.slice(0, 3).map((row) => ({ ...row, v: 'target' })),
+  });
+
+  const result = await syncTable(source, target, 't');
+
+  assert.equal(result.rowsWritten, 5, 'every row is pushed');
+  assert.equal(result.rowsInserted, 2, 'only two of them were new');
+  assert.equal(result.targetRows, 5);
+  assert.equal(result.countMatches, true);
+});
+
+test('overwrite mode does not claim an inserted count (every row is rewritten)', async () => {
+  const columns = { t: ['id', 'v'] };
+  const sourceRows = Array.from({ length: 4 }, (_, index) => ({ id: `k${index}`, v: 'src' }));
+  const source = new FakeNode(['t'], columns, { t: sourceRows.map((row) => ({ ...row })) });
+  const target = new FakeNode(['t'], columns, {
+    t: sourceRows.slice(0, 2).map((row) => ({ ...row, v: 'target' })),
+  });
+
+  const result = await syncTable(source, target, 't', { mode: 'overwrite' });
+
+  assert.equal(result.rowsWritten, 4);
+  assert.equal(result.rowsInserted, undefined);
+});
+
+test('a truncated table has no inserted count (the baseline would lie)', async () => {
+  const columns = { t: ['id'] };
+  const sourceRows = Array.from({ length: 6 }, (_, index) => ({ id: `k${index}` }));
+  const source = new FakeNode(['t'], columns, { t: sourceRows.map((row) => ({ ...row })) });
+  const target = new FakeNode([], {});
+
+  const result = await syncTable(source, target, 't', { maxRowsPerTable: 2 });
+
+  assert.equal(result.truncated, true);
+  assert.equal(result.rowsInserted, undefined);
+});
+
+test('the cluster total adds up the per-table inserted counts', async () => {
+  const columns = { a: ['id'], b: ['id'] };
+  const source = new FakeNode(['a', 'b'], columns, {
+    a: [{ id: '1' }, { id: '2' }],
+    b: [{ id: '9' }],
+  });
+  const target = new FakeNode(['a', 'b'], columns, { a: [{ id: '1' }], b: [{ id: '9' }] });
+
+  const result = await syncDatabase(source, target);
+
+  assert.equal(result.rowsWritten, 3);
+  assert.equal(result.rowsInserted, 1);
+});
