@@ -263,3 +263,140 @@ test('isNodeLevelFailure separates transport failures from SQL rejections', () =
   assert.equal(isNodeLevelFailure(sqlError('ER_DUP_ENTRY')), false);
   assert.equal(isNodeLevelFailure(new Error('You have an error in your SQL syntax')), false);
 });
+
+// --- write watermark / failover semantics (B-1, B-4, C-1, C-2, C-5, S7) ---
+
+function readOnlyError(): Error {
+  const error = new Error(
+    'ER_OPTION_PREVENTS_STATEMENT: The MySQL server is running with the --read-only option so it cannot execute this statement'
+  ) as Error & { code: string; errno: number };
+  error.code = 'ER_OPTION_PREVENTS_STATEMENT';
+  error.errno = 1290;
+  return error;
+}
+
+test('B-1: a recovered primary is caught up before it gets writes back', async () => {
+  let primaryDown = true;
+  const primary = fakeNode({ fail: () => (primaryDown ? connectionError() : null) });
+  const replica = fakeNode();
+  const db = cluster(primary, replica, { syncMode: 'write-through', failureThreshold: 1, cooldownMs: 10 });
+
+  await db.prepare('INSERT INTO t (id) VALUES (?)').bind('A').run();
+  assert.equal(replica.log.length, 1, 'the standby took the write during the outage');
+
+  primaryDown = false;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await db.prepare('INSERT INTO t (id) VALUES (?)').bind('B').run();
+
+  // The primary is reachable again but was behind, so the write stayed on the
+  // standby and the missed write was replayed into the primary instead of being
+  // lost — which is exactly what used to happen.
+  assert.equal(replica.log.length, 2);
+  assert.ok(
+    primary.log.some((entry) => entry.params[0] === 'A'),
+    'the write that happened during the outage reached the primary afterwards'
+  );
+  assert.equal(db.nodeHealth().find((node) => node.id === 'primary')?.lag, 0, 'caught up');
+
+  await db.prepare('INSERT INTO t (id) VALUES (?)').bind('C').run();
+  assert.equal(
+    primary.log[primary.log.length - 1]?.params[0],
+    'C',
+    'once up to date the primary gets write authority back'
+  );
+});
+
+test('B-4: a standby that has never been synced cannot serve reads or take over', async () => {
+  let primaryDown = false;
+  const primary = fakeNode({ fail: () => (primaryDown ? connectionError() : null) });
+  const replica = fakeNode();
+  const db = new MySqlClusterDatabase(
+    [
+      spec({ id: 'primary', host: 'primary.db', role: 'primary', priority: 1 }),
+      spec({ id: 'replica', host: 'replica.db', role: 'replica', priority: 2, syncReady: false }),
+    ],
+    { ...POLICY, syncMode: 'write-through', readSplit: true, failureThreshold: 1 },
+    (config) => (config.host === 'primary.db' ? primary.db : replica.db)
+  );
+
+  // New writes are still replayed into it (that narrows the gap for free), but
+  // it has no history, so it must not answer reads.
+  await db.prepare('INSERT INTO t (id) VALUES (?)').bind('1').run();
+  replica.log.length = 0;
+  await db.prepare('SELECT * FROM t WHERE id = ?').bind('1').all();
+  assert.equal(replica.log.length, 0, 'an unsynced standby must not serve reads');
+
+  primaryDown = true;
+  // First attempt trips the breaker on the primary...
+  await assert.rejects(() => db.prepare('INSERT INTO t (id) VALUES (?)').bind('2').run());
+  // ...and the standby refuses to take over, with a message that says why.
+  await assert.rejects(() => db.prepare('INSERT INTO t (id) VALUES (?)').bind('3').run(), /没有可写的数据库节点/);
+  assert.equal(replica.log.length, 0);
+  assert.equal(db.nodeHealth().find((node) => node.id === 'replica')?.syncReady, false);
+});
+
+test('C-1: a read-only node is skipped for writes and flagged, not surfaced raw', async () => {
+  const primary = fakeNode({ fail: () => readOnlyError() });
+  const replica = fakeNode();
+  const db = cluster(primary, replica, { syncMode: 'write-through' });
+
+  await db.prepare('INSERT INTO t (id) VALUES (?)').bind('1').run();
+
+  assert.equal(replica.log.length, 1, 'the write landed on the writable node');
+  const health = db.nodeHealth().find((node) => node.id === 'primary');
+  assert.equal(health?.writeBlocked, true);
+  assert.equal(health?.failures, 0, 'read-only is not an outage');
+
+  // While the flag is on, the read-only node is not tried again.
+  primary.log.length = 0;
+  await db.prepare('INSERT INTO t (id) VALUES (?)').bind('2').run();
+  assert.equal(primary.log.length, 0);
+});
+
+test('C-1: when nothing can accept the write the message says what to do', async () => {
+  const primary = fakeNode({ fail: () => readOnlyError() });
+  const replica = fakeNode();
+  const db = cluster(primary, replica, { failoverEnabled: false });
+
+  await assert.rejects(() => db.prepare('INSERT INTO t (id) VALUES (?)').bind('1').run(), (error: Error) => {
+    assert.match(error.message, /只读副本/);
+    assert.doesNotMatch(error.message, /--read-only option/);
+    return true;
+  });
+});
+
+test('C-2: a write whose reply was lost is not replayed on another node', async () => {
+  const primary = fakeNode({ fail: () => connectionError('ECONNRESET') });
+  const replica = fakeNode();
+  const db = cluster(primary, replica, { syncMode: 'write-through' });
+
+  await assert.rejects(
+    () => db.prepare('INSERT INTO t (id) VALUES (?)').bind('1').run(),
+    /无法确认是否已提交/
+  );
+  assert.equal(replica.log.length, 0, 'replaying would have inserted the row twice');
+});
+
+test('C-5: reads stay on the writer right after a write', async () => {
+  const primary = fakeNode();
+  const replica = fakeNode();
+  const db = cluster(primary, replica, { readSplit: true, syncMode: 'write-through' });
+
+  await db.prepare('INSERT INTO t (id) VALUES (?)').bind('1').run();
+  primary.log.length = 0;
+  replica.log.length = 0;
+
+  await db.prepare('SELECT * FROM t WHERE id = ?').bind('1').all();
+
+  assert.equal(primary.log.length, 1, 'read-your-writes keeps the read on the writer');
+  assert.equal(replica.log.length, 0);
+});
+
+test('S7: node health reflects the node, not the failover switch', async () => {
+  const primary = fakeNode();
+  const replica = fakeNode();
+  const db = cluster(primary, replica, { failoverEnabled: false });
+
+  const health = db.nodeHealth().find((node) => node.id === 'replica');
+  assert.equal(health?.available, true, 'a healthy replica is available even when failover is off');
+});
