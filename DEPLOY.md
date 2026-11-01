@@ -8,7 +8,7 @@
 - 要找某个变量 → [第五节 环境变量总表](#五环境变量总表)
 - 平台专属细节（FC 规格、EdgeOne 限制、定时备份）→ 仍以两份平台文档为准
 
-> 本文对应版本 **v1.8.4**。每个 [Release](https://github.com/muzhi621/NodeWarden_fceo/releases) 都附带
+> 本文对应版本 **v1.8.5**。每个 [Release](https://github.com/muzhi621/NodeWarden_fceo/releases) 都附带
 > 可直接上传的 `nodewarden-fc.zip`（前端 + 后端 bundle + mysql2 依赖，免构建）。
 
 ---
@@ -148,7 +148,7 @@ docker run -d --name nodewarden -p 8787:8787 \
   -e DATA_DIR=/data \
   -e JWT_SECRET="$(openssl rand -base64 32)" \
   -e DB_HOST=... -e DB_USER=... -e DB_PASSWORD=... -e DB_NAME=... \
-  nodewarden:1.8.4
+  nodewarden:1.8.5
 ```
 
 ```yaml
@@ -282,7 +282,7 @@ rclone mount nw-oss:nodewarden /mnt/obj \
 ```yaml
 services:
   nodewarden:
-    image: nodewarden:1.8.4
+    image: nodewarden:1.8.5
     ports: ["8787:8787"]
     devices:
       - /dev/fuse:/dev/fuse          # 必需
