@@ -160,6 +160,12 @@ npm run dev:kv
 > 都附带 `nodewarden-fc.zip`（已构建好前端与后端 bundle，免装依赖直接上传）。
 > 规格选型、环境变量、平台定时备份、旧库升级 SQL 见 **[FC-DEPLOY.md](FC-DEPLOY.md)**。
 >
+> 🧭 **四种部署方式（Workers / EdgeOne / FC / Docker）汇总 + 环境变量总表 + 存储挂载**：
+> 见 **[DEPLOY.md](DEPLOY.md)**。其中「附件和管理页配置到底存在哪、怎么挂持久盘」是过去最容易漏的一环：
+> Node 运行时用 `DATA_DIR`（附件在同目录的 `attachments/` 下，可用 `ATTACHMENTS_DIR` 单独指定），
+> **FC 默认写在 `/tmp`，实例回收就丢，必须挂 NAS 并改这两个变量**；Workers 则用 R2 `ATTACHMENTS`
+> 与 KV `SETTINGS_KV` 绑定。EdgeOne Pages 没有持久盘（`DATA_DIR` 会被强制改写），只适合当入口。
+>
 > 与本家（上游）行为的三处差异，升级前务必知道：
 > - **TLS 默认校验证书**：自签库设 `DB_SSL_INSECURE=1`，更好的是把 `DB_SSL_CA` 指向 PEM；
 > - 后台「测试连接」默认拒绝内网/回环地址，自建库在内网需把 host 加进 `DB_HOST_ALLOWLIST`；
@@ -241,7 +247,8 @@ npm run start:node                   # 默认监听 http://localhost:8787
 | `DB_SSL` | — | 默认 `true`；TiDB Serverless 必须开启 |
 | `DB_CONN_LIMIT` | — | 连接池上限，默认 5 |
 | `DB_CONFIG_KEY` | 前台配置时必填 | 前台保存配置的加密主密钥 |
-| `DATA_DIR` | — | 数据目录（附件/配置文件），默认 `./data` |
+| `DATA_DIR` | — | 数据目录（后台保存的配置、节点同步记录、写入水位），默认 `./data`。**要跨重启保留就必须指向持久盘** |
+| `ATTACHMENTS_DIR` | `${DATA_DIR}/attachments` | 附件实际落盘目录；想单独挂一块盘时设。目录启动时自动创建，但挂载点必须可写 |
 | `PORT` | — | 监听端口，默认 8787 |
 | `HIDE_WEB_VAULT` / `WEBAUTHN_*` | — | 与 Workers 版一致 |
 

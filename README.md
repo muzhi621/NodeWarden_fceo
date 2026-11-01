@@ -161,6 +161,14 @@ Then open **Admin → Database settings** (`/admin/database`) to edit/test the c
 only — driver errors and the version string are no longer echoed to unauthenticated callers.
 Without `DB_HOST` the app falls back to D1 — `npm run deploy` works exactly like upstream.
 
+> **Where attachments and saved settings live** — see **[DEPLOY.md](DEPLOY.md)** for the
+> consolidated guide (all four deployment targets, full env-var table, storage mounting).
+> On the Node runtime everything writable goes under `DATA_DIR` (attachments in
+> `$DATA_DIR/attachments`, override with `ATTACHMENTS_DIR`). Alibaba Cloud FC defaults that to
+> `/tmp`, which is wiped when the instance recycles — **mount NAS and set `DATA_DIR`** if you
+> want attachments to survive. On Workers, attachments use the R2 binding `ATTACHMENTS` and the
+> config store uses the KV binding `SETTINGS_KV`. EdgeOne Pages has no persistent disk at all.
+
 ### Multiple databases: primary + standby
 
 `/admin/database` manages a list of nodes (one primary, up to seven standbys) instead of a single

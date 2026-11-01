@@ -1,15 +1,21 @@
 # NodeWarden BYO-DB — 阿里云 FC 部署说明
 
 > 本文件在**仓库根目录**与**部署 ZIP 根目录**各存一份，内容一致。
-> 部署包是为「阿里云函数计算 FC · Web 函数」准备的可直接上传 ZIP，版本 **v1.8.3**。
-> 代码来源：分支 `test`（BYO-DB + Node 运行时 + 两轮代码审查修复）。
-> 遵循用户铁律：本包/分支独立，**不合并、不影响现有分支**。
+> 部署包是为「阿里云函数计算 FC · Web 函数」准备的可直接上传 ZIP，版本 **v1.8.4**。
+> 代码来源：`main` 分支（BYO-DB + Node 运行时 + 多轮代码审查修复）。
 >
 > 注：下文的「包内容」以 **ZIP 包**为准。仓库里的 `node_modules/` 是完整开发依赖，
-> `dist/`、`server/index.mjs` 需自行构建（见第九节）；`fc-entry.mjs` 只存在于 ZIP 中。
+> `dist/`、`server/index.mjs` 需自行构建（见第九节）；`fc-entry.mjs` 在仓库根目录，
+> 组包时原样复制到包根即可。
 >
-> **从 v1.8.2 升级**：本次只改了 `dist/`（前端）与 `server/index.mjs`（后端），
+> **从 v1.8.3 升级**：本次只改了 `dist/`（前端）与 `server/index.mjs`（后端），
 > 数据库结构未变，**不需要跑任何 SQL**；直接替换这两处后重启函数即可。
+> 行为变化集中在外接库的高可用上：写入水位现在会持久化（重启后落后的副库不会被当成已追平）、
+> 新增「切换主库」按钮（切换前校验连通性/可写性/同步完成）、全部节点停用时返回 503 而不是崩溃。
+>
+> **存储位置（附件/后台配置）见 [DEPLOY.md 第三节](DEPLOY.md#三存储与挂载最容易漏的一节)**：
+> FC 默认把附件写在 `/tmp/nodewarden`，**实例回收即丢**；要持久化必须挂 NAS 并设置
+> `DATA_DIR` / `ATTACHMENTS_DIR`（本文件第二节末尾有 FC 专属步骤）。
 
 ## 一、包内容
 - `server/index.mjs`：**已用 esbuild 打包好的后端（纯 JS，运行时不需要 tsx/esbuild）**
@@ -18,6 +24,7 @@
 - `node_modules/`：仅 `mysql2` 及其依赖（其余依赖已打进 bundle）
 - `fc-entry.mjs`：FC 启动入口（自动设 `/tmp` 数据目录、端口 9000）
 - `package.json` / `package-lock.json`
+- `FC-DEPLOY.md`（本文件）/ `DEPLOY.md`（四种部署方式汇总 + 环境变量总表 + 存储挂载）
 
 ## 二、免费额度内配置（关键）
 在 FC「创建函数」页按下表配置，即可留在免费额度内：
@@ -58,11 +65,34 @@
 | `INPROCESS_CRON` | 关闭 | 仅单实例常驻自托管才设 `1`。**FC 上不要开**（多实例会重复跑备份、且阻止缩容到 0） |
 | `MAX_BODY_MB` | `100` | 请求体上限（超限返回 413） |
 | `DB_TIMEZONE` | `Z`(UTC) | 时间戳本身是 epoch 毫秒，一般无需改 |
-| `DATA_DIR` | `/tmp/nodewarden` | FC 仅 /tmp 可写；挂 NAS/OSS 时改这里以持久化附件 |
+| `DATA_DIR` | `/tmp/nodewarden` | 数据目录（后台配置、节点同步记录、写入水位、附件父目录）。FC 仅 `/tmp` 可写，**要持久化必须挂 NAS 后改这里** |
+| `ATTACHMENTS_DIR` | `${DATA_DIR}/attachments` | 附件实际落盘目录，想单独挂一块盘时设 |
 | `PORT` | `9000` | |
 
 > 也可以不设 DB_*，启动后在管理后台 `/admin/database` 填写（需设 `DB_CONFIG_KEY`）。
 > 注意：**环境变量优先于后台配置**。两者都配时，后台保存会提示「已保存但未生效」。
+
+## 三之二、挂载 NAS 让附件与配置持久化（**必看，默认会丢**）
+
+不挂盘时，`fc-entry.mjs` 把可写目录默认指到 `/tmp/nodewarden`：实例缩容/回收后，
+**附件、后台保存的数据库配置、节点同步与水位记录全部消失**。表现为「昨天上传的附件今天 404」
+「后台配置冷启动后变回环境变量那套」。
+
+1. **创建 NAS**：文件存储 NAS → 创建文件系统（NFS，容量型最便宜），与函数放在**同一 VPC**。
+2. **挂载到函数**：函数 → 配置 → 存储 → 挂载 NAS，挂载点填 `/mnt/nas`；同时给函数配好 VPC 访问
+   （与「允许访问公网」可以并存）。
+3. **改环境变量**（关键的两行）：
+   ```bash
+   DATA_DIR=/mnt/nas/nodewarden
+   ATTACHMENTS_DIR=/mnt/nas/nodewarden/attachments
+   ```
+   目录会在启动时自动 `mkdir -p`；**挂载点必须可写**，否则启动即报 `EACCES` / `EROFS`。
+4. **验证**：上传一个附件 → 等实例缩容（最小实例数 0 时很快）→ 再下载同一个附件。
+   能下载 = 挂载生效；仍然 404 = 还在 `/tmp`，回去确认变量是否写错、或挂载点是不是 `/mnt/nas`。
+
+> 只设 `DATA_DIR` 就够了（`ATTACHMENTS_DIR` 默认是 `${DATA_DIR}/attachments`）。
+> **不要**把 `DATA_DIR` 指向代码目录——FC 代码目录只读。
+> OSS 不能当文件系统用（`ossfs` 对小文件一致性差）；要放对象存储请用应用内备份中心的 WebDAV/S3。
 
 ## 四、上传部署步骤
 1. FC 控制台 → 创建函数（**Web 函数**）。
@@ -117,7 +147,7 @@ curl https://<函数URL>/healthz
 ## 八、Node 运行时功能降级（未变）
 - **实时推送**：WebSocket 升级不可用（501）→ 客户端自动退回轮询同步。
 - **备份中心**：Durable Objects 以进程内实现运行（内存版 `state.storage` + 定时器版 `alarm`），手动/定时备份、WebDAV/S3 还原、附件同步可用；状态按进程保存，冷启动丢失（仅影响 60 秒令牌与 10 分钟任务租约）。
-- 附件与后台兜底配置存 `/tmp`，实例回收会丢失；**重要附件请另行备份**（或挂 NAS/OSS 并设 `DATA_DIR`）。
+- 附件与后台兜底配置默认存 `/tmp`，实例回收会丢失；**挂 NAS 并设 `DATA_DIR` 才能真正持久**（见「三之二」）。
 
 ## 九、从仓库自行打包（可选）
 不想用现成 ZIP 时，从仓库构建：
@@ -139,6 +169,7 @@ npx esbuild server/index.ts --bundle --platform=node --format=esm \
 
 ```
 FC-DEPLOY.md
+DEPLOY.md
 fc-entry.mjs
 package.json
 dist/
