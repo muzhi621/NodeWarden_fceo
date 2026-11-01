@@ -171,13 +171,24 @@ connection; priority decides the takeover order.
 | Sync `native` (default) | The database replicates itself (MySQL binlog / managed replica). The app only fails over and never writes to the standby. |
 | Sync `write-through` | Every committed write is replayed on the other nodes, so two independent servers become live copies. Cross-server writes are not atomic: if a standby rejects the replay, the primary write stands and the error is recorded in the node health panel. |
 | Failover | Only connection-level failures (refused / timeout / reset / pool full) move traffic to the next healthy node. SQL errors never do — retrying a mistyped statement elsewhere would apply it twice. |
+| Write watermark | Every commit gets a sequence number and each node records the highest one it applied. A node that is behind is never chosen to write, and reads avoid it. That "who is behind" relationship is persisted, so a restart cannot silently turn a stale standby into a healthy one. |
 | Read split | Read-only statements may go to standbys, falling back to the primary. |
 | Circuit breaker | N consecutive failures take a node out for a cooldown, then it is retried half-open. |
+| Manual promote | `POST /api/admin/db-config/promote` (the **Switch primary** button). It checks reachability, that the target's own `@@read_only` flag says writable, and — in `write-through` — a completed sync with no backlog. Anything else is a 409 listing the gap; only `?force=1` overrides it. The demoted node keeps its data. |
+| No usable database | A config whose nodes are all disabled no longer falls back to D1 (there is none on the Node runtime — the old path crashed on `undefined.prepare`). `/healthz` and normal requests answer 503 with the reason instead. |
 
 A standby attached to a deployment that already holds data needs one backfill: save the cluster,
 then press **Sync data to standbys** (write-through only). It walks every table with a chunked,
 capped, idempotent upsert — safe to re-run after an interruption or to repair a node that fell
-behind. Per-node replay errors are visible on the admin page and in `/healthz`.
+behind. Merge mode re-sends rows the target already has, so the result reports *added* rows
+(measured from the target's own count) separately from the rows it pushed. Per-node replay errors
+are visible on the admin page and in `/healthz`.
+
+`native` mode trusts the database to copy the rows, so saving a cluster whose standby has an empty
+`users` table while the primary does not now produces a red warning naming that node: it almost
+always means replication was never set up, and the first failover would show an empty vault.
+A completed sync only covers writes up to the moment it started; anything committed while it ran is
+still replayed from the journal on the next write.
 
 ### Deploying to Aliyun FC / self-hosting Node
 
