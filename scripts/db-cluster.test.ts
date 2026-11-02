@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MySqlClusterDatabase, isNodeLevelFailure, type ClusterNodeSpec, type NodeDatabase } from '../src/services/db-cluster';
+import { PRIMARY_READ_HINT } from '../src/services/sql-hints';
 import type { DbClusterPolicy } from '../src/services/db-config';
 
 const POLICY: DbClusterPolicy = {
@@ -187,6 +188,39 @@ test('a failing replica read falls back to the primary', async () => {
   assert.equal(replica.log.length, 1);
   assert.equal(primary.log.length, 1);
   assert.deepEqual(result.results, [{ ok: 1 }]);
+});
+
+// The bug this guards: login writes the refresh token and the device row to the
+// writer, the page reload reads them back. With read splitting on, the read
+// landed on a replica that had not applied the replay yet and came back empty —
+// which the auth layer reads as "invalid credential" and answers by deleting the
+// token. The session then dies on every single reload, for good.
+test('a hinted read goes to the writer even when read splitting is on', async () => {
+  const primary = fakeNode({ rows: [{ session_stamp: 'fresh' }] });
+  const replica = fakeNode({ rows: [] });
+  const db = cluster(primary, replica, { readSplit: true, syncMode: 'write-through' });
+
+  const hinted = await db
+    .prepare(`SELECT ${PRIMARY_READ_HINT} session_stamp FROM devices WHERE user_id = ? AND device_identifier = ? LIMIT 1`)
+    .bind('u1', 'd1')
+    .first();
+  assert.deepEqual(hinted, { session_stamp: 'fresh' });
+  assert.equal(replica.log.length, 0, 'the consistency read must not touch the replica');
+
+  // Unhinted reads keep splitting, otherwise the hint would be pointless.
+  await db.prepare('SELECT * FROM ciphers WHERE user_id = ?').bind('u1').all();
+  assert.equal(replica.log.length, 1);
+});
+
+test('a hinted read still falls back when the writer is unreachable', async () => {
+  const primary = fakeNode({ rows: [{ id: '1' }], fail: () => connectionError('ECONNREFUSED') });
+  const replica = fakeNode({ rows: [{ id: '1' }] });
+  const db = cluster(primary, replica, { readSplit: true, failureThreshold: 1, cooldownMs: 1000 });
+
+  const row = await db.prepare(`SELECT ${PRIMARY_READ_HINT} id FROM users WHERE id = ?`).bind('1').first();
+  assert.deepEqual(row, { id: '1' }, 'a dead writer must not turn a read into an outage');
+  assert.equal(primary.log.length, 1);
+  assert.equal(replica.log.length, 1);
 });
 
 test('the breaker takes a failing node out and honours the cooldown', async () => {

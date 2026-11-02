@@ -21,6 +21,32 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.8 - Staying Signed In After a Reload
+
+### Fixed
+
+1. **Reloading the page no longer signs you out.** The refresh token was written to the writer and read back a moment later, and with read splitting on that read could land on a replica that had not applied the replay yet. A missing row and a revoked credential look identical to the refresh handler, so it deleted the token and cleared the cookie — and since the browser only stores the cookie, every reload after that failed the same way. The refresh-token lookup, the device lookup and the user lookup now pin themselves to the node holding the committed writes, using an inline `/* nw:primary */` comment that MySQL and D1 simply ignore. A pinned read still falls back to the pool when the writer is unreachable, because a dead primary must not become an outage. Commit: [61d0870](https://github.com/muzhi621/NodeWarden_fceo/commit/61d087085727f25c3edbc381927d1963c997db65).
+2. **A login that came back without the session cookie now survives a reload.** The access token only ever lived in memory, so a session stored in token mode had nothing to send after a refresh — and the client gave up right there, sending the user to the login screen without a single request. It now tries the session cookie once before reporting an expired session. The flag and the cookie are set by the same response, but the request header that selects between them is free to be dropped on the way to the server. Commit: [57d59e5](https://github.com/muzhi621/NodeWarden_fceo/commit/57d59e54508ebb828c8b527e41a53ebc11c30afd).
+
+### Added
+
+1. **A refresh request with no token at all is now visible in the log center.** This is the most common shape of a "reloading logs me out" report — the browser never kept or never sent the cookie — and it used to return "Refresh token is required" without logging anything, so the only failure that showed up was a probe with a bogus token. The handler now records `auth.refresh.failed.missing_token` with two presence flags and never a value: whether the request carried a `Cookie` header at all, and whether the session cookie was present under its expected name. "No cookies for this origin" and "cookies, but not ours" have different causes and different fixes, and until now they looked identical. Commit: [57d59e5](https://github.com/muzhi621/NodeWarden_fceo/commit/57d59e54508ebb828c8b527e41a53ebc11c30afd).
+
+---
+
+# v1.8.8 - 刷新页面不再退出登录
+
+### 修复
+
+1. **刷新页面后不会再被退回登录页。** 刷新令牌写入主库、片刻之后又被读回来，而开了读写分流时这次读可能落到尚未重放写入的副本上。对刷新流程来说，「查不到这一行」和「凭证已被吊销」长得一模一样，于是它删掉令牌、清掉 Cookie——而浏览器只存着那个 Cookie，所以之后每次刷新都以同样方式失败。刷新令牌、设备行、用户信息这三处查询现在用内联注释 `/* nw:primary */` 把自己钉在持有已提交写入的节点上，MySQL 与 D1 会直接忽略这个注释。钉住的读在主库不可达时仍会回落到节点池，因为一个挂掉的主库不该变成整体不可用。提交：[61d0870](https://github.com/muzhi621/NodeWarden_fceo/commit/61d087085727f25c3edbc381927d1963c997db65)。
+2. **没有拿到会话 Cookie 的登录，现在能熬过一次刷新。** 访问令牌只存在内存里，以令牌模式保存的会话在刷新之后就无可发送——而客户端会在这一步直接放弃，一个请求都不发就把用户送回登录页。现在它会先试一次会话 Cookie，再报告会话过期。那个标志位和 Cookie 由同一个响应一起下发，但用来在两者之间做选择的那枚请求头，在到达服务端的路上有可能丢失。提交：[57d59e5](https://github.com/muzhi621/NodeWarden_fceo/commit/57d59e54508ebb828c8b527e41a53ebc11c30afd)。
+
+### 新增
+
+1. **完全没带令牌的刷新请求，现在能在日志中心看到了。** 这是「一刷新就掉登录」最常见的形态——浏览器压根没存住、或压根没发出那个 Cookie——而它过去只回一句 "Refresh token is required" 什么都不记，于是日志里唯一能看到的失败，反而是一个拿着假令牌的探针。现在会写入 `auth.refresh.failed.missing_token`，带两个「有/没有」标志位且绝不记录值：请求到底带没带 `Cookie` 头，以及那个会话 Cookie 是否以预期的名字存在。「这个源站一个 Cookie 都没有」和「有 Cookie，但不是我们的」成因不同、修法也不同，此前两者看起来完全一样。提交：[57d59e5](https://github.com/muzhi621/NodeWarden_fceo/commit/57d59e54508ebb828c8b527e41a53ebc11c30afd)。
+
+---
+
 # v1.8.7 - A Sync You Can Watch, Configs You Can Still See
 
 ### Added

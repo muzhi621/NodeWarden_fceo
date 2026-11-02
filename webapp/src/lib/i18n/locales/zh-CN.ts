@@ -1390,6 +1390,7 @@ const zhCN: Record<string, string> = {
   "txt_log_reason_bad_password": "密码错误",
   "txt_log_reason_device_missing": "设备不存在",
   "txt_log_reason_device_session_mismatch": "设备会话不匹配",
+  "txt_log_reason_missing_token": "请求未携带刷新令牌（浏览器没保存或没发送 Cookie）",
   "txt_log_reason_token_not_found_or_expired": "令牌不存在或已过期",
   "txt_log_reason_user_inactive": "用户未启用",
   "txt_log_reason_user_missing": "用户不存在",

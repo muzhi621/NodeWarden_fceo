@@ -1,4 +1,5 @@
 import type { User } from '../types';
+import { PRIMARY_READ_HINT } from './sql-hints';
 
 type SafeBind = (stmt: D1PreparedStatement, ...values: any[]) => D1PreparedStatement;
 const USER_SELECT_COLUMNS =
@@ -49,7 +50,9 @@ export async function getUser(db: D1Database, email: string): Promise<User | nul
 
 export async function getUserById(db: D1Database, id: string): Promise<User | null> {
   const row = await db
-    .prepare(`SELECT ${USER_SELECT_COLUMNS} FROM users WHERE id = ?`)
+    // Session validation compares the stored security stamp against this row.
+    // Read it from the writer: a stale stamp looks like a revoked credential.
+    .prepare(`SELECT ${PRIMARY_READ_HINT} ${USER_SELECT_COLUMNS} FROM users WHERE id = ?`)
     .bind(id)
     .first<any>();
   if (!row) return null;

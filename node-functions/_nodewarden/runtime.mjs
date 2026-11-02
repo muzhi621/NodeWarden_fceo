@@ -860,6 +860,19 @@ var init_storage_schema = __esm({
   }
 });
 
+// src/services/sql-hints.ts
+function wantsPrimaryRead(sql) {
+  return PRIMARY_READ_PATTERN.test(sql);
+}
+var PRIMARY_READ_HINT, PRIMARY_READ_PATTERN;
+var init_sql_hints = __esm({
+  "src/services/sql-hints.ts"() {
+    "use strict";
+    PRIMARY_READ_HINT = "/* nw:primary */";
+    PRIMARY_READ_PATTERN = /\/\*\s*nw:primary\s*\*\//i;
+  }
+});
+
 // src/services/storage-user-repo.ts
 function mapUserRow(row) {
   return {
@@ -898,7 +911,7 @@ async function getUser(db, email) {
   return mapUserRow(row);
 }
 async function getUserById(db, id) {
-  const row = await db.prepare(`SELECT ${USER_SELECT_COLUMNS} FROM users WHERE id = ?`).bind(id).first();
+  const row = await db.prepare(`SELECT ${PRIMARY_READ_HINT} ${USER_SELECT_COLUMNS} FROM users WHERE id = ?`).bind(id).first();
   if (!row) return null;
   return mapUserRow(row);
 }
@@ -1031,6 +1044,7 @@ var USER_SELECT_COLUMNS;
 var init_storage_user_repo = __esm({
   "src/services/storage-user-repo.ts"() {
     "use strict";
+    init_sql_hints();
     USER_SELECT_COLUMNS = "id, email, name, master_password_hint, master_password_hash, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, role, status, verify_devices, totp_secret, totp_recovery_code, yubikey_key1, yubikey_key2, yubikey_key3, yubikey_key4, yubikey_key5, yubikey_nfc, api_key, created_at, updated_at";
   }
 });
@@ -1874,7 +1888,9 @@ async function getRefreshTokenRecord(db, refreshTokenKey, maybeCleanupExpiredRef
   await maybeCleanupExpiredRefreshTokens(now);
   const tokenKey = await refreshTokenKey(token);
   const row = await db.prepare(
-    "SELECT user_id, expires_at, device_identifier, device_session_stamp, security_stamp, created_at, last_used_at, absolute_expires_at, client_type FROM refresh_tokens WHERE token = ?"
+    // Written by the login a moment ago; a replica one replay behind would
+    // answer "not found" and the token would be deleted as invalid.
+    `SELECT ${PRIMARY_READ_HINT} user_id, expires_at, device_identifier, device_session_stamp, security_stamp, created_at, last_used_at, absolute_expires_at, client_type FROM refresh_tokens WHERE token = ?`
   ).bind(tokenKey).first();
   if (!row) return null;
   if (row.expires_at && row.expires_at < now || row.absolute_expires_at && row.absolute_expires_at < now) {
@@ -1924,6 +1940,7 @@ async function deleteRefreshTokensByDevice(db, userId, deviceIdentifier) {
 var init_storage_refresh_token_repo = __esm({
   "src/services/storage-refresh-token-repo.ts"() {
     "use strict";
+    init_sql_hints();
   }
 });
 
@@ -2042,7 +2059,7 @@ async function getDevicesByUserId(db, userId) {
 }
 async function getDevice(db, userId, deviceIdentifier) {
   const row = await db.prepare(
-    "SELECT user_id, device_identifier, name, type, session_stamp, encrypted_user_key, encrypted_public_key, encrypted_private_key, push_uuid, push_token, banned, banned_at, device_note, last_seen_at, created_at, updated_at FROM devices WHERE user_id = ? AND device_identifier = ? LIMIT 1"
+    `SELECT ${PRIMARY_READ_HINT} user_id, device_identifier, name, type, session_stamp, encrypted_user_key, encrypted_public_key, encrypted_private_key, push_uuid, push_token, banned, banned_at, device_note, last_seen_at, created_at, updated_at FROM devices WHERE user_id = ? AND device_identifier = ? LIMIT 1`
   ).bind(userId, deviceIdentifier).first();
   return row ? mapDeviceRow(row) : null;
 }
@@ -2123,6 +2140,7 @@ var init_storage_device_repo = __esm({
   "src/services/storage-device-repo.ts"() {
     "use strict";
     init_uuid();
+    init_sql_hints();
   }
 });
 
@@ -4209,6 +4227,10 @@ var init_audit_events = __esm({
       "targetEmail",
       "grantType",
       "webSession",
+      // Whether the request arrived with cookies at all, and with the session
+      // cookie under its expected name. Presence only, never a value.
+      "cookieHeader",
+      "webCookie",
       "deviceIdentifier",
       "deviceType",
       "reason",
@@ -6344,7 +6366,7 @@ var APP_VERSION;
 var init_app_version = __esm({
   "shared/app-version.ts"() {
     "use strict";
-    APP_VERSION = "1.8.7";
+    APP_VERSION = "1.8.8";
   }
 });
 
@@ -36456,6 +36478,7 @@ function hasConfigStore(env) {
 }
 
 // src/services/db-cluster.ts
+init_sql_hints();
 init_storage_mysql();
 var NODE_FAILURE_CODES = /* @__PURE__ */ new Set([
   "ECONNREFUSED",
@@ -36887,6 +36910,22 @@ var MySqlClusterDatabase = class {
     this.readCursor += 1;
     return [...replicas.slice(start), ...replicas.slice(0, start), ...primaries];
   }
+  // Statements carrying the primary hint read back something this request — or
+  // the request a moment ago — has already committed. They are not split, even
+  // when `readSplit` is on: the whole point is that a replica being one replay
+  // behind must not be allowed to answer "not found".
+  //
+  // The rest of the pool still follows as a fallback, because a dead writer is
+  // worse than a slightly stale answer; the journal and the admin sync repair
+  // the divergence afterwards.
+  consistencyCandidates() {
+    if (!this.policy.failoverEnabled) return [this.primaryNode()];
+    const pool = this.availablePool();
+    const writer = this.activeWriterId ? pool.find((node) => node.spec.id === this.activeWriterId) : null;
+    const head = writer ?? this.primaryNode();
+    const tail2 = pool.filter((node) => node !== head);
+    return this.isCaughtUp(head) ? [head, ...tail2] : [...tail2, head];
+  }
   async runOnNode(node, sql, params, mode) {
     const statement = node.db.prepare(sql);
     if (params.length > 0) statement.bind(...params);
@@ -37018,10 +37057,10 @@ var MySqlClusterDatabase = class {
   }
   async execute(sql, params, mode) {
     const isRead = mode !== "run" && isReadOnlySql(sql);
-    return isRead ? this.executeRead(sql, params, mode) : this.executeWrite(sql, params, mode);
+    return isRead ? this.executeRead(sql, params, mode, wantsPrimaryRead(sql)) : this.executeWrite(sql, params, mode);
   }
-  async executeRead(sql, params, mode) {
-    const candidates = this.readCandidates();
+  async executeRead(sql, params, mode, primaryPinned = false) {
+    const candidates = primaryPinned ? this.consistencyCandidates() : this.readCandidates();
     let lastError = null;
     for (const node of candidates) {
       try {
@@ -48410,8 +48449,24 @@ async function handleToken(request, env) {
       unofficialServer: true
     });
   } else if (grantType === "refresh_token") {
-    const refreshToken = String(body.refresh_token || "").trim() || (shouldUseWebSession(request) ? parseCookieValue(request, WEB_REFRESH_COOKIE) : null);
+    const webSession = shouldUseWebSession(request);
+    const cookieToken = webSession ? parseCookieValue(request, WEB_REFRESH_COOKIE) : null;
+    const refreshToken = String(body.refresh_token || "").trim() || cookieToken || "";
     if (!refreshToken) {
+      await safeWriteAuditEvent(env, {
+        action: "auth.refresh.failed.missing_token",
+        category: "auth",
+        level: "warn",
+        targetType: "refreshToken",
+        metadata: {
+          grantType,
+          reason: "missing_token",
+          webSession,
+          cookieHeader: String(request.headers.get("Cookie") || "").trim() ? "present" : "absent",
+          webCookie: cookieToken ? "present" : "absent",
+          ...auditRequestMetadata(request)
+        }
+      });
       return identityErrorResponse("Refresh token is required", "invalid_request", 400);
     }
     const refreshTokenHash = await sha256Hex3(refreshToken);

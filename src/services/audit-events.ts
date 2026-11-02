@@ -40,6 +40,10 @@ const ALLOWED_METADATA_KEYS = new Set([
   'targetEmail',
   'grantType',
   'webSession',
+  // Whether the request arrived with cookies at all, and with the session
+  // cookie under its expected name. Presence only, never a value.
+  'cookieHeader',
+  'webCookie',
   'deviceIdentifier',
   'deviceType',
   'reason',
