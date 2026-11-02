@@ -247,6 +247,23 @@ async function promoteSection(dbA: MySqlDatabase, dbB: MySqlDatabase): Promise<v
     },
   };
 
+  // audit_logs.actor_user_id is a foreign key onto users(id), so the fake admin
+  // this section calls the handler with has to exist before any audited action
+  // runs. Seeded here rather than at the top of main() so the row does not get
+  // counted by the sync assertions above. Both databases: a promote switches
+  // the writer and write-through replays the audit row onto the other node.
+  const now = new Date().toISOString();
+  for (const db of [dbA, dbB]) {
+    await db
+      .prepare(
+        'INSERT INTO users (id, email, master_password_hash, key, kdf_type, kdf_iterations, ' +
+          'security_stamp, role, status, created_at, updated_at) ' +
+          "VALUES ('e2e-admin', 'admin@example.com', 'x', 'x', 0, 0, 'e2e-stamp', 'admin', 'active', ?, ?)"
+      )
+      .bind(now, now)
+      .run();
+  }
+
   const actor = { id: 'e2e-admin', email: 'admin@example.com' } as never;
   const promote = (nodeId: string, force = false) =>
     handleAdminPromoteDbNode(
