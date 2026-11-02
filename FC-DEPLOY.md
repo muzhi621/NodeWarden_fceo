@@ -16,8 +16,9 @@
 > 结果写进 `/healthz` 的 `attachments` 字段（`ok` / `missing` / `not-mounted` / `unwritable`）。
 >
 > **存储位置（附件/后台配置）见 [DEPLOY.md 第三节](DEPLOY.md#三存储与挂载最容易漏的一节)**：
-> FC 默认把附件写在 `/tmp/nodewarden`，**实例回收即丢**；要持久化必须挂 NAS 并设置
-> `DATA_DIR` / `ATTACHMENTS_DIR`（本文件第二节末尾有 FC 专属步骤）。
+> FC 默认把附件写在 `/tmp/nodewarden`，**实例回收即丢**；要持久化有两条路——挂 NAS
+> （`DATA_DIR` / `ATTACHMENTS_DIR`，见「三之二」），或**原生挂载 OSS** 只放附件
+> （`ATTACHMENTS_DIR=/mnt/oss`，见 [DEPLOY.md 3.7](DEPLOY.md#37-阿里云-fc原生挂载-oss从建桶到验证)）。
 
 ## 一、包内容
 - `server/index.mjs`：**已用 esbuild 打包好的后端（纯 JS，运行时不需要 tsx/esbuild）**
@@ -95,7 +96,12 @@
 
 > 只设 `DATA_DIR` 就够了（`ATTACHMENTS_DIR` 默认是 `${DATA_DIR}/attachments`）。
 > **不要**把 `DATA_DIR` 指向代码目录——FC 代码目录只读。
-> FC 没有 `/dev/fuse`，**不能**用 ossfs/cosfs 把 OSS/COS 挂成目录；对象存储请走应用内备份中心的 S3 兼容目标
+> FC 装不了 ossfs（没有 `/dev/fuse`），但控制台提供了**原生挂载 OSS** 的开关（可读写），
+> 是 NAS 之外更省钱的附件盘方案：函数 → 配置 → 存储 → 挂载 OSS 对象存储，
+> 本地目录 `/mnt/oss` + 环境变量 `ATTACHMENTS_DIR=/mnt/oss`。
+> 完整步骤（建桶选项、RAM 角色策略、挂载失败怎么查）见
+> [DEPLOY.md 3.7](DEPLOY.md#37-阿里云-fc原生挂载-oss从建桶到验证)。
+> 不想动挂载的话，对象存储也可以只当**定时备份目标**
 > （OSS/COS 的 endpoint、bucket、region 填法见 [DEPLOY.md 3.6.6](DEPLOY.md#366-serverless-上挂不了怎么办用备份中心把-oss-cos-当目标)）。
 
 ## 四、上传部署步骤
@@ -143,7 +149,7 @@ ALTER TABLE webauthn_credentials
 ## 七、验证
 ```bash
 curl https://<函数URL>/healthz
-# 期望：{"ok":true,"db":"up","mode":"mysql","source":"env","runtime":"node"}
+# 期望：{"ok":true,"db":"up","mode":"mysql","source":"env","runtime":"node","attachments":"ok"}
 ```
 - 应**不再**返回 MySQL 原始错误（旧版本会把 `Access denied for user ...` 直接吐给未登录访问者）。
 - Bitwarden 网页/客户端能注册、登录、保存/同步一条密码即成功。

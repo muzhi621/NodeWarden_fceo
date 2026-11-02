@@ -125,9 +125,10 @@ ATTACHMENTS_DIR = /tmp/nodewarden/attachments
 > 想区分「配置目录」和「附件目录」也可以只设 `DATA_DIR`：`ATTACHMENTS_DIR` 默认就是
 > `${DATA_DIR}/attachments`。FC 上**不要**把 `DATA_DIR` 指向代码目录（只读）。
 >
-> OSS 不能直接当文件系统用（`ossfs` 对 rename/append 的支持不完整，而 FC 本身也不给 FUSE 设备）；
-> 在 FC 上要放对象存储请用应用内备份中心的 WebDAV/S3。想在 VPS/Docker 上真把 OSS/COS 挂成附件盘，
-> 见 [3.6](#36-把阿里云-oss--腾讯云-cos-当附件盘fuse-挂载)。
+> OSS 不能当 POSIX 文件系统用（没有 FUSE 设备，也装不了 ossfs）；但 FC 控制台提供了
+> **原生挂载 OSS** 的开关，读写均可，是 NAS 之外更省钱的附件盘方案，完整步骤见
+> [3.7](#37-阿里云-fc原生挂载-oss从建桶到验证)。不挂载时，对象存储还能当**定时备份目标**（[3.6.6](#366-serverless-上挂不了怎么办用备份中心把-oss-cos-当目标)）。
+> 自建 VPS / Docker 上用 FUSE 真挂载，见 [3.6](#36-把阿里云-oss--腾讯云-cos-当附件盘fuse-挂载)。
 
 ### 3.3 EdgeOne Pages：没有持久盘，别指望附件留下来
 
@@ -187,7 +188,7 @@ npx wrangler r2 object list nodewarden-attachments --json > keys.json
 
 | 运行环境 | 能否用 ossfs / cosfs 挂 OSS/COS | 该怎么做 |
 |---|---|---|
-| 阿里云 FC | ❌ 无 `/dev/fuse`、不能给特权容器 | 挂 **NAS**（[3.2](#32-阿里云-fc挂-nas-才能持久化附件)）；对象存储只能当**备份目标**（[3.6.6](#366-serverless-上挂不了怎么办用备份中心把-oss-cos-当目标)） |
+| 阿里云 FC | ⚠️ 装不了 ossfs（无 `/dev/fuse`），但**平台原生支持挂载 OSS**（控制台开关，可读写） | 用原生挂载，见 [3.7](#37-阿里云-fc原生挂载-oss从建桶到验证)；也可挂 NAS（[3.2](#32-阿里云-fc挂-nas-才能持久化附件)） |
 | EdgeOne Pages | ❌ 同上，且只有 `/tmp` | 同上，或干脆只当入口 |
 | 自建 VPS（有 root） | ✅ ossfs / cosfs / rclone 都可以 | 本文 [3.6.1](#361-阿里云-ossossfs)、[3.6.2](#362-腾讯云-coscosfs) |
 | Docker | ✅ 但要显式放行 FUSE 设备与权限 | 见 [3.6.4](#364-docker-里挂-oss-完整示例) 的 `--device /dev/fuse --cap-add SYS_ADMIN` |
@@ -225,7 +226,11 @@ my-bucket  /mnt/oss  fuse.ossfs  _netdev,allow_other,umask=000,url=https://oss-c
 ```
 
 > `allow_other` 需要 `/etc/fuse.conf` 里有 `user_allow_other`（用 root 挂载时一般已满足）。
-> 挂载点是桶的**根**：应用的 `ATTACHMENTS_DIR` 指向桶内某个前缀即可，例如 `/mnt/oss/nodewarden/attachments`。
+> **挂载点是桶的根，`ATTACHMENTS_DIR` 就必须写挂载点本身（`/mnt/oss`）**，不要再往里加子目录：
+> 启动探测是拿它与**直接父目录**的 `st_dev` 比对来判断「是不是真挂载」，指向挂载点内的子目录
+> 会被误判成 `not-mounted`（功能正常，只是每次都刷 error 日志）。真想把附件收进桶内某个前缀，
+> 用 `mount --bind /mnt/oss/nodewarden/attachments /mnt/nw-attachments` 再做一次独立的挂载点，
+> 然后把 `ATTACHMENTS_DIR` 指向 `/mnt/nw-attachments`（写法见 [3.6.4](#364-docker-里挂-oss-完整示例) 的 Docker 例子）。
 > 官方的「OSS 挂载到本地」也叫 `ossfs`，1.x 与 2.x 参数略有差异，报 `unrecognized option` 时换另一个版本的参数写法。
 
 #### 3.6.2 腾讯云 COS（cosfs）
@@ -295,10 +300,15 @@ services:
       - /mnt/oss:/mnt/oss:shared     # 宿主机先挂好 OSS，再共享进容器
     environment:
       DATA_DIR: /data
-      ATTACHMENTS_DIR: /mnt/oss/nodewarden/attachments
+      ATTACHMENTS_DIR: /mnt/oss      # 挂载点本身，不要再加子目录
 volumes:
   nw-data:
 ```
+
+> 想让附件落到桶内某个前缀（避免和桶里其它东西混在一起）时，宿主机上先
+> `mount --bind /mnt/oss/nodewarden/attachments /mnt/nw-attachments`，再把
+> `/mnt/nw-attachments:/attachments:shared` 挂进容器、`ATTACHMENTS_DIR: /attachments`。
+> 这样 `/attachments` 在容器里也是一个独立挂载点，探测不会误报。
 
 > **只把 `ATTACHMENTS_DIR` 放对象存储，`DATA_DIR` 留在本地盘。**
 > 原因：`DATA_DIR` 里是 `kv-store.json`（每次写入都把整个 JSON 重写一遍）和节点同步记录，
@@ -308,8 +318,8 @@ volumes:
 #### 3.6.5 接到 NodeWarden 并验证
 
 ```bash
-# 只换附件目录（推荐）
-ATTACHMENTS_DIR=/mnt/oss/nodewarden/attachments
+# 只换附件目录（推荐）：值就是挂载点本身
+ATTACHMENTS_DIR=/mnt/oss
 
 # 或者连 DATA_DIR 一起放到挂载点（不推荐，理由见上）
 # DATA_DIR=/mnt/oss/nodewarden
@@ -361,6 +371,206 @@ FC / EdgeOne 没有 FUSE，但**备份中心支持 S3 兼容目标**，OSS 与 C
 > 备份包是在内存里组装完再上传的，所以真正的上限是实例内存，而不是 S3 的单对象 5 GB；
 > 走的是普通 PUT 而不是分片上传，`>5 GB` 的单对象在协议层就发不上去（当前量级够用）。
 > 上传带 120 秒单请求超时与 3 次重试，超时可用 `S3_REQUEST_TIMEOUT_MS` 调整。
+
+### 3.7 阿里云 FC：原生挂载 OSS（从建桶到验证）
+
+适用函数计算 3.0（`fcnext.console.aliyun.com`）。控制台的「挂载 OSS 对象存储」是**平台原生能力**：
+不需要 `/dev/fuse`，也不需要自己装 ossfs。[3.6](#36-把阿里云-oss--腾讯云-cos-当附件盘fuse-挂载) 的 FUSE 方案
+只用于自建 VPS / Docker。相比 NAS，OSS 按量计费、没有最小容量，个人密码库一个月通常几毛钱。
+
+#### 3.7.1 先定挂载范围，再动手
+
+| 方案 | FC「Bucket 子目录」 | 附件在 OSS 里的样子 | 适合 |
+|---|---|---|---|
+| **A. 桶根** | 留空（或 `/`） | `<uuid>` 与 `<uuid>.meta.json` 直接躺在桶根 | 这个桶专供 NodeWarden |
+| **B. 子目录** | `/nodewarden/attachments`（必须绝对路径） | `nodewarden/attachments/<uuid>` | 同一个桶还要放别的东西 |
+
+两种都能跑通。**但选定后不要中途改**：换挂载范围等于换附件在 OSS 里的路径，桶里已有的对象不会
+自动搬过去，密码库里的附件记录会全部失效（表现为「附件明明在，却下载 404」）。
+
+无论选哪种，FC 的「函数本地目录」就是 `ATTACHMENTS_DIR`，**不要再往里加子目录**——原因见 3.7.7。
+
+#### 3.7.2 建 Bucket
+
+| 选项 | 选什么 | 为什么 |
+|---|---|---|
+| 地域 | 与函数**同地域** | 同地域才能用内网 Endpoint，不计公网流出流量 |
+| 存储类型 | **标准存储** | 归档 / 冷归档的文件是冻结状态，挂载读取直接 `Input/output error` |
+| 读写权限 | **私有** | 应用用角色访问，公共读等于把密码库附件挂到公网 |
+| 冗余类型 | 本地冗余 LRS | 同城冗余贵一倍，个人场景没必要 |
+| 版本控制 | **关闭** | 开启后每次覆盖写都留历史版本，附件重传会翻倍计费 |
+| 名称 | 全局唯一，如 `nodewarden-<后缀>` | 3–63 位小写字母、数字、短横线 |
+
+#### 3.7.3 给函数角色授权（这一步错了函数直接起不来）
+
+**权限必须给「函数角色」（RAM 角色），不是 RAM 用户。** FC 挂载走角色扮演，控制台上没有填 AK 的地方；
+授权给用户只会得到 `invalid credentials`。角色本身的信任策略由 FC 创建时自动生成，正常不需要改。
+
+**方案 A（挂桶根）** —— 挂载根目录时 ListObjects 的前缀是空字符串，所以策略必须是整桶范围、
+**不能带 `oss:Prefix` 条件**：
+
+```json
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Action": ["oss:ListObjects", "oss:GetBucketInfo"],
+      "Effect": "Allow",
+      "Resource": ["acs:oss:*:*:your-bucket"]
+    },
+    {
+      "Action": [
+        "oss:GetObject", "oss:PutObject", "oss:DeleteObject",
+        "oss:AbortMultipartUpload", "oss:ListParts", "oss:GetObjectMeta"
+      ],
+      "Effect": "Allow",
+      "Resource": ["acs:oss:*:*:your-bucket/*"]
+    }
+  ]
+}
+```
+
+**方案 B（挂子目录）** —— 可以按前缀收窄。`oss:ListObjects` 是**桶级**操作，资源只能写桶名，
+前缀用 `Condition` 收窄；对象级动作才写到 `桶/前缀/*`：
+
+```json
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Action": "oss:ListObjects",
+      "Effect": "Allow",
+      "Resource": ["acs:oss:*:*:your-bucket"],
+      "Condition": {
+        "StringLike": { "oss:Prefix": ["nodewarden/*"] }
+      }
+    },
+    {
+      "Action": [
+        "oss:GetObject", "oss:PutObject", "oss:DeleteObject",
+        "oss:AbortMultipartUpload", "oss:ListParts"
+      ],
+      "Effect": "Allow",
+      "Resource": ["acs:oss:*:*:your-bucket/nodewarden/*"]
+    }
+  ]
+}
+```
+
+两个已经踩过的坑：
+
+- **`oss:Prefix` 条件只对 `oss:ListObjects` 生效。** 把 `oss:GetBucketInfo` 塞进同一条带条件的语句，
+  它会因为匹配不上条件而被**隐性拒绝**，现象和没授权一模一样（`invalid credentials`）。
+  要么让它单独成一条不带条件的语句，要么按官方最小集省掉它。
+- **控制台脚本编辑器改策略时，粘贴前先 `Ctrl+A` 全选覆盖。** 旧内容残留在后面会变成两份 JSON
+  首尾相接，直接报 `JSON syntax error`（错误详情写着「策略包含语法错误」）。
+
+保存后到「RAM → 角色 → 你的函数角色 → 权限管理 → 已授权策略」，确认这条自定义策略在列表里。
+策略修改即时生效，不需要重新授权。
+
+#### 3.7.4 开启挂载并部署
+
+函数 → **配置 → 高级配置 → 编辑 → 存储 → 挂载 OSS 对象存储**：
+
+| 配置项 | 填什么 |
+|---|---|
+| Bucket | 你的桶名 |
+| Bucket 子目录 | 方案 A 留空；方案 B 填 `/nodewarden/attachments` |
+| OSS 访问地址 | 同地域选**内网** Endpoint（如 `https://oss-cn-hongkong-internal.aliyuncs.com`）；跨地域只能用公网地址并付流出费 |
+| 函数本地目录 | `/mnt/oss`（只能是 `/home`、`/mnt`、`/data` 的子目录） |
+| 函数本地目录权限 | **读写** |
+
+改完点「**部署**」。只保存不部署不生效——这是最常漏的一步，而且 FC 是**先挂载、再启动进程**，
+所以挂载失败时函数根本不会运行，所有路径都返回平台错误（见 3.7.8 的判据）。
+
+其他限制：同一函数最多 5 个 OSS 挂载点；OSS 挂载点的本地目录不能和 NAS 挂载点冲突；
+内存规格建议 ≥512 MB，低于这个值容易出现 `Transport endpoint is not connected`。
+
+#### 3.7.5 环境变量
+
+```bash
+ATTACHMENTS_DIR=/mnt/oss     # 就是挂载点本身，别写子目录
+```
+
+`DATA_DIR` 按情况：
+
+- **已经挂了 NAS** → 保持原值（如 `/mnt/nas/nodewarden`），OSS 只管附件，各管一摊；
+- **没有 NAS** → 保持默认 `/tmp/nodewarden`。附件已搬去 OSS 不受影响，但**后台保存的数据库配置、
+  节点同步记录会在冷启动后丢失**；数据库连接请用 `DB_*` 环境变量（见 5.2）。
+
+改完环境变量**再部署一次**。顺序永远是「先挂成功 → 再启动应用」。
+
+#### 3.7.6 验证（四步，缺一步都不算成功）
+
+**① 挂载是否通**：函数 → 实例 → 选「运行中」→ 登录实例。
+
+```bash
+ls -la /mnt/oss/                    # 能列目录（空桶时为空）即挂载成功
+echo hello > /mnt/oss/probe.txt     # 能写，说明权限也对
+cat /mnt/oss/probe.txt && rm /mnt/oss/probe.txt
+```
+
+写完去 OSS 控制台看一眼——**对象真的出现在桶里**，才同时证明了「角色权限」和「挂载方向」两件事。
+
+**② 应用是否认这个目录**：
+
+```bash
+curl -s https://<你的地址>/healthz
+# {"ok":true,"db":"up","mode":"mysql","source":"env","runtime":"node","attachments":"ok"}
+```
+
+`attachments` 是 `ok` 就成了（`db:"down"` 是没配数据库时的正常表现）。启动日志里应有一行
+`[attachments] storage ready at /mnt/oss`。这个字段的四种取值：`ok` / `missing` / `not-mounted` / `unwritable`，
+后三种的排法见 3.7.7。
+
+**③ 真传一个附件**：网页端随便选条记录上传几十 KB 的小文件。OSS 控制台对应位置应出现**两个对象**：
+`<uuid>` 与 `<uuid>.meta.json`。只有一个、或者都没有，说明应用还在写本地目录。
+
+**④ 跨实例验证（最关键）**：手动重新部署一次（或等实例缩容，最小实例数为 0 时很快），再下载刚才那个附件。
+**能下载才算真的持久化。** 这一步同时暴露 FC 多实例的已知行为——不同实例看不到对方刚写的对象，
+上传后立刻换实例下载可能偶发 404，重试即可；要彻底避免就把「最小实例数」设成 1。
+
+#### 3.7.7 为什么 `ATTACHMENTS_DIR` 必须等于挂载点
+
+启动探测判断「是不是真挂载」用的是 `stat` 的 `st_dev`，比较对象是 `ATTACHMENTS_DIR` 与它的**直接父目录**：
+
+| 配置 | 结果 |
+|---|---|
+| `ATTACHMENTS_DIR=/mnt/oss`（挂载点本身） | `ok` |
+| `ATTACHMENTS_DIR=/mnt/oss/nodewarden/attachments`（挂载点内的子目录） | **`not-mounted` 误报** |
+
+FC 的「Bucket 子目录」是由平台在挂载时处理的，函数里只看得到 `/mnt/oss` 这一个挂载点——所以填留空或
+子目录都不影响 `ATTACHMENTS_DIR=/mnt/oss` 这个结论。自建 FUSE 场景下如果确实想把附件收进桶内某个
+前缀，用 `mount --bind` 把它做成独立挂载点（见 3.6.1 与 3.6.4）。
+
+#### 3.7.8 排障
+
+先分清错误是谁发的——**看响应头有没有 `x-fc-error-type`，以及响应体是不是应用自己的 JSON**：
+
+- 返回 `400`，`{"Code":"InvalidArgument","Message":"Fail to mount oss: invalid credentials"}`，
+  带 `x-fc-error-type: FCCommonError` → **平台层**挂载失败，函数没启动，跟 NodeWarden 无关；
+- 返回 404/500 但带应用自己的日志 → 请求已经进函数，按业务问题查。
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `Fail to mount oss: invalid credentials` | 角色没有该桶权限、策略带了不匹配的 `oss:Prefix` 条件、或授权给了 RAM 用户而不是角色 | 回到 3.7.3，改完重新部署 |
+| `bucket not found` | 桶名或 Endpoint 地域不匹配 | 核对桶名与 Endpoint |
+| `host resolv error` / `deadline exceeded` | Endpoint 写错，或用了**跨地域的内网**地址 | 同地域用内网、跨地域用公网 |
+| 读文件 `Input/output error` | 桶是归档 / 冷归档存储 | 改标准存储 |
+| 实例内访问挂载点 `Transport endpoint is not connected` | 函数内存不足 | 规格调到 ≥512 MB |
+| `/healthz` 的 `attachments` 是 `not-mounted` | `ATTACHMENTS_DIR` 指到了挂载点内的子目录 | 改回 `/mnt/oss` |
+| 上传成功、换实例后下载 404 | FC 多实例之间不保证实时可见 | 重试；关键场景把最小实例数设 1 |
+| 保存策略报 `JSON syntax error` | 编辑器里旧内容没删干净，两份 JSON 拼在一起 | `Ctrl+A` 全选覆盖后重新粘贴 |
+
+#### 3.7.9 成本与限制
+
+- 每个附件占 **2 个对象**（数据 + `.meta.json`），PUT/HEAD/GET 次数翻倍，**请求费比容量费更容易超**；
+- 同地域内网 Endpoint 不计流量费，跨地域/公网按流出计费；
+- OSS 没有完整 POSIX 语义，但本应用只用「建新文件 / stat / 顺序读 / 删除」四种操作，**不要**把
+  `DATA_DIR`、MySQL 数据文件之类放上去；
+- 对象存储挂载不适合高并发小文件场景，个人密码库的量级完全够用；
+- 回滚：删掉 `ATTACHMENTS_DIR` 环境变量 → 关掉 OSS 挂载开关 → 部署一次（附件回到本地目录，
+  已经上传到 OSS 的对象不会自动搬回来）。
 
 ---
 
@@ -456,7 +666,7 @@ npm run start:node               # 默认 http://localhost:8787
 | 变量 / 绑定 | 默认 | 平台 | 说明 |
 |---|---|---|---|
 | `DATA_DIR` | `<repo>/data`（FC 包 `/tmp/nodewarden`） | F/N | 数据目录：后台保存的配置、节点同步记录、写入水位、本地 KV 文件。**必须指向持久盘**才能跨重启/缩容保留 |
-| `ATTACHMENTS_DIR` | `${DATA_DIR}/attachments` | F/N | 附件与 Send 文件的实际落盘目录。想单独挂一块盘时设。指向**非默认位置**时启动会检查它是不是独立挂载点，结果写进日志与 `/healthz` 的 `attachments` 字段 |
+| `ATTACHMENTS_DIR` | `${DATA_DIR}/attachments` | F/N | 附件与 Send 文件的实际落盘目录。想单独挂一块盘时设。**值必须是挂载点本身**（`/mnt/oss`、`/mnt/nw-attachments`），写到挂载点内的子目录会被启动探测误判成 `not-mounted`（见 [3.7.7](#377-为什么-attachments_dir-必须等于挂载点)）。指向非默认位置时启动会检查它是不是独立挂载点，结果写进日志与 `/healthz` 的 `attachments` 字段 |
 | `ATTACHMENTS`（R2 绑定） | — | W | 附件存储，R2 模式必需 |
 | `SETTINGS_KV`（KV 绑定） | — | W | 配置存储，优先级最高 |
 | `ATTACHMENTS_KV`（KV 绑定） | — | W | KV 模式的附件存储；恢复 KV 模式备份时必需 |
@@ -522,6 +732,8 @@ curl -s https://<你的地址>/healthz
 | 后台「测试连接」提示内网地址被拒 | SSRF 防护默认拒绝私网/回环 | 把 host 加进 `DB_HOST_ALLOWLIST` |
 | 后台保存配置成功但提示「未生效」 | `DB_*` 环境变量优先于后台配置 | 想用后台配置就先删掉 `DB_*` |
 | 附件上传成功，重启后下载 404 | `DATA_DIR` 还在 `/tmp` 或没挂持久盘 | FC 挂 NAS（[3.2](#32-阿里云-fc挂-nas-才能持久化附件)），自建挂卷（[3.4](#34-自建--docker卷挂到-data_dir)） |
+| FC 上所有路径都返回 `Fail to mount oss: invalid credentials` | 平台层挂载失败，函数**根本没启动**，与代码无关 | 给函数**角色**授权并重新部署，见 [3.7.3](#373-给函数角色授权这一步错了函数直接起不来) |
+| `/healthz` 的 `attachments` 是 `not-mounted` | `ATTACHMENTS_DIR` 指到了挂载点内的子目录 | 改回挂载点本身（如 `/mnt/oss`），见 3.7.7 |
 | 启动就报 `EACCES` / `EROFS` | 挂载点不可写，或指向了只读的代码目录 | 换到挂载的 NAS/卷；别把 `DATA_DIR` 指到代码目录 |
 | EdgeOne 上设了 `DATA_DIR` 没用 | 函数模式强制 `/tmp/nodewarden` | 平台限制，附件持久化请用 FC |
 | 大附件/还原在 EdgeOne 上中断 | 6 MB 请求体、120 s 单次执行 | 换 FC，或把备份任务拆小 |
