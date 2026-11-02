@@ -1,4 +1,5 @@
 import type { RefreshTokenRecord } from '../types';
+import { PRIMARY_READ_HINT } from './sql-hints';
 
 type RefreshTokenKeyFn = (token: string) => Promise<string>;
 type CleanupExpiredFn = (nowMs: number) => Promise<void>;
@@ -55,7 +56,9 @@ export async function getRefreshTokenRecord(
 
   const row = await db
     .prepare(
-      'SELECT user_id, expires_at, device_identifier, device_session_stamp, security_stamp, created_at, last_used_at, absolute_expires_at, client_type ' +
+      // Written by the login a moment ago; a replica one replay behind would
+      // answer "not found" and the token would be deleted as invalid.
+      `SELECT ${PRIMARY_READ_HINT} user_id, expires_at, device_identifier, device_session_stamp, security_stamp, created_at, last_used_at, absolute_expires_at, client_type ` +
         'FROM refresh_tokens WHERE token = ?'
     )
     .bind(tokenKey)

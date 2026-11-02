@@ -1,5 +1,6 @@
 import type { Device, TrustedDeviceTokenSummary, User } from '../types';
 import { generateUUID } from '../utils/uuid';
+import { PRIMARY_READ_HINT } from './sql-hints';
 
 type GetUserByEmail = (email: string) => Promise<User | null>;
 type TrustedTokenKeyFn = (token: string) => Promise<string>;
@@ -198,8 +199,11 @@ export async function getDevicesByUserId(db: D1Database, userId: string): Promis
 
 export async function getDevice(db: D1Database, userId: string, deviceIdentifier: string): Promise<Device | null> {
   const row = await db
+    // The refresh path fails closed when this row is missing ("device_missing"
+    // deletes the token), so a replica that has not received the device row yet
+    // must not be allowed to answer. Read the stamp from the writer.
     .prepare(
-      'SELECT user_id, device_identifier, name, type, session_stamp, encrypted_user_key, encrypted_public_key, encrypted_private_key, push_uuid, push_token, banned, banned_at, device_note, last_seen_at, created_at, updated_at ' +
+      `SELECT ${PRIMARY_READ_HINT} user_id, device_identifier, name, type, session_stamp, encrypted_user_key, encrypted_public_key, encrypted_private_key, push_uuid, push_token, banned, banned_at, device_note, last_seen_at, created_at, updated_at ` +
         'FROM devices WHERE user_id = ? AND device_identifier = ? LIMIT 1'
     )
     .bind(userId, deviceIdentifier)

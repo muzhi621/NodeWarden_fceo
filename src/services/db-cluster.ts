@@ -59,6 +59,7 @@
 //     servers it configured, and a failover is local.
 
 import type { ClusterWatermarkSnapshot, DbClusterPolicy } from './db-config';
+import { wantsPrimaryRead } from './sql-hints';
 import {
   MySqlDatabase,
   isReadOnlySql,
@@ -721,6 +722,25 @@ export class MySqlClusterDatabase implements D1LikeDatabase {
     return [...replicas.slice(start), ...replicas.slice(0, start), ...primaries];
   }
 
+  // Statements carrying the primary hint read back something this request — or
+  // the request a moment ago — has already committed. They are not split, even
+  // when `readSplit` is on: the whole point is that a replica being one replay
+  // behind must not be allowed to answer "not found".
+  //
+  // The rest of the pool still follows as a fallback, because a dead writer is
+  // worse than a slightly stale answer; the journal and the admin sync repair
+  // the divergence afterwards.
+  private consistencyCandidates(): NodeRuntime[] {
+    if (!this.policy.failoverEnabled) return [this.primaryNode()];
+    const pool = this.availablePool();
+    const writer = this.activeWriterId ? pool.find((node) => node.spec.id === this.activeWriterId) : null;
+    const head = writer ?? this.primaryNode();
+    const tail = pool.filter((node) => node !== head);
+    // A promoted replica leads, but one that is behind on the journal only
+    // answers a consistency read after every caught-up node has been tried.
+    return this.isCaughtUp(head) ? [head, ...tail] : [...tail, head];
+  }
+
   private async runOnNode(
     node: NodeRuntime,
     sql: string,
@@ -890,11 +910,16 @@ export class MySqlClusterDatabase implements D1LikeDatabase {
     // all()/first(): a SELECT sent via run() keeps going to the writer, which is
     // the safe direction to be wrong in.
     const isRead = mode !== 'run' && isReadOnlySql(sql);
-    return isRead ? this.executeRead(sql, params, mode) : this.executeWrite(sql, params, mode);
+    return isRead ? this.executeRead(sql, params, mode, wantsPrimaryRead(sql)) : this.executeWrite(sql, params, mode);
   }
 
-  private async executeRead(sql: string, params: unknown[], mode: StatementMode): Promise<unknown> {
-    const candidates = this.readCandidates();
+  private async executeRead(
+    sql: string,
+    params: unknown[],
+    mode: StatementMode,
+    primaryPinned = false
+  ): Promise<unknown> {
+    const candidates = primaryPinned ? this.consistencyCandidates() : this.readCandidates();
     let lastError: unknown = null;
 
     for (const node of candidates) {
