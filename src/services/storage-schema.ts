@@ -243,9 +243,15 @@ export async function repairMillisecondColumns(db: D1Database): Promise<string[]
         .prepare(`ALTER TABLE ${table} MODIFY COLUMN ${column} BIGINT${notNull ? ' NOT NULL' : ''}`)
         .run();
       repaired.push(`${table}.${column} (${type} -> bigint)`);
-    } catch {
-      // Not MySQL (no information_schema), or the account may not inspect or
-      // alter the table. Leave it alone; the normal queries decide.
+    } catch (error) {
+      // SQLite has no information_schema, so the probe above simply fails there
+      // and there is nothing to repair. On MySQL a failure here is worth
+      // saying out loud: it means the account cannot inspect or alter the
+      // table, and the truncated timestamps will keep sweeping the sessions.
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/no such table|does not exist|unknown database|information_schema/i.test(message)) {
+        console.warn(`[schema] could not verify ${table}.${column}:`, message);
+      }
     }
   }
   return repaired;

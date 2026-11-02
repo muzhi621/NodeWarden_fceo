@@ -760,7 +760,11 @@ async function repairMillisecondColumns(db) {
       if (!type || type === "bigint") continue;
       await db.prepare(`ALTER TABLE ${table} MODIFY COLUMN ${column} BIGINT${notNull ? " NOT NULL" : ""}`).run();
       repaired.push(`${table}.${column} (${type} -> bigint)`);
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/no such table|does not exist|unknown database|information_schema/i.test(message)) {
+        console.warn(`[schema] could not verify ${table}.${column}:`, message);
+      }
     }
   }
   return repaired;
