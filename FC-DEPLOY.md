@@ -1,20 +1,35 @@
 # NodeWarden BYO-DB — 阿里云 FC 部署说明
 
 > 本文件在**仓库根目录**与**部署 ZIP 根目录**各存一份，内容一致。
-> 部署包是为「阿里云函数计算 FC · Web 函数」准备的可直接上传 ZIP，版本 **v1.8.8**。
+> 部署包是为「阿里云函数计算 FC · Web 函数」准备的可直接上传 ZIP，版本 **v1.8.9**。
 > 代码来源：`main` 分支（BYO-DB + Node 运行时 + 多轮代码审查修复）。
 >
 > 注：下文的「包内容」以 **ZIP 包**为准。仓库里的 `node_modules/` 是完整开发依赖，
 > `dist/`、`server/index.mjs` 需自行构建（见第九节）；`fc-entry.mjs` 在仓库根目录，
 > 组包时原样复制到包根即可。
 >
-> **从 v1.8.7 升级**：`dist/` 与 `server/index.mjs` **都有实质变化**——修的是「登录后一刷新就退回
-> 登录页」。前端不再在缺少令牌时立刻判定会话失效（会先试一次会话 Cookie），后端把刷新令牌、
-> 设备行、用户安全戳这三处鉴权读**固定路由到写节点**，不再走只读副本——副本尚未重放写入时会
-> 回答"没有这行"，而刷新流程把"没有这行"当成"凭证已吊销"，于是删令牌、清 Cookie，一刷就掉线。
-> 另外新增审计事件 `auth.refresh.failed.missing_token`（只记 Cookie 头/会话 Cookie 是否存在，
-> 不记值），可在日志中心区分"浏览器根本没带 Cookie"和"带了但不是我们的"。
-> 数据库结构未变，**不需要跑任何 SQL**，替换后重启函数即可。
+> **从 v1.8.8 升级**：`dist/` 与 `server/index.mjs` **都有实质变化**——这次找到并修掉了
+> 「登录成功、但一刷新就退回登录页」的真正原因：**老库里的毫秒时间戳列是 `INT`**。
+>
+> `refresh_tokens.expires_at` 存的是毫秒时间戳（约 1.79e12），而 `INT` 上限是 2147483647。
+> 如果你的库是早期版本建的、或当初手工执行过 `migrations/0001_init.sql`（SQLite 的 `INTEGER`
+> 在 MySQL 里就是 `INT`），那 `CREATE TABLE IF NOT EXISTS` 永远不会改这张已存在的表，
+> 于是每次登录写令牌都被静默截断成 2147483647（1970-01-25），紧接着的清理语句
+> `DELETE FROM refresh_tokens WHERE expires_at < now` 把它当成早已过期删掉 ——
+> 登录照常返回 200、Cookie 也正常下发，但每次刷新都报「令牌不存在或已过期」。
+>
+> 本版启动时会检查这几列（`refresh_tokens` 的 `expires_at` / `created_at` / `last_used_at` /
+> `absolute_expires_at`），**只对 MySQL、只在类型不是 `bigint` 时**执行一次
+> `ALTER TABLE ... MODIFY COLUMN ... BIGINT`，并把改过的列写进启动日志与 `/healthz`
+> 的 `schemaRepair` 字段（没问题时不出现该字段）。
+>
+> 不需要手工跑 SQL；升级后第一次请求会自动修好，然后**重新登录一次**（旧令牌已经被截断成
+> 1970 年，不可恢复）。若 `/healthz` 里出现了 `schemaRepair`，就说明这一版正好治的是你的库。
+>
+> 同时新增诊断：刷新失败事件现在带 `stage`（`record_missing` / `extend_rejected` /
+> `device_session_mismatch` …）、`tokenRows`（当时表里有几行）和 `newestTokenAt`，
+> 万一是别的原因，一条日志就能定位。
+>
 > **多节点集群请在全部节点上升级**：只升部分节点的话，未升级的实例仍可能把鉴权读分流到落后副本，
 > 掉登录会以"偶发"的形式继续出现。
 >

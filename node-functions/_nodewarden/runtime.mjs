@@ -749,15 +749,37 @@ async function ensureAdminUserExists(db) {
   if (!firstUser?.id) return;
   await db.prepare("UPDATE users SET role = 'admin', updated_at = ? WHERE id = ?").bind((/* @__PURE__ */ new Date()).toISOString(), firstUser.id).run();
 }
+async function repairMillisecondColumns(db) {
+  const repaired = [];
+  for (const { table, column, notNull } of MILLISECOND_COLUMNS) {
+    try {
+      const row = await db.prepare(
+        "SELECT DATA_TYPE AS data_type FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?"
+      ).bind(table, column).first();
+      const type = String(row?.data_type ?? "").toLowerCase();
+      if (!type || type === "bigint") continue;
+      await db.prepare(`ALTER TABLE ${table} MODIFY COLUMN ${column} BIGINT${notNull ? " NOT NULL" : ""}`).run();
+      repaired.push(`${table}.${column} (${type} -> bigint)`);
+    } catch {
+    }
+  }
+  return repaired;
+}
 async function ensureStorageSchema(db) {
   await db.prepare("PRAGMA foreign_keys = ON").run();
   await db.prepare("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL)").run();
   for (const stmt of SCHEMA_STATEMENTS) {
     await executeSchemaStatement(db, stmt);
   }
+  const repaired = await repairMillisecondColumns(db);
+  lastSchemaRepair = repaired;
   await ensureAdminUserExists(db);
+  return repaired;
 }
-var SCHEMA_STATEMENTS;
+function getLastSchemaRepair() {
+  return lastSchemaRepair;
+}
+var SCHEMA_STATEMENTS, MILLISECOND_COLUMNS, lastSchemaRepair;
 var init_storage_schema = __esm({
   "src/services/storage-schema.ts"() {
     "use strict";
@@ -857,6 +879,13 @@ var init_storage_schema = __esm({
       "CREATE TABLE IF NOT EXISTS login_attempts_ip (ip TEXT PRIMARY KEY, attempts INTEGER NOT NULL, locked_until INTEGER, updated_at INTEGER NOT NULL)",
       "CREATE TABLE IF NOT EXISTS used_attachment_download_tokens (jti TEXT PRIMARY KEY, expires_at INTEGER NOT NULL)"
     ];
+    MILLISECOND_COLUMNS = [
+      { table: "refresh_tokens", column: "expires_at", notNull: true },
+      { table: "refresh_tokens", column: "created_at", notNull: false },
+      { table: "refresh_tokens", column: "last_used_at", notNull: false },
+      { table: "refresh_tokens", column: "absolute_expires_at", notNull: false }
+    ];
+    lastSchemaRepair = [];
   }
 });
 
@@ -1937,6 +1966,15 @@ async function deleteRefreshTokensByDevice(db, userId, deviceIdentifier) {
   const result = await db.prepare("DELETE FROM refresh_tokens WHERE user_id = ? AND device_identifier = ?").bind(userId, deviceIdentifier).run();
   return Number(result.meta.changes ?? 0);
 }
+async function getRefreshTokenTableStats(db) {
+  const row = await db.prepare("SELECT COUNT(*) AS total, MAX(created_at) AS newest FROM refresh_tokens").first();
+  const total = Number(row?.total);
+  const newest = row?.newest === null || row?.newest === void 0 ? null : Number(row.newest);
+  return {
+    total: Number.isFinite(total) ? total : -1,
+    newestCreatedAt: newest !== null && Number.isFinite(newest) ? newest : null
+  };
+}
 var init_storage_refresh_token_repo = __esm({
   "src/services/storage-refresh-token-repo.ts"() {
     "use strict";
@@ -2944,7 +2982,7 @@ var init_storage = __esm({
     init_storage_account_passkey_repo();
     TWO_FACTOR_REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
     STORAGE_SCHEMA_VERSION_KEY = "schema.version";
-    STORAGE_SCHEMA_VERSION = "2026-07-13-refresh-session-reuse";
+    STORAGE_SCHEMA_VERSION = "2026-11-02-mysql-bigint-epoch-columns";
     REQUIRED_SCHEMA_TABLES = ["webauthn_credentials", "webauthn_challenges", "auth_requests", "totp_login_replays"];
     StorageService = class _StorageService {
       constructor(db) {
@@ -3050,7 +3088,10 @@ var init_storage = __esm({
         const schemaVersion = await getConfigValue(this.db, STORAGE_SCHEMA_VERSION_KEY);
         const schemaMissingRequiredTables = schemaVersion === STORAGE_SCHEMA_VERSION ? !await this.hasRequiredSchemaTables() : true;
         if (schemaVersion !== STORAGE_SCHEMA_VERSION || schemaMissingRequiredTables) {
-          await ensureStorageSchema(this.db);
+          const repairedColumns = await ensureStorageSchema(this.db);
+          if (repairedColumns.length > 0) {
+            console.warn("[schema] widened millisecond columns to BIGINT:", repairedColumns.join(", "));
+          }
           await setConfigValue(this.db, STORAGE_SCHEMA_VERSION_KEY, STORAGE_SCHEMA_VERSION);
         }
         await ensurePushInstallationCredentials(this.db);
@@ -3344,6 +3385,10 @@ var init_storage = __esm({
       async getRefreshTokenUserId(token) {
         const record = await this.getRefreshTokenRecord(token);
         return record?.userId ?? null;
+      }
+      /** Failure-path diagnostics: how many rows the table holds, and how fresh. */
+      async getRefreshTokenTableStats() {
+        return getRefreshTokenTableStats(this.db);
       }
       async deleteRefreshToken(token) {
         await deleteRefreshToken(this.db, this.refreshTokenKey.bind(this), token);
@@ -3830,19 +3875,28 @@ var init_auth = __esm({
       // Refresh access token
       async refreshAccessTokenDetailed(refreshToken) {
         const record = await this.storage.getRefreshTokenRecord(refreshToken);
-        if (!record?.userId) return { ok: false, reason: "token_not_found_or_expired" };
+        if (!record?.userId) {
+          const stats = await this.storage.getRefreshTokenTableStats().catch(() => null);
+          return {
+            ok: false,
+            reason: "token_not_found_or_expired",
+            stage: "record_missing",
+            tokenRows: stats?.total ?? -1,
+            newestTokenAt: stats?.newestCreatedAt ?? null
+          };
+        }
         const user = await this.storage.getUserById(record.userId);
         if (!user) {
           await this.storage.deleteRefreshToken(refreshToken);
-          return { ok: false, reason: "user_missing", userId: record.userId, deviceIdentifier: record.deviceIdentifier };
+          return { ok: false, reason: "user_missing", stage: "user_missing", userId: record.userId, deviceIdentifier: record.deviceIdentifier };
         }
         if (user.status !== "active") {
           await this.storage.deleteRefreshToken(refreshToken);
-          return { ok: false, reason: "user_inactive", userId: user.id, deviceIdentifier: record.deviceIdentifier };
+          return { ok: false, reason: "user_inactive", stage: "user_inactive", userId: user.id, deviceIdentifier: record.deviceIdentifier };
         }
         if (record.securityStamp && record.securityStamp !== user.securityStamp) {
           await this.storage.deleteRefreshToken(refreshToken);
-          return { ok: false, reason: "security_stamp_mismatch", userId: user.id, deviceIdentifier: record.deviceIdentifier };
+          return { ok: false, reason: "security_stamp_mismatch", stage: "security_stamp_mismatch", userId: user.id, deviceIdentifier: record.deviceIdentifier };
         }
         if (!record.securityStamp) {
           await this.storage.bindRefreshTokenSecurityStamp(refreshToken, user.securityStamp);
@@ -3852,11 +3906,11 @@ var init_auth = __esm({
           const boundDevice = await this.storage.getDevice(user.id, record.deviceIdentifier);
           if (!boundDevice) {
             await this.storage.deleteRefreshToken(refreshToken);
-            return { ok: false, reason: "device_missing", userId: user.id, deviceIdentifier: record.deviceIdentifier };
+            return { ok: false, reason: "device_missing", stage: "device_missing", userId: user.id, deviceIdentifier: record.deviceIdentifier };
           }
           if (record.deviceSessionStamp && boundDevice.sessionStamp !== record.deviceSessionStamp) {
             await this.storage.deleteRefreshToken(refreshToken);
-            return { ok: false, reason: "device_session_mismatch", userId: user.id, deviceIdentifier: record.deviceIdentifier };
+            return { ok: false, reason: "device_session_mismatch", stage: "device_session_mismatch", userId: user.id, deviceIdentifier: record.deviceIdentifier };
           }
           if (!record.deviceSessionStamp) {
             await this.storage.bindRefreshTokenDeviceStamp(refreshToken, boundDevice.sessionStamp);
@@ -3870,7 +3924,16 @@ var init_auth = __esm({
         );
         const extended = await this.storage.extendRefreshTokenExpiry(refreshToken, expiresAt, now);
         if (!extended) {
-          return { ok: false, reason: "token_not_found_or_expired", userId: user.id, deviceIdentifier: record.deviceIdentifier };
+          const stats = await this.storage.getRefreshTokenTableStats().catch(() => null);
+          return {
+            ok: false,
+            reason: "token_not_found_or_expired",
+            stage: "extend_rejected",
+            userId: user.id,
+            deviceIdentifier: record.deviceIdentifier,
+            tokenRows: stats?.total ?? -1,
+            newestTokenAt: stats?.newestCreatedAt ?? null
+          };
         }
         const accessToken = await this.generateAccessToken(user, device);
         return { ok: true, accessToken, user, device, expiresAt };
@@ -4227,6 +4290,13 @@ var init_audit_events = __esm({
       "targetEmail",
       "grantType",
       "webSession",
+      // Which check inside the refresh flow rejected the request, and how many
+      // refresh-token rows existed at that moment. "not found" alone cannot be
+      // acted on; "no rows at all" and "rows exist but not this token" have
+      // completely different causes.
+      "stage",
+      "tokenRows",
+      "newestTokenAt",
       // Whether the request arrived with cookies at all, and with the session
       // cookie under its expected name. Presence only, never a value.
       "cookieHeader",
@@ -6366,7 +6436,7 @@ var APP_VERSION;
 var init_app_version = __esm({
   "shared/app-version.ts"() {
     "use strict";
-    APP_VERSION = "1.8.8";
+    APP_VERSION = "1.8.9";
   }
 });
 
@@ -48542,6 +48612,9 @@ async function handleToken(request, env) {
         metadata: {
           grantType,
           reason: result.reason,
+          stage: result.stage,
+          tokenRows: result.tokenRows,
+          newestTokenAt: result.newestTokenAt,
           webSession: shouldUseWebSession(request),
           ...auditRequestMetadata(request)
         }
@@ -49438,6 +49511,7 @@ async function handleRequest(request, env) {
 }
 
 // server/node-runtime.ts
+init_storage_schema();
 init_response();
 
 // src/web-vault-visibility.ts
@@ -50512,6 +50586,7 @@ async function handleHealthz(env) {
     console.error("[healthz] database unavailable:", status.error);
   }
   const attachments = await ensureAttachmentsProbe().catch(() => null);
+  const repaired = getLastSchemaRepair();
   return jsonResponse(
     {
       ok: status.ok,
@@ -50519,7 +50594,10 @@ async function handleHealthz(env) {
       mode: status.mode,
       source: status.source,
       runtime: "node",
-      attachments: attachments?.status ?? "unknown"
+      attachments: attachments?.status ?? "unknown",
+      // Only present when this process actually had to widen an old table, so a
+      // clean install keeps the same shape it always had.
+      ...repaired.length > 0 ? { schemaRepair: repaired } : {}
     },
     status.ok ? 200 : 503
   );

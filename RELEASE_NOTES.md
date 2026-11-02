@@ -21,6 +21,32 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.9 - Refresh Tokens That Stopped Expiring in 1970
+
+### Fixed
+
+1. **A reload no longer signs you out on a database that was created years ago.** `refresh_tokens.expires_at` holds a millisecond timestamp, but a table created by an older build — or by running the SQLite migration by hand, where `INTEGER` is MySQL's `INT` — keeps that column as a 32-bit integer. The largest value it can hold is 2147483647, so writing "now plus 30 days" silently stored January 1970 instead, and the sweep that deletes expired tokens removed the row on the very next request. Login kept returning success and kept issuing the cookie, which is why the browser looked signed in right up to the reload that signed it out. The schema check now widens those four timestamp columns to `BIGINT`, but only on MySQL and only when the type is actually wrong. Commit: [7cc0814](https://github.com/muzhi621/NodeWarden_fceo/commit/7cc0814ebd1953928590bcf80981c347d43b17b2).
+
+### Added
+
+1. **A rejected refresh now says which check rejected it, and what the table looked like.** `token_not_found_or_expired` used to cover three unrelated situations: no row for the token, a row that could not be renewed, and the four soft mismatches (security stamp, device row, device stamp). The audit entry now carries `stage`, plus `tokenRows` and `newestTokenAt` measured at that moment. "The table is empty" and "the table has rows, none of them this one" have completely different causes, and they used to read the same. Commit: [7cc0814](https://github.com/muzhi621/NodeWarden_fceo/commit/7cc0814ebd1953928590bcf80981c347d43b17b2).
+2. **`/healthz` reports a repair when one happened.** After an upgrade that had to widen an old table, the endpoint gains a `schemaRepair` field naming the columns it changed. It is absent on a clean install or on a database that was already correct, so an operator can tell "this build fixed my table" from "this build found nothing to fix" without shell access to the database. Commit: [7cc0814](https://github.com/muzhi621/NodeWarden_fceo/commit/7cc0814ebd1953928590bcf80981c347d43b17b2).
+
+---
+
+# v1.8.9 - 刷新令牌不再过期在 1970 年
+
+### 修复
+
+1. **在老数据库上，刷新页面不会再退出登录了。** `refresh_tokens.expires_at` 存的是毫秒时间戳，但由早期版本创建的表——或当初手工执行 SQLite 版迁移脚本建的表（`INTEGER` 在 MySQL 里就是 `INT`）——这一列是 32 位整数。它能存的最大值是 2147483647，于是「当前时间 + 30 天」被静默写成了 1970 年 1 月，紧接着清理过期令牌的语句就把这一行删掉了。登录始终返回成功、Cookie 也照常下发，所以浏览器看着是已登录，直到刷新那一刻才被踢回登录页。现在建表检查会把这四个时间戳列扩成 `BIGINT`，但只在 MySQL 上、且只在类型确实不对时才动手。提交：[7cc0814](https://github.com/muzhi621/NodeWarden_fceo/commit/7cc0814ebd1953928590bcf80981c347d43b17b2)。
+
+### 新增
+
+1. **刷新被拒时，日志会说明是哪一道检查拒绝的，以及当时表里有什么。** 过去 `token_not_found_or_expired` 这一个字符串同时覆盖三种互不相干的情况：根本没有这一行、有行但续期失败、以及四种软校验不匹配（安全戳、设备行、设备会话戳）。现在审计记录会带上 `stage`，以及当时实测的 `tokenRows` 和 `newestTokenAt`。「表是空的」和「表里有行但没有这一条」成因完全不同，以前看起来一模一样。提交：[7cc0814](https://github.com/muzhi621/NodeWarden_fceo/commit/7cc0814ebd1953928590bcf80981c347d43b17b2)。
+2. **`/healthz` 会报告是否做过修复。** 如果升级后确实扩宽过旧表，该接口会多出一个 `schemaRepair` 字段，列出改动过的列；全新的库或本来就正确的库不会出现这个字段。这样运维不用登录数据库，就能区分「这一版修好了我的表」和「这一版没找到要修的东西」。提交：[7cc0814](https://github.com/muzhi621/NodeWarden_fceo/commit/7cc0814ebd1953928590bcf80981c347d43b17b2)。
+
+---
+
 # v1.8.8 - Staying Signed In After a Reload
 
 ### Fixed
