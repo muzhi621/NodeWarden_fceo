@@ -31,6 +31,15 @@
 //   • Generated columns are skipped — MySQL rejects writes to them.
 //   • One failing table does not abort the others; the per-table error is
 //     returned to the admin.
+//   • Progress is reported, not imagined: `tablesTotal` / `tablesDone` are exact,
+//     `rowsEstimate` comes from `information_schema.TABLES.TABLE_ROWS` and is
+//     explicitly an estimate. A chunked run therefore hands the caller enough to
+//     draw a bar without pretending it knows the exact row count of a table it
+//     has not finished reading.
+//   • `skipTables` lets a resumed run leave finished tables alone. Every call
+//     used to re-walk every table from the first row — correct (the upsert is a
+//     no-op on rows that already exist) but quadratic in the number of rounds,
+//     which is exactly the case a progress bar is for.
 
 import type { D1LikeStatement } from './storage-mysql';
 
@@ -73,6 +82,11 @@ export interface TableSyncResult {
   countMatches?: boolean;
   /** Rows on the target that no longer exist on the source (S2). */
   orphanRows?: number;
+  /**
+   * Approximate source row count from `information_schema.TABLES.TABLE_ROWS`.
+   * Only used to draw progress; undefined when the estimate is unavailable.
+   */
+  rowsEstimate?: number;
   error?: string;
 }
 
@@ -90,6 +104,14 @@ export interface ClusterSyncResult {
   durationMs: number;
   /** Resume cursors for tables that hit the row cap. */
   cursors: Record<string, Array<string | number | boolean | null>>;
+  /** Tables in scope for this run, including the ones skipped as already done. */
+  tablesTotal: number;
+  /** Tables walked to the end without an error, including skipped ones. */
+  tablesDone: number;
+  /** Sum of the per-table estimates; 0 when `information_schema` is unreadable. */
+  rowsEstimate: number;
+  /** Tables left alone because an earlier run of the same copy completed them. */
+  skipped: string[];
 }
 
 export type SyncCopyMode = 'merge' | 'overwrite';
@@ -112,6 +134,13 @@ export interface SyncOptions {
   mode?: SyncCopyMode;
   /** Cursor per table from a previous run, to resume. */
   cursors?: Record<string, unknown[]>;
+  /**
+   * Tables a previous chunked run already finished. They are not re-copied.
+   *
+   * Only safe for `merge` (the caller decides): a repair run has to rewrite
+   * every row, so it passes nothing here.
+   */
+  skipTables?: string[];
   /** Compare row counts after each table (default true). */
   verifyCounts?: boolean;
 }
@@ -223,6 +252,35 @@ async function countRows(db: SyncDatabase, table: string): Promise<number | null
     return Number.isFinite(value) ? value : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Approximate row count per table, straight from `information_schema`.
+ *
+ * `TABLE_ROWS` is what the optimiser believes; for InnoDB it is an estimate that
+ * can be off by tens of percent and is 0 for a table that was never analysed.
+ * That is fine for a progress bar and useless for verification, which is why the
+ * exact counts in `sourceRows` / `targetRows` stay separate. Returns an empty
+ * record when the schema is unreadable — callers fall back to table counts.
+ */
+async function readTableEstimates(db: SyncDatabase): Promise<Record<string, number>> {
+  try {
+    const result = await db
+      .prepare(
+        'SELECT TABLE_NAME AS name, TABLE_ROWS AS row_count FROM information_schema.TABLES ' +
+          "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'"
+      )
+      .all<{ name: string; row_count: unknown }>();
+    const estimates: Record<string, number> = {};
+    for (const row of result.results ?? []) {
+      const name = String(row.name ?? '');
+      const value = Number(row.row_count);
+      if (name && Number.isFinite(value) && value > 0) estimates[name] = value;
+    }
+    return estimates;
+  } catch {
+    return {};
   }
 }
 
@@ -392,8 +450,10 @@ export async function syncDatabase(
   const deadline = Math.min(startedAt + requestedMs, options.deadline ?? Number.POSITIVE_INFINITY);
 
   let tables: string[];
+  let estimates: Record<string, number>;
   try {
     tables = options.tables ?? (await discoverTables(source));
+    estimates = await readTableEstimates(source);
   } catch (error) {
     return {
       ok: false,
@@ -414,11 +474,22 @@ export async function syncDatabase(
       truncated: false,
       durationMs: Date.now() - startedAt,
       cursors: {},
+      tablesTotal: 0,
+      tablesDone: 0,
+      rowsEstimate: 0,
+      skipped: [],
     };
   }
 
+  // Tables a previous round already finished. Skipping them keeps a chunked run
+  // linear: without this every round re-reads every table from its first row,
+  // which is both slow and makes a progress bar meaningless (it would restart).
+  const skip = new Set(options.skipTables ?? []);
+  const skipped = tables.filter((table) => skip.has(table));
+  const pending = tables.filter((table) => !skip.has(table));
+
   const results: TableSyncResult[] = [];
-  for (const table of tables) {
+  for (const table of pending) {
     if (Date.now() >= deadline) {
       // Out of budget before this table started: leave it pending rather than
       // opening a round trip that the platform will kill mid-flight.
@@ -432,9 +503,10 @@ export async function syncDatabase(
       });
       continue;
     }
-    results.push(
-      await syncTable(source, target, table, { ...options, deadline }, Date.now())
-    );
+    const tableResult = await syncTable(source, target, table, { ...options, deadline }, Date.now());
+    const estimate = estimates[table];
+    if (estimate !== undefined) tableResult.rowsEstimate = estimate;
+    results.push(tableResult);
   }
 
   const rowsRead = results.reduce((sum, entry) => sum + entry.rowsRead, 0);
@@ -446,6 +518,10 @@ export async function syncDatabase(
     if (entry.nextCursor) cursors[entry.table] = entry.nextCursor;
   }
   const ok = results.every((entry) => !entry.error);
+  // A skipped table was verified by the round that finished it, so it counts as
+  // done here; re-verifying it would defeat the point of skipping.
+  const tablesDone = skipped.length + results.filter((entry) => !entry.truncated && !entry.error).length;
+  const rowsEstimate = tables.reduce((sum, table) => sum + (estimates[table] ?? 0), 0);
   return {
     ok,
     complete: ok && results.every((entry) => !entry.truncated && entry.countMatches !== false),
@@ -456,5 +532,9 @@ export async function syncDatabase(
     truncated: results.some((entry) => entry.truncated),
     durationMs: Date.now() - startedAt,
     cursors,
+    tablesTotal: tables.length,
+    tablesDone,
+    rowsEstimate,
+    skipped,
   };
 }

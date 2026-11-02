@@ -24,11 +24,15 @@ class FakeNode implements SyncDatabase {
 
   readonly primaryKeys: Record<string, string[]>;
 
+  /** `information_schema.TABLES.TABLE_ROWS`: undefined means "not available". */
+  readonly estimates?: Record<string, number>;
+
   constructor(
     readonly tables: string[],
     readonly columns: Record<string, string[]>,
     readonly rows: Record<string, Array<Record<string, unknown>>> = {},
-    primaryKeys: Record<string, string[]> = {}
+    primaryKeys: Record<string, string[]> = {},
+    estimates?: Record<string, number>
   ) {
     this.primaryKeys = {
       ...Object.fromEntries(
@@ -36,6 +40,7 @@ class FakeNode implements SyncDatabase {
       ),
       ...primaryKeys,
     };
+    this.estimates = estimates;
   }
 
   prepare(sql: string): D1LikeStatement {
@@ -95,7 +100,12 @@ class FakeStatement implements D1LikeStatement {
       ({ results: rows as R[], success: true, meta: { changes: 0, last_row_id: 0 } }) as D1LikeResult<R>;
 
     if (sql.includes('information_schema.TABLES')) {
-      return asResult(this.node.tables.map((name) => ({ name })));
+      return asResult(
+        this.node.tables.map((name) => ({
+          name,
+          row_count: this.node.estimates?.[name],
+        }))
+      );
     }
     if (sql.includes('information_schema.COLUMNS')) {
       const table = String(this.params[0] ?? '');
@@ -423,4 +433,104 @@ test('the cluster total adds up the per-table inserted counts', async () => {
 
   assert.equal(result.rowsWritten, 3);
   assert.equal(result.rowsInserted, 1);
+});
+
+// ── Progress reporting ────────────────────────────────────────────────
+//
+// The admin page draws a bar from these numbers, so they have to mean what the
+// bar claims: "tables done" out of "tables in scope", and an estimate that is
+// labelled as an estimate.
+
+test('a full run reports its table counts', async () => {
+  const source = sourceNode();
+  const target = new FakeNode([], {});
+
+  const result = await syncDatabase(source, target, { chunkSize: 10 });
+
+  assert.equal(result.tablesTotal, 2);
+  assert.equal(result.tablesDone, 2);
+  assert.deepEqual(result.skipped, []);
+});
+
+test('a run stopped by the row cap only counts the tables it finished', async () => {
+  // Two rows per table and a cap of two: `users` (five rows) is cut short while
+  // `ciphers` (one row) finishes, so the bar must say 1/2, not 2/2.
+  const source = sourceNode();
+  const target = new FakeNode([], {});
+
+  const result = await syncDatabase(source, target, { chunkSize: 2, maxRowsPerTable: 2 });
+
+  assert.equal(result.tablesTotal, 2);
+  assert.equal(result.tablesDone, 1);
+  assert.equal(result.truncated, true);
+});
+
+test('skipTables leaves a finished table alone instead of re-reading it', async () => {
+  const source = sourceNode();
+  const target = new FakeNode([], {});
+
+  const first = await syncDatabase(source, target, { chunkSize: 10 });
+  assert.equal(first.tablesDone, 2);
+
+  const selectsBefore = source.selects.length;
+  const second = await syncDatabase(source, target, { chunkSize: 10, skipTables: ['users', 'ciphers'] });
+
+  assert.equal(source.selects.length, selectsBefore, 'no table is read again');
+  assert.deepEqual(second.skipped, ['users', 'ciphers']);
+  assert.equal(second.rowsRead, 0);
+  assert.equal(second.tablesTotal, 2);
+  assert.equal(second.tablesDone, 2);
+  assert.equal(second.complete, true, 'nothing left to do is complete, not pending');
+});
+
+test('a partially skipped run only copies the tables that are left', async () => {
+  const columns = { a: ['id'], b: ['id'], c: ['id'] };
+  const source = new FakeNode(['a', 'b', 'c'], columns, {
+    a: [{ id: '1' }],
+    b: [{ id: '2' }],
+    c: [{ id: '3' }],
+  });
+  const target = new FakeNode([], {});
+
+  const result = await syncDatabase(source, target, { skipTables: ['a'] });
+
+  assert.equal(result.tablesTotal, 3);
+  assert.equal(result.tablesDone, 3, 'skipped ones count as done');
+  assert.deepEqual(
+    result.tables.map((entry) => entry.table),
+    ['b', 'c'],
+    'only the unfinished tables are walked'
+  );
+  assert.deepEqual(result.skipped, ['a']);
+});
+
+test('row estimates come from information_schema and are labelled as estimates', async () => {
+  const columns = { a: ['id'], b: ['id'] };
+  const source = new FakeNode(
+    ['a', 'b'],
+    columns,
+    { a: [{ id: '1' }, { id: '2' }], b: [{ id: '3' }] },
+    {},
+    { a: 5_000, b: 20 }
+  );
+  const target = new FakeNode([], {});
+
+  const result = await syncDatabase(source, target, { chunkSize: 10 });
+
+  // Per-table, for the table list.
+  assert.equal(result.tables.find((entry) => entry.table === 'a')?.rowsEstimate, 5_000);
+  // Cluster total, for the bar.
+  assert.equal(result.rowsEstimate, 5_020);
+  // The exact counts stay separate: an estimate must never be used to verify.
+  assert.equal(result.tables.find((entry) => entry.table === 'a')?.sourceRows, 2);
+});
+
+test('a schema without estimates degrades to table counts, not to NaN', async () => {
+  const source = sourceNode();
+  const target = new FakeNode([], {});
+
+  const result = await syncDatabase(source, target, { chunkSize: 10 });
+
+  assert.equal(result.rowsEstimate, 0);
+  assert.equal(result.tablesDone, result.tablesTotal);
 });

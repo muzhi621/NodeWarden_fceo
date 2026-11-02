@@ -29,6 +29,7 @@ import {
   resolveDbCluster,
   resolveDbConfig,
   resolveDbConfigFromEnv,
+  resolveStoredCluster,
   saveRuntimeConfig,
   readSyncStates,
   saveNodeSyncState,
@@ -38,6 +39,7 @@ import {
   type DbClusterPolicy,
   type DbNodeConfig,
   type DbRuntimeConfigV2,
+  type DbSyncRunProgress,
   type DbSyncStates,
 } from '../services/db-config';
 import { resetDatabaseCache, getDatabase, peekClusterHealth } from '../services/storage-factory';
@@ -505,9 +507,15 @@ export async function handleAdminGetDbConfig(request: Request, env: Env, actorUs
   void actorUser;
   const cluster = await resolveDbCluster(env);
   const resolved = await resolveDbConfig(env);
+  // Also report the saved config, even when `DB_*` shadows it. Without this the
+  // settings page could only show the env node, so a cluster the operator had
+  // just saved looked as if it had been dropped by the reload.
+  const stored = await resolveStoredCluster(env);
   const health = peekClusterHealth();
   return jsonResponse({
     cluster: maskCluster(cluster),
+    storedCluster: stored ? maskCluster(stored) : null,
+    storedClusterActive: cluster.source === 'runtime',
     // Compatibility: the previous UI read `config` for a single connection.
     config: maskConfig(resolved),
     health: health ?? [],
@@ -856,7 +864,54 @@ interface TargetSyncReport {
   countsMismatch?: string[];
   /** Rows present on the target but not on the source (S2). */
   orphanRows?: number;
+  /** How far the whole run has got, including previous chunks. */
+  progress?: DbSyncRunProgress;
   error?: string;
+}
+
+/**
+ * Percent for the progress bar.
+ *
+ * Two signals, because neither alone is honest: completed tables are exact but
+ * coarse, and `TABLE_ROWS` is fine-grained but only an estimate (it is 0 on a
+ * table that was never analysed and can lag by tens of percent). The bar takes
+ * whichever is further along, but the row estimate is capped just below 100% —
+ * so "99%" always means "still working", and only a finished run shows 100%.
+ */
+function buildSyncProgress(input: {
+  startedAt: number;
+  rowsCopied: number;
+  rowsEstimate: number;
+  tablesTotal: number;
+  tablesDone: number;
+  done: boolean;
+}): DbSyncRunProgress {
+  const tableFraction = input.tablesTotal > 0 ? input.tablesDone / input.tablesTotal : input.done ? 1 : 0;
+  const rowFraction = input.rowsEstimate > 0 ? input.rowsCopied / input.rowsEstimate : 0;
+  const fraction = Math.max(tableFraction, Math.min(rowFraction, 0.99));
+  return {
+    startedAt: input.startedAt,
+    percent: input.done ? 100 : Math.max(0, Math.min(99, Math.floor(fraction * 100))),
+    done: input.done,
+    tablesTotal: input.tablesTotal,
+    tablesDone: input.tablesDone,
+    rowsCopied: input.rowsCopied,
+    rowsEstimate: input.rowsEstimate,
+  };
+}
+
+/** One bar for the whole run: targets are copied one after another. */
+function combineProgress(reports: TargetSyncReport[]): DbSyncRunProgress | undefined {
+  const measured = reports.map((report) => report.progress).filter((entry): entry is DbSyncRunProgress => !!entry);
+  if (measured.length === 0) return undefined;
+  return buildSyncProgress({
+    startedAt: Math.min(...measured.map((entry) => entry.startedAt)),
+    rowsCopied: measured.reduce((sum, entry) => sum + entry.rowsCopied, 0),
+    rowsEstimate: measured.reduce((sum, entry) => sum + entry.rowsEstimate, 0),
+    tablesTotal: measured.reduce((sum, entry) => sum + entry.tablesTotal, 0),
+    tablesDone: measured.reduce((sum, entry) => sum + entry.tablesDone, 0),
+    done: reports.every((report) => report.progress?.done === true),
+  });
 }
 
 /**
@@ -886,6 +941,14 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
   // repair path that replaces existing values.
   const mode = body.mode === 'overwrite' ? 'overwrite' : 'merge';
   const forced = wantsForce(request) || body.force === true;
+  // Chunked mode: the page asks for a short slice, draws the progress and comes
+  // back for more. Without it a click is one 90s black box whose only visible
+  // signal is a spinner, and an interrupted run leaves no trace of how far it got.
+  const requestedBudget = Number(body.budgetMs);
+  const budgetMs =
+    Number.isFinite(requestedBudget) && requestedBudget > 0
+      ? Math.min(30_000, Math.max(3_000, Math.round(requestedBudget)))
+      : null;
 
   const cluster = await resolveDbCluster(env);
   if (cluster.mode !== 'mysql' || cluster.nodes.length === 0) {
@@ -954,8 +1017,11 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
   // permanent.
   const syncedThroughSeq = watermarks.writeSeq;
   // Sequential, with a shared budget: parallel copies would multiply the load on
-  // the source and could push the request past the platform timeout.
-  const deadline = Date.now() + 90_000;
+  // the source and could push the request past the platform timeout. In chunked
+  // mode each target gets `budgetMs`, plus a little slack for the bookkeeping
+  // around it; the ceiling keeps the whole request inside the platform timeout.
+  const perTargetMs = budgetMs ?? 45_000;
+  const deadline = Date.now() + (budgetMs ? Math.min(90_000, perTargetMs * targets.length + 10_000) : 90_000);
   const reports: TargetSyncReport[] = [];
   for (const target of targets) {
     const spec = cluster.nodes.find((node) => node.id === target.id);
@@ -976,15 +1042,26 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       continue;
     }
 
-    // Resume only when the previous run copied from the same source: a cursor is
-    // a position in *that* node's key space.
+    // Resume only inside the same unfinished run: same source *and* same copy
+    // mode. A cursor is a position in that node's key space, and a `merge`
+    // cursor is useless to an `overwrite` repair that has to rewrite the rows
+    // merge deliberately skipped.
     const previous = storedStates[target.id];
-    const cursors = previous && previous.sourceId === source.id ? previous.cursors : undefined;
+    const resuming =
+      !!previous &&
+      !previous.complete &&
+      previous.sourceId === source.id &&
+      (previous.mode ?? 'merge') === mode;
+    const cursors = resuming ? previous.cursors : undefined;
+    // Tables an earlier chunk already finished are not re-read: without this,
+    // every round starts over at table one and the bar would reset with it.
+    const skipTables = resuming && mode === 'merge' ? previous.doneTables : undefined;
     const result = await syncDatabase(source.db, target.db, {
-      maxDurationMs: Math.min(45_000, remaining),
+      maxDurationMs: Math.min(perTargetMs, remaining),
       deadline,
       mode,
       cursors,
+      skipTables,
     });
 
     const complete = result.ok && result.complete;
@@ -993,6 +1070,24 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       .map((table) => table.table);
     const orphanRows = result.tables.reduce((sum, table) => sum + (table.orphanRows ?? 0), 0);
 
+    // Progress is cumulative across the chunks of one run, so the bar keeps its
+    // position instead of restarting with every request.
+    const progress = buildSyncProgress({
+      startedAt: resuming && previous.progress ? previous.progress.startedAt : Date.now(),
+      rowsCopied: (resuming ? previous.progress?.rowsCopied ?? 0 : 0) + result.rowsRead,
+      rowsEstimate: result.rowsEstimate,
+      tablesTotal: result.tablesTotal,
+      tablesDone: result.tablesDone,
+      done: complete,
+    });
+    const finishedNow = result.tables
+      .filter((table) => !table.truncated && !table.error)
+      .map((table) => table.table);
+    const doneTables =
+      mode === 'merge' && !complete
+        ? [...new Set([...(resuming ? previous.doneTables ?? [] : []), ...finishedNow])]
+        : undefined;
+
     // Persist the outcome so "is this standby ready?" survives a restart and can
     // be shown before the next failover (B-4).
     await saveNodeSyncState(env, target.id, {
@@ -1000,10 +1095,13 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       complete,
       truncated: result.truncated,
       rowsWritten: result.rowsWritten,
-      tables: result.tables.length,
+      tables: result.tablesTotal,
       sourceId: source.id,
       fingerprint: spec ? nodeFingerprint(spec) : undefined,
       cursors: complete ? undefined : result.cursors,
+      mode,
+      doneTables,
+      progress,
     });
     if (complete) db.markNodeSynced(target.id, syncedThroughSeq);
 
@@ -1020,6 +1118,7 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       tables: result.tables,
       countsMismatch: countsMismatch.length > 0 ? countsMismatch : undefined,
       orphanRows: orphanRows > 0 ? orphanRows : undefined,
+      progress,
     });
   }
 
@@ -1045,6 +1144,8 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
         ? reports.reduce((sum, report) => sum + (report.rowsInserted ?? 0), 0)
         : undefined,
       truncated: reports.some((report) => report.truncated),
+      /** One bar for the page; per-target detail stays in `targets[].progress`. */
+      progress: combineProgress(reports),
     },
     ok ? 200 : 502
   );

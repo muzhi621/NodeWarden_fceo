@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronUp,
   Database,
+  HardDrive,
   Loader2,
   Pencil,
   PlugZap,
@@ -30,6 +31,8 @@ import {
   type DbNodeInput,
   type DbNodeRole,
   type DbSyncCopyMode,
+  type DbSyncProgress,
+  type DbSyncResult,
   type MaskedDbNode,
   type NodeHealthSnapshot,
   type NodeProbeResult,
@@ -180,13 +183,34 @@ function syncedRowsText(rowsWritten: number, rowsInserted?: number): string {
 }
 
 /**
- * Rounds of automatic continuation for one click on "sync".
+ * One click of "sync" is a series of short requests, not one long one.
  *
- * Each round is bounded by the server's 90s budget, so this covers a large
- * `audit_logs` without leaving the operator to click through every chunk. The
- * cap only exists so a pathological table cannot loop forever.
+ * A single call could only report "done" or "still going", and the platform
+ * kills anything over ~120s. Asking for a ~12s slice instead lets the page draw
+ * the progress after every slice, and a resumed slice skips the tables the
+ * previous one finished, so the bar only ever moves forward.
  */
-const SYNC_MAX_ROUNDS = 8;
+const SYNC_BUDGET_MS = 12_000;
+/** Wall-clock ceiling for one click, so a huge table cannot loop forever. */
+const SYNC_MAX_MS = 5 * 60_000;
+/** Hard cap on slices, in case a slice keeps making progress but never ends. */
+const SYNC_MAX_ROUNDS = 40;
+
+const COUNT_FMT = new Intl.NumberFormat('zh-CN');
+
+/** "1.2 万" reads better than "12,345" in a running counter. */
+function formatCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 10_000).toFixed(0)} 万`;
+  return COUNT_FMT.format(value);
+}
+
+function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  if (total < 60) return `${total} 秒`;
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return seconds === 0 ? `${minutes} 分` : `${minutes} 分 ${seconds} 秒`;
+}
 
 export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
   const [status, setStatus] = useState<DbConfigStatus | null>(null);
@@ -208,6 +232,10 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
   // moment a failover happened, so this is explicit rather than implied.
   const [syncSourceId, setSyncSourceId] = useState('');
   const [syncMode, setSyncMode] = useState<DbSyncCopyMode>('merge');
+  /** Live progress of the run in flight (or the last slice of it). */
+  const [syncProgress, setSyncProgress] = useState<DbSyncProgress | null>(null);
+  /** Only used to force a re-render, so the elapsed time keeps counting. */
+  const [, bumpTick] = useState(0);
 
   const healthById = useMemo(() => {
     const map: Record<string, NodeHealthSnapshot> = {};
@@ -238,6 +266,13 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Elapsed time in the progress block; only runs while a sync is in flight.
+  useEffect(() => {
+    if (busy !== 'sync') return;
+    const timer = setInterval(() => bumpTick((value) => value + 1), 1000);
+    return () => clearInterval(timer);
+  }, [busy]);
 
   const updateNode = (id: string, patch: Partial<NodeDraft>) => {
     setNodes((current) => current.map((node) => (node.id === id ? { ...node, ...patch } : node)));
@@ -446,50 +481,92 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
     setConfirmSync(false);
     setBusy('sync');
     setNotice(null);
+    const startedAt = Date.now();
+    // Seed the bar immediately: the first slice takes ~12s, and a click that
+    // shows nothing at all for that long reads as "it didn't work".
+    setSyncProgress({
+      startedAt,
+      percent: 0,
+      done: false,
+      tablesTotal: 0,
+      tablesDone: 0,
+      rowsCopied: 0,
+      rowsEstimate: 0,
+    });
     try {
       const request = () =>
-        syncDbCluster(props.authedFetch, { sourceId: syncSourceId || undefined, mode: syncMode });
-      let result = await request();
-      let rounds = 1;
-      // A single call has a 90s budget, so a large table needs several passes.
-      // Continue automatically instead of asking the operator to keep clicking
-      // (S4); the server resumes from the stored cursor each time.
-      while (
-        rounds < SYNC_MAX_ROUNDS &&
-        !result.complete &&
-        result.truncated &&
-        result.targets.every((target) => target.ok)
-      ) {
+        syncDbCluster(props.authedFetch, {
+          sourceId: syncSourceId || undefined,
+          mode: syncMode,
+          budgetMs: SYNC_BUDGET_MS,
+        });
+
+      // Each request copies for ~12s and reports where it got to; the next one
+      // resumes from there and skips the tables already finished. So the bar is
+      // driven by the server's cumulative numbers, not by the client guessing.
+      let result: DbSyncResult | null = null;
+      let rounds = 0;
+      let rowsWritten = 0;
+      let rowsInserted = 0;
+      let insertedUnknown = false;
+      let stalled = false;
+      let lastRowsCopied = -1;
+      for (;;) {
+        const slice = await request();
+        rounds += 1;
+        result = slice;
+        rowsWritten += slice.rowsWritten;
+        if (slice.rowsInserted === undefined) insertedUnknown = true;
+        else rowsInserted += slice.rowsInserted;
+        setSyncProgress(slice.progress ?? null);
+        if (!slice.truncated || slice.complete) break;
+        if (!slice.targets.every((target) => target.ok)) break;
+        if (rounds >= SYNC_MAX_ROUNDS) break;
+        if (Date.now() - startedAt > SYNC_MAX_MS) break;
+        // No forward movement (the cumulative counter did not grow) means the
+        // remaining tables fail every time: stop instead of hammering the source.
+        const copiedSoFar = slice.progress?.rowsCopied ?? 0;
+        if (copiedSoFar <= lastRowsCopied) {
+          stalled = true;
+          break;
+        }
+        lastRowsCopied = copiedSoFar;
         setNotice({
           kind: 'info',
-          text: `第 ${rounds} 轮完成，累计${syncedRowsText(result.rowsWritten, result.rowsInserted)}，正在从上次的位置继续…`,
+          text:
+            `已完成 ${slice.progress?.percent ?? 0}%（表 ${slice.progress?.tablesDone ?? 0}/${slice.progress?.tablesTotal ?? 0}），` +
+            `本节点已处理 ${formatCount(rowsWritten)} 行，正在接着同步…`,
         });
-        result = await request();
-        rounds += 1;
       }
-      const failed = result.targets.filter((target) => !target.ok);
-      const partial = result.targets.filter((target) => target.ok && !target.complete);
-      const mismatched = result.targets.flatMap((target) => target.countsMismatch ?? []);
+
+      const finished = result;
+      if (!finished) return;
+      const totals = { rowsWritten, rowsInserted: insertedUnknown ? undefined : rowsInserted };
+      const failed = finished.targets.filter((target) => !target.ok);
+      const partial = finished.targets.filter((target) => target.ok && !target.complete);
+      const mismatched = finished.targets.flatMap((target) => target.countsMismatch ?? []);
       if (failed.length > 0) {
         setNotice({
           kind: 'error',
           text:
-            `${failed.length}/${result.targets.length} 个副库同步失败：` +
+            `${failed.length}/${finished.targets.length} 个副库同步失败：` +
             failed.map((target) => `${target.label}（${target.error ?? '部分数据表出错'}）`).join('、'),
         });
       } else if (partial.length > 0) {
         setNotice({
           kind: 'info',
-          text:
-            `已完成 ${rounds} 轮，${syncedRowsText(result.rowsWritten, result.rowsInserted)}，` +
-            `但 ${partial.length} 个副库还没同步完（${partial.map((target) => target.label).join('、')}）。` +
-            '数据量较大，再点一次会从上次的位置继续，直到提示「已完成」为止。',
+          text: stalled
+            ? `同步停住了：还有 ${partial.map((target) => target.label).join('、')} 没有同步完，且这一轮没有读到任何新行。` +
+              '请查看上面节点卡片里的错误信息，处理后再点一次。'
+            : `已处理 ${formatCount(totals.rowsWritten)} 行，` +
+              `但 ${partial.length} 个副库还没同步完（${partial.map((target) => target.label).join('、')}）。` +
+              `当前进度 ${finished.progress?.percent ?? 0}%，再点一次会从上次的位置继续（已完成的表不会重扫）。`,
         });
       } else {
         setNotice({
           kind: mismatched.length > 0 ? 'info' : 'ok',
           text:
-            `同步完成：${result.targets.length} 个副库${syncedRowsText(result.rowsWritten, result.rowsInserted)}（${rounds} 轮），行数校验通过。` +
+            `同步完成：${finished.targets.length} 个副库${syncedRowsText(totals.rowsWritten, totals.rowsInserted)}（${rounds} 次分批，用时 ${formatDuration(Date.now() - startedAt)}），行数校验通过。` +
             '行数一致只说明没有缺行；如需纠正副库上被改过的旧值，请用「覆盖已有行」再同步一次。' +
             (mismatched.length > 0
               ? ` 仍有 ${mismatched.length} 张表行数不一致（${mismatched.slice(0, 3).join('、')}${mismatched.length > 3 ? '…' : ''}）：` +
@@ -515,6 +592,34 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
   const enabledCount = nodes.filter((node) => node.enabled).length;
   const saving = busy === 'save';
   const occupied = busy !== null;
+
+  /**
+   * A saved cluster that `DB_*` environment variables are shadowing.
+   *
+   * The page used to render only the effective cluster, so the moment one env
+   * variable existed the saved nodes vanished and looked deleted. They are still
+   * in the config store — this is what keeps that visible.
+   */
+  const shadowedStored =
+    status?.storedCluster && status.storedClusterActive === false ? status.storedCluster : null;
+
+  /**
+   * Position of a sync that stopped short, read back from the stored state.
+   *
+   * A chunked run keeps its cursors and its table list server-side, so an
+   * interrupted click (a reload, a closed tab, the 5-minute ceiling) still shows
+   * where it ended instead of reverting to a bare button.
+   */
+  const storedSyncProgress = useMemo(() => {
+    const entries = (status?.cluster.nodes ?? [])
+      .map((node) => (node.syncStatus?.truncated ? node.syncStatus.progress : undefined))
+      .filter((entry): entry is DbSyncProgress => !!entry);
+    if (entries.length === 0) return null;
+    // The slowest node is the honest answer to "is the cluster caught up".
+    return entries.reduce((slowest, entry) => (entry.percent < slowest.percent ? entry : slowest));
+  }, [status]);
+
+  const shownProgress = syncProgress ?? (busy === 'sync' ? null : storedSyncProgress);
 
   const promotableStored = promoteId ? status?.cluster.nodes.find((node) => node.id === promoteId) ?? null : null;
   const promotableHealth = promoteId ? healthById[promoteId] : undefined;
@@ -594,8 +699,54 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
         )}
         {status?.envOverrideActive && (
           <p className="local-error">
-            <span>检测到 DB_HOST 环境变量：环境变量优先，下方保存的集群配置不会生效。</span>
+            <span>
+              检测到 DB_HOST 环境变量：环境变量优先，下方保存的集群配置不会生效。
+              {shadowedStored && shadowedStored.nodes.length > 0
+                ? `已保存的 ${shadowedStored.nodes.length} 个节点见下方「已保存的集群配置」，配置没有丢失，只是被环境变量挡住了。`
+                : ''}
+            </span>
           </p>
+        )}
+        {shadowedStored && (
+          <div className="db-saved-cluster">
+            <div className="db-saved-cluster-head">
+              <HardDrive size={14} className="btn-icon" />
+              <strong>已保存的集群配置（{shadowedStored.nodes.length} 个节点，当前未生效）</strong>
+            </div>
+            {shadowedStored.nodes.length > 0 ? (
+              <ul className="db-saved-nodes">
+                {shadowedStored.nodes.map((node) => (
+                  <li key={node.id}>
+                    <span className={`db-node-badge ${node.role === 'primary' ? 'is-primary' : 'is-replica'}`}>
+                      {node.role === 'primary' ? '主库' : '副库'}
+                    </span>
+                    <strong>{node.label || '未命名节点'}</strong>
+                    <span className="db-saved-dsn">
+                      {node.host}:{node.port} / {node.database}
+                    </span>
+                    <span className="db-saved-meta">
+                      优先级 {node.priority} · {node.enabled ? '启用' : '停用'} · 连接池 {node.connectionLimit}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="db-inline-hint">这份配置里的节点全部处于停用状态，因此没有任何节点可以接管。</p>
+            )}
+            <p className="db-inline-hint">
+              让它生效的办法是清掉环境变量：删除函数/容器上的 <code>DB_HOST</code>、<code>DB_USER</code>、
+              <code>DB_PASSWORD</code>、<code>DB_NAME</code>（以及 <code>DB_PORT</code>、<code>DB_SSL</code>，如果设过）后重启；
+              重启后本页会自动切到这份配置，附件与账号数据都不需要重搬。
+            </p>
+            <p className="db-inline-hint">
+              在此之前，上方编辑区里的节点是从环境变量还原出来的那一台，
+              <b>在那里点「保存」会用编辑区的内容替换掉这份已保存的配置</b>。
+              想继续增删节点，请先删环境变量再改。
+            </p>
+            <p className="db-inline-hint">
+              同步方式：{SYNC_MODE_LABEL[shadowedStored.policy.syncMode] ?? shadowedStored.policy.syncMode}
+            </p>
+          </div>
         )}
         {!status?.configStoreAvailable && (
           <p className="local-error">
@@ -890,6 +1041,56 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
           </div>
         </div>
 
+        {shownProgress && (
+          <div className="db-sync-progress">
+            <div className="db-sync-progress-head">
+              <span>
+                {busy === 'sync'
+                  ? '正在同步到副库…'
+                  : shownProgress.percent >= 100
+                    ? '上次同步已完成'
+                    : '上次同步未完成，点「同步数据到副库」会从这里继续'}
+              </span>
+              <strong>{shownProgress.tablesTotal > 0 ? `${shownProgress.percent}%` : '—'}</strong>
+            </div>
+            {shownProgress.tablesTotal > 0 ? (
+              <div
+                className="db-sync-bar"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={shownProgress.percent}
+                aria-label="同步进度"
+              >
+                <div className="db-sync-bar-fill" style={{ width: `${shownProgress.percent}%` }} />
+              </div>
+            ) : (
+              <div className="db-sync-bar" role="progressbar" aria-label="同步进度（正在统计数据表）">
+                <div className="db-sync-bar-fill is-indeterminate" />
+              </div>
+            )}
+            <div className="db-sync-progress-meta">
+              <span>
+                数据表 <b>{shownProgress.tablesDone}/{shownProgress.tablesTotal || '?'}</b>
+              </span>
+              <span>
+                已处理 <b>{formatCount(shownProgress.rowsCopied)}</b> 行
+                {shownProgress.rowsEstimate > 0 ? `（估算共 ${formatCount(shownProgress.rowsEstimate)} 行）` : ''}
+              </span>
+              {busy === 'sync' && (
+                <span>
+                  用时 <b>{formatDuration(Date.now() - shownProgress.startedAt)}</b>
+                </span>
+              )}
+            </div>
+            {shownProgress.rowsEstimate === 0 && shownProgress.tablesTotal > 0 && (
+              <p className="db-inline-hint">
+                数据库没有提供行数估算（<code>information_schema.TABLE_ROWS</code> 为 0），百分比按「已完成的数据表」计算。
+              </p>
+            )}
+          </div>
+        )}
+
         {policy.syncMode === 'write-through' && (
           <div className="db-grid">
             <label className="field">
@@ -1006,8 +1207,10 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
             </li>
             <li>
               同步默认<b>只补缺失行</b>，不会覆盖副库上已有的数据；需要纠正不一致时才选「覆盖已有行」。
-              单次跑不完（行数上限或时间预算）时会自动接着跑，最多连续 8 轮，仍未完成再点一次即可，<b>从上次的位置继续</b>，
-              不会每次从头开始。结果里的「新增 N 行」是目标库真正多出来的行数，「另 M 行已存在」是被跳过的行——
+              点一次会被拆成若干段短请求连续跑（每段约 12 秒），进度条按「已完成的数据表」和
+              <code>information_schema</code> 的行数估算显示；<b>已经同步完的表不会在下一次重扫</b>。
+              中途停下（关掉页面、超过 5 分钟上限）就再点一次，会从上次停下的位置继续。
+              结果里的「新增 N 行」是目标库真正多出来的行数，「另 M 行已存在」是被跳过的行——
               两者相加才是这次扫描的行数。
               <br />
               「行数校验通过」只说明两边<b>没有缺行</b>，不代表行内容一致：被改过的旧值要靠「覆盖已有行」才会被纠正。

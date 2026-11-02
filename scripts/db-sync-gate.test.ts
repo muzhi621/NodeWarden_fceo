@@ -154,3 +154,77 @@ test('an incomplete sync does not make the standby ready', async () => {
   const cluster = await resolveDbCluster(env as never);
   assert.equal(cluster.nodes.find((node) => node.role === 'replica')?.syncReady, false);
 });
+
+// ── Resume bookkeeping ────────────────────────────────────────────────
+//
+// The admin page drives a sync in ~12s slices and draws a bar from what the
+// server remembers between them. That memory has to survive a JSON round trip:
+// dropping `doneTables` would make every slice start over at table one, and
+// dropping `progress` would reset the bar to zero on every reload.
+
+test('the run position survives a round trip through the config store', async () => {
+  const { env } = envWith();
+  resetDbLifecycleForTests();
+  await saveRuntimeConfig(env as never, clusterConfig('write-through'));
+  const startedAt = Date.now() - 30_000;
+  await saveNodeSyncState(env as never, 'b', {
+    at: Date.now(),
+    complete: false,
+    truncated: true,
+    rowsWritten: 4_000,
+    tables: 19,
+    sourceId: 'a',
+    cursors: { audit_logs: ['900'] },
+    mode: 'merge',
+    doneTables: ['users', 'ciphers', 'folders'],
+    progress: {
+      startedAt,
+      percent: 42,
+      done: false,
+      tablesTotal: 19,
+      tablesDone: 8,
+      rowsCopied: 40_000,
+      rowsEstimate: 95_000,
+    },
+  });
+
+  const states = await readSyncStates(env as never);
+  const state = states.b;
+  assert.equal(state.mode, 'merge');
+  assert.deepEqual(state.doneTables, ['users', 'ciphers', 'folders']);
+  assert.deepEqual(state.cursors, { audit_logs: ['900'] });
+  assert.equal(state.progress?.percent, 42);
+  assert.equal(state.progress?.startedAt, startedAt);
+  assert.equal(state.progress?.rowsEstimate, 95_000);
+  assert.equal(state.progress?.done, false);
+});
+
+test('a corrupt progress record is dropped instead of breaking readiness', async () => {
+  const { env, kv } = envWith();
+  resetDbLifecycleForTests();
+  await saveRuntimeConfig(env as never, clusterConfig('write-through'));
+  // Hand-written payload: numeric fields as strings, an unknown mode, junk in
+  // doneTables. The parser must keep what it can prove and discard the rest.
+  await kv.put(
+    'db-sync-status:v1',
+    JSON.stringify({
+      b: {
+        at: Date.now(),
+        complete: false,
+        truncated: true,
+        rowsWritten: '12',
+        tables: '19',
+        mode: 'sideways',
+        doneTables: ['users', 7, ''],
+        progress: { startedAt: 0, percent: '900' },
+      },
+    })
+  );
+
+  const states = await readSyncStates(env as never);
+  const state = states.b;
+  assert.equal(state.mode, undefined, 'an unknown mode is not guessed');
+  assert.deepEqual(state.doneTables, ['users'], 'non-string entries are dropped');
+  assert.equal(state.progress, undefined, 'a record without a start time is unusable');
+  assert.equal(state.rowsWritten, 12);
+});

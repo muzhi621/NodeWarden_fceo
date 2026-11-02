@@ -99,6 +99,35 @@ async function main(): Promise<void> {
     const bTotal = await dbB.prepare('SELECT COUNT(*) AS n FROM config').first<{ n: number }>();
     check('every row arrived', Number(bTotal?.n) === Number(aTotal?.n), `source=${aTotal?.n} target=${bTotal?.n}`);
 
+    console.log('\n== progress: table counts, row estimate, resume skipping (real SQL) ==');
+    // A capped run again, this time looking at what the page draws its bar from.
+    const capped = await syncDatabase(dbA as never, dbB as never, { chunkSize: 100, maxRowsPerTable: 50 });
+    check(
+      'table counts are reported',
+      capped.tablesTotal > 1 && capped.tablesDone < capped.tablesTotal,
+      `total=${capped.tablesTotal} done=${capped.tablesDone}`
+    );
+    // Real information_schema, not a mock: `config` holds 300 rows.
+    check('the row estimate comes from information_schema', capped.rowsEstimate >= 300, `estimate=${capped.rowsEstimate}`);
+
+    const doneNow = capped.tables.filter((table) => !table.truncated && !table.error).map((table) => table.table);
+    check('the capped table is the one with rows', doneNow.includes('config') === false, `done=${doneNow.join(',')}`);
+    const resumedByTable = await syncDatabase(dbA as never, dbB as never, {
+      chunkSize: 100,
+      maxRowsPerTable: 50,
+      skipTables: doneNow,
+    });
+    check(
+      'a resumed run leaves the finished tables alone',
+      resumedByTable.skipped.length === doneNow.length && resumedByTable.tables.every((table) => !doneNow.includes(table.table)),
+      `skipped=${resumedByTable.skipped.length} walked=${resumedByTable.tables.map((t) => t.table).join(',')}`
+    );
+    check(
+      'skipped tables still count as done',
+      resumedByTable.tablesDone === doneNow.length + resumedByTable.tables.filter((t) => !t.truncated && !t.error).length,
+      `done=${resumedByTable.tablesDone} of ${resumedByTable.tablesTotal}`
+    );
+
     console.log('\n== B-2: merge never downgrades, overwrite does ==');
     await dbB.prepare("UPDATE config SET value = 'NEW' WHERE key = 'cfg-000'").run();
     await syncDatabase(dbA as never, dbB as never, { mode: 'merge' });

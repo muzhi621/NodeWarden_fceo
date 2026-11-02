@@ -2555,6 +2555,157 @@
   text-align: center;
 }
 
+/* Saved cluster that DB_* env vars are shadowing. Read-only on purpose: it is
+   not the config in use, so editing it here would be a lie. */
+.db-saved-cluster {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel-subtle);
+}
+
+.db-saved-cluster-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.db-saved-cluster-head .btn-icon {
+  color: var(--muted);
+}
+
+.db-saved-nodes {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.db-saved-nodes li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  font-size: 13px;
+}
+
+.db-saved-nodes strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.db-saved-dsn {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted-strong);
+}
+
+.db-saved-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.db-inline-hint code {
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+/* Sync progress. The fill is a plain width transition so a slow server round
+   still reads as movement rather than a jump. */
+.db-sync-progress {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  background: var(--panel-soft);
+}
+
+.db-sync-progress-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.db-sync-progress-head strong {
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.db-sync-bar {
+  position: relative;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--panel-muted);
+}
+
+.db-sync-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary), var(--accent));
+  transition: width var(--dur-panel) var(--ease-out-strong);
+}
+
+.db-sync-bar-fill.is-indeterminate {
+  width: 35% !important;
+  animation: db-sync-indeterminate 1.4s var(--ease-smooth) infinite;
+}
+
+@keyframes db-sync-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+.db-sync-progress-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.db-sync-progress-meta b {
+  color: var(--muted-strong);
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .db-sync-bar-fill {
+    transition: none;
+  }
+
+  .db-sync-bar-fill.is-indeterminate {
+    animation: none;
+  }
+}
+
+
 @media (max-width: 760px) {
   .db-node-head {
     align-items: flex-start;
