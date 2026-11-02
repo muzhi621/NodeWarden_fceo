@@ -96,6 +96,7 @@ import {
   deleteRefreshTokensByUserId as deleteStoredRefreshTokensByUserId,
   extendRefreshTokenExpiry as extendStoredRefreshTokenExpiry,
   getRefreshTokenRecord as findStoredRefreshTokenRecord,
+  getRefreshTokenTableStats as getStoredRefreshTokenTableStats,
   saveRefreshToken as saveStoredRefreshToken,
 } from './storage-refresh-token-repo';
 import {
@@ -166,7 +167,7 @@ const STORAGE_SCHEMA_VERSION_KEY = 'schema.version';
 // Bump this whenever src/services/storage-schema.ts or migrations/0001_init.sql
 // changes. Existing D1 installs only rerun ensureStorageSchema() when this value
 // differs from config.schema.version.
-const STORAGE_SCHEMA_VERSION = '2026-07-13-refresh-session-reuse';
+const STORAGE_SCHEMA_VERSION = '2026-11-02-mysql-bigint-epoch-columns';
 const REQUIRED_SCHEMA_TABLES = ['webauthn_credentials', 'webauthn_challenges', 'auth_requests', 'totp_login_replays'] as const;
 
 // D1-backed storage.
@@ -296,7 +297,13 @@ export class StorageService {
       ? !(await this.hasRequiredSchemaTables())
       : true;
     if (schemaVersion !== STORAGE_SCHEMA_VERSION || schemaMissingRequiredTables) {
-      await ensureStorageSchema(this.db);
+      const repairedColumns = await ensureStorageSchema(this.db);
+      if (repairedColumns.length > 0) {
+        // Visible in the function log. These columns were created as INT by an
+        // older build and could not hold a millisecond epoch: every refresh
+        // token written to them was truncated to 1970 and swept away as expired.
+        console.warn('[schema] widened millisecond columns to BIGINT:', repairedColumns.join(', '));
+      }
       await saveConfigValue(this.db, STORAGE_SCHEMA_VERSION_KEY, STORAGE_SCHEMA_VERSION);
     }
     await ensurePushInstallationCredentials(this.db);
@@ -717,6 +724,11 @@ export class StorageService {
   async getRefreshTokenUserId(token: string): Promise<string | null> {
     const record = await this.getRefreshTokenRecord(token);
     return record?.userId ?? null;
+  }
+
+  /** Failure-path diagnostics: how many rows the table holds, and how fresh. */
+  async getRefreshTokenTableStats(): Promise<{ total: number; newestCreatedAt: number | null }> {
+    return getStoredRefreshTokenTableStats(this.db);
   }
 
   async deleteRefreshToken(token: string): Promise<void> {

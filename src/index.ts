@@ -4,6 +4,7 @@ import { BackupTransferRunner } from './durable/backup-transfer-runner';
 import { handleRequest } from './router';
 import { ensureDatabaseInitialized, getDbInitError, getDbInitFailure } from './services/db-lifecycle';
 import { getDatabaseStatus } from './services/storage-factory';
+import { getLastSchemaRepair } from './services/storage-schema';
 import { applyCors, jsonResponse } from './utils/response';
 import { runScheduledBackupIfDue } from './handlers/backup';
 import {
@@ -57,8 +58,17 @@ async function handleHealthz(env: Env): Promise<Response> {
     // schema names. Keep the detail in the logs, expose only the shape.
     console.error('[healthz] database unavailable:', status.error);
   }
+  const repaired = getLastSchemaRepair();
   return jsonResponse(
-    { ok: status.ok, db: status.ok ? 'up' : 'down', mode: status.mode, source: status.source },
+    {
+      ok: status.ok,
+      db: status.ok ? 'up' : 'down',
+      mode: status.mode,
+      source: status.source,
+      // Only present when this process actually had to widen an old table, so a
+      // clean install keeps the same shape it always had.
+      ...(repaired.length > 0 ? { schemaRepair: repaired } : {}),
+    },
     status.ok ? 200 : 503
   );
 }

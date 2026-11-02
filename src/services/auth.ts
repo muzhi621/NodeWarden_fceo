@@ -34,6 +34,23 @@ export type RefreshAccessTokenFailureReason =
   | 'device_missing'
   | 'device_session_mismatch';
 
+/**
+ * Where a refresh failed, one level finer than the reason shown to the client.
+ *
+ * `token_not_found_or_expired` covers two very different worlds — "there is no
+ * row for this token" and "there is a row but it could not be renewed" — and
+ * the operator-visible audit trail used to collapse them into one string. A
+ * report of "reloading logs me out" cannot be acted on without knowing which.
+ */
+export type RefreshAccessTokenStage =
+  | 'record_missing'
+  | 'extend_rejected'
+  | 'user_missing'
+  | 'user_inactive'
+  | 'security_stamp_mismatch'
+  | 'device_missing'
+  | 'device_session_mismatch';
+
 export type RefreshAccessTokenResult =
   | { ok: true; accessToken: string; user: User; device: { identifier: string; sessionStamp: string } | null; expiresAt: number }
   | {
@@ -41,6 +58,13 @@ export type RefreshAccessTokenResult =
       reason: RefreshAccessTokenFailureReason;
       userId?: string | null;
       deviceIdentifier?: string | null;
+      stage?: RefreshAccessTokenStage;
+      /** Rows in refresh_tokens when the lookup failed. Distinguishes "the table
+       *  is empty / was swept" from "the table has rows, none of them this one". */
+      tokenRows?: number;
+      /** Creation time of the newest row, so a login that landed seconds ago is
+       *  visible even though its own token did not match. */
+      newestTokenAt?: number | null;
     };
 
 export class AuthService {
@@ -242,21 +266,34 @@ export class AuthService {
   // Refresh access token
   async refreshAccessTokenDetailed(refreshToken: string): Promise<RefreshAccessTokenResult> {
     const record = await this.storage.getRefreshTokenRecord(refreshToken);
-    if (!record?.userId) return { ok: false, reason: 'token_not_found_or_expired' };
+    if (!record?.userId) {
+      // Nothing matched. Record what the table looks like right now: an empty
+      // table means the write never landed (or a sweep removed it), while a
+      // populated one means this request carried a token that was never stored —
+      // a client/cookie mismatch rather than a database one.
+      const stats = await this.storage.getRefreshTokenTableStats().catch(() => null);
+      return {
+        ok: false,
+        reason: 'token_not_found_or_expired',
+        stage: 'record_missing',
+        tokenRows: stats?.total ?? -1,
+        newestTokenAt: stats?.newestCreatedAt ?? null,
+      };
+    }
 
     const user = await this.storage.getUserById(record.userId);
     if (!user) {
       await this.storage.deleteRefreshToken(refreshToken);
-      return { ok: false, reason: 'user_missing', userId: record.userId, deviceIdentifier: record.deviceIdentifier };
+      return { ok: false, reason: 'user_missing', stage: 'user_missing', userId: record.userId, deviceIdentifier: record.deviceIdentifier };
     }
     if (user.status !== 'active') {
       await this.storage.deleteRefreshToken(refreshToken);
-      return { ok: false, reason: 'user_inactive', userId: user.id, deviceIdentifier: record.deviceIdentifier };
+      return { ok: false, reason: 'user_inactive', stage: 'user_inactive', userId: user.id, deviceIdentifier: record.deviceIdentifier };
     }
 
     if (record.securityStamp && record.securityStamp !== user.securityStamp) {
       await this.storage.deleteRefreshToken(refreshToken);
-      return { ok: false, reason: 'security_stamp_mismatch', userId: user.id, deviceIdentifier: record.deviceIdentifier };
+      return { ok: false, reason: 'security_stamp_mismatch', stage: 'security_stamp_mismatch', userId: user.id, deviceIdentifier: record.deviceIdentifier };
     }
     if (!record.securityStamp) {
       await this.storage.bindRefreshTokenSecurityStamp(refreshToken, user.securityStamp);
@@ -267,11 +304,11 @@ export class AuthService {
       const boundDevice = await this.storage.getDevice(user.id, record.deviceIdentifier);
       if (!boundDevice) {
         await this.storage.deleteRefreshToken(refreshToken);
-        return { ok: false, reason: 'device_missing', userId: user.id, deviceIdentifier: record.deviceIdentifier };
+        return { ok: false, reason: 'device_missing', stage: 'device_missing', userId: user.id, deviceIdentifier: record.deviceIdentifier };
       }
       if (record.deviceSessionStamp && boundDevice.sessionStamp !== record.deviceSessionStamp) {
         await this.storage.deleteRefreshToken(refreshToken);
-        return { ok: false, reason: 'device_session_mismatch', userId: user.id, deviceIdentifier: record.deviceIdentifier };
+        return { ok: false, reason: 'device_session_mismatch', stage: 'device_session_mismatch', userId: user.id, deviceIdentifier: record.deviceIdentifier };
       }
       if (!record.deviceSessionStamp) {
         await this.storage.bindRefreshTokenDeviceStamp(refreshToken, boundDevice.sessionStamp);
@@ -286,7 +323,16 @@ export class AuthService {
     );
     const extended = await this.storage.extendRefreshTokenExpiry(refreshToken, expiresAt, now);
     if (!extended) {
-      return { ok: false, reason: 'token_not_found_or_expired', userId: user.id, deviceIdentifier: record.deviceIdentifier };
+      const stats = await this.storage.getRefreshTokenTableStats().catch(() => null);
+      return {
+        ok: false,
+        reason: 'token_not_found_or_expired',
+        stage: 'extend_rejected',
+        userId: user.id,
+        deviceIdentifier: record.deviceIdentifier,
+        tokenRows: stats?.total ?? -1,
+        newestTokenAt: stats?.newestCreatedAt ?? null,
+      };
     }
     const accessToken = await this.generateAccessToken(user, device);
     return { ok: true, accessToken, user, device, expiresAt };

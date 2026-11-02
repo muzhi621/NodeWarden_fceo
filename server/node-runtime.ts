@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { handleRequest } from '../src/router';
 import { ensureDatabaseInitialized, getDbInitError, getDbInitFailure } from '../src/services/db-lifecycle';
 import { getDatabaseStatus } from '../src/services/storage-factory';
+import { getLastSchemaRepair } from '../src/services/storage-schema';
 import { clearDbConfigCache } from '../src/services/db-config';
 import { applyCors, jsonResponse } from '../src/utils/response';
 import { isBackendRequestPath, isWebVaultHidden, webVaultNotFoundResponse } from '../src/web-vault-visibility';
@@ -416,6 +417,7 @@ async function handleHealthz(env: Env): Promise<Response> {
   // Only the status word is exposed: the path itself would leak the container
   // layout, and an operator reads the details from the startup log.
   const attachments = await ensureAttachmentsProbe().catch(() => null);
+  const repaired = getLastSchemaRepair();
   return jsonResponse(
     {
       ok: status.ok,
@@ -424,6 +426,9 @@ async function handleHealthz(env: Env): Promise<Response> {
       source: status.source,
       runtime: 'node',
       attachments: attachments?.status ?? 'unknown',
+      // Only present when this process actually had to widen an old table, so a
+      // clean install keeps the same shape it always had.
+      ...(repaired.length > 0 ? { schemaRepair: repaired } : {}),
     },
     status.ok ? 200 : 503
   );

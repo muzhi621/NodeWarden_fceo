@@ -1021,6 +1021,9 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
         metadata: {
           grantType,
           reason: result.reason,
+          stage: result.stage,
+          tokenRows: result.tokenRows,
+          newestTokenAt: result.newestTokenAt,
           webSession: shouldUseWebSession(request),
           ...auditRequestMetadata(request),
         },

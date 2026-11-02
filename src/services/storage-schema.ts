@@ -199,11 +199,79 @@ async function ensureAdminUserExists(db: D1Database): Promise<void> {
     .run();
 }
 
-export async function ensureStorageSchema(db: D1Database): Promise<void> {
+/**
+ * Columns that store millisecond epoch timestamps and must therefore be BIGINT
+ * on MySQL. `CREATE TABLE IF NOT EXISTS` never changes a table that already
+ * exists, and every schema statement above only ever ADDs columns — so a table
+ * created by an older build (or by running the D1 migration by hand, where
+ * `INTEGER` is MySQL's `INT`) keeps an INT column forever.
+ *
+ * That is not a cosmetic difference. An INT tops out at 2147483647, so writing
+ * `Date.now() + 30 days` (about 1.79e12) is truncated to 2147483647 — January
+ * 1970 — and the refresh-token sweep on the very next request reads it as long
+ * expired, deletes the row, and the session dies on every reload. Non-strict
+ * MySQL truncates silently, which is why login still appears to succeed.
+ */
+const MILLISECOND_COLUMNS: ReadonlyArray<{ table: string; column: string; notNull: boolean }> = [
+  { table: 'refresh_tokens', column: 'expires_at', notNull: true },
+  { table: 'refresh_tokens', column: 'created_at', notNull: false },
+  { table: 'refresh_tokens', column: 'last_used_at', notNull: false },
+  { table: 'refresh_tokens', column: 'absolute_expires_at', notNull: false },
+];
+
+/**
+ * Widens any millisecond column that was created as an INT. Returns the columns
+ * it changed so callers can log them; an empty array means nothing was wrong.
+ *
+ * SQLite is untouched: its INTEGER is already 64-bit, and it has no
+ * information_schema, so the probe below simply fails and the loop moves on.
+ */
+export async function repairMillisecondColumns(db: D1Database): Promise<string[]> {
+  const repaired: string[] = [];
+  for (const { table, column, notNull } of MILLISECOND_COLUMNS) {
+    try {
+      const row = await db
+        .prepare(
+          'SELECT DATA_TYPE AS data_type FROM information_schema.COLUMNS ' +
+            'WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?'
+        )
+        .bind(table, column)
+        .first<{ data_type?: string }>();
+      const type = String(row?.data_type ?? '').toLowerCase();
+      if (!type || type === 'bigint') continue;
+      await db
+        .prepare(`ALTER TABLE ${table} MODIFY COLUMN ${column} BIGINT${notNull ? ' NOT NULL' : ''}`)
+        .run();
+      repaired.push(`${table}.${column} (${type} -> bigint)`);
+    } catch {
+      // Not MySQL (no information_schema), or the account may not inspect or
+      // alter the table. Leave it alone; the normal queries decide.
+    }
+  }
+  return repaired;
+}
+
+/**
+ * Columns widened by the most recent schema run in this process.
+ *
+ * Surfaced by /healthz so an operator can tell, without shell access to the
+ * database, whether an upgrade actually had to repair an old table — which is
+ * the difference between "this build fixed it" and "something else is wrong".
+ */
+let lastSchemaRepair: string[] = [];
+
+export async function ensureStorageSchema(db: D1Database): Promise<string[]> {
   await db.prepare('PRAGMA foreign_keys = ON').run();
   await db.prepare('CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL)').run();
   for (const stmt of SCHEMA_STATEMENTS) {
     await executeSchemaStatement(db, stmt);
   }
+  const repaired = await repairMillisecondColumns(db);
+  lastSchemaRepair = repaired;
   await ensureAdminUserExists(db);
+  return repaired;
+}
+
+export function getLastSchemaRepair(): string[] {
+  return lastSchemaRepair;
 }

@@ -158,3 +158,25 @@ export async function deleteRefreshTokensByDevice(db: D1Database, userId: string
     .run();
   return Number(result.meta.changes ?? 0);
 }
+
+/**
+ * Shape of the table at the moment a refresh failed, for the audit trail.
+ *
+ * Only ever called on the failure path, never on success, so it cannot add work
+ * to a working session. `total` of -1 means the probe itself failed, which is
+ * information too: it points at a missing table or a permission problem rather
+ * than at token recycling.
+ */
+export async function getRefreshTokenTableStats(
+  db: D1Database
+): Promise<{ total: number; newestCreatedAt: number | null }> {
+  const row = await db
+    .prepare('SELECT COUNT(*) AS total, MAX(created_at) AS newest FROM refresh_tokens')
+    .first<{ total: number | string | null; newest: number | string | null }>();
+  const total = Number(row?.total);
+  const newest = row?.newest === null || row?.newest === undefined ? null : Number(row.newest);
+  return {
+    total: Number.isFinite(total) ? total : -1,
+    newestCreatedAt: newest !== null && Number.isFinite(newest) ? newest : null,
+  };
+}
