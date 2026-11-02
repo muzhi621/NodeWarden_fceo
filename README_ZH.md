@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://workers.cloudflare.com/"><img src="https://img.shields.io/badge/Powered%20by-Cloudflare-F38020?logo=cloudflare&logoColor=white" alt="Powered by Cloudflare" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-LGPL--3.0-2ea44f" alt="License: LGPL-3.0" /></a>
-  <a href="https://github.com/shuaiplus/NodeWarden/releases/latest"><img src="https://img.shields.io/github/v/release/shuaiplus/NodeWarden?display_name=tag" alt="Latest Release" /></a>
+  <a href="https://github.com/muzhi621/NodeWarden_fceo/releases/latest"><img src="https://img.shields.io/github/v/release/muzhi621/NodeWarden_fceo?display_name=tag" alt="Latest Release" /></a>
 
 </p>
 
@@ -118,7 +118,7 @@
 ## CLI 部署
 
 ```powershell
-git clone https://github.com/shuaiplus/NodeWarden.git
+git clone https://github.com/muzhi621/NodeWarden_fceo.git
 cd NodeWarden
 
 npm install
@@ -362,16 +362,16 @@ LGPL-3.0 License
 
 ## 贡献者
 
-<a href="https://github.com/shuaiplus/nodewarden/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=shuaiplus/nodewarden" alt="NodeWarden contributors" />
+<a href="https://github.com/muzhi621/NodeWarden_fceo/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=muzhi621/NodeWarden_fceo" alt="NodeWarden contributors" />
 </a>
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=shuaiplus%2FNodeWarden&type=timeline&legend=top-left">
+<a href="https://www.star-history.com/?repos=muzhi621%2FNodeWarden_fceo&type=timeline&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=shuaiplus/NodeWarden&type=timeline&theme=dark&legend=top-left&sealed_token=ck0AMqR8EFMjJ6tMbnGDHT5QwMpO85IUuN7i8e82zRRNPtjoLsAAFwVzxmSZwaid97wLUwy56EEiVE9M-OY0cf16bQKBrU9GaauFoOFXGq-vMqcOyk0tIc4b3o1ZGfDw9IH8o6NUxC125TJkjKSLn9fxhFUUeNr1f1El0UcAUcjsMPl_LX80qQrlvQqp" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=shuaiplus/NodeWarden&type=timeline&legend=top-left&sealed_token=ck0AMqR8EFMjJ6tMbnGDHT5QwMpO85IUuN7i8e82zRRNPtjoLsAAFwVzxmSZwaid97wLUwy56EEiVE9M-OY0cf16bQKBrU9GaauFoOFXGq-vMqcOyk0tIc4b3o1ZGfDw9IH8o6NUxC125TJkjKSLn9fxhFUUeNr1f1El0UcAUcjsMPl_LX80qQrlvQqp" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=shuaiplus/NodeWarden&type=timeline&legend=top-left&sealed_token=ck0AMqR8EFMjJ6tMbnGDHT5QwMpO85IUuN7i8e82zRRNPtjoLsAAFwVzxmSZwaid97wLUwy56EEiVE9M-OY0cf16bQKBrU9GaauFoOFXGq-vMqcOyk0tIc4b3o1ZGfDw9IH8o6NUxC125TJkjKSLn9fxhFUUeNr1f1El0UcAUcjsMPl_LX80qQrlvQqp" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=muzhi621/NodeWarden_fceo&type=timeline&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=muzhi621/NodeWarden_fceo&type=timeline&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=muzhi621/NodeWarden_fceo&type=timeline&legend=top-left" />
  </picture>
 </a>
