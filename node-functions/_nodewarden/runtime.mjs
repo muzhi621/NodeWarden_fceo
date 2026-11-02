@@ -6344,7 +6344,7 @@ var APP_VERSION;
 var init_app_version = __esm({
   "shared/app-version.ts"() {
     "use strict";
-    APP_VERSION = "1.8.6";
+    APP_VERSION = "1.8.7";
   }
 });
 
@@ -36058,7 +36058,31 @@ function normalizeSyncState(raw) {
     rowsWritten: Number(input.rowsWritten ?? 0) || 0,
     tables: Number(input.tables ?? 0) || 0,
     sourceId: typeof input.sourceId === "string" && input.sourceId ? input.sourceId : void 0,
-    cursors: Object.keys(normalizedCursors).length > 0 ? normalizedCursors : void 0
+    cursors: Object.keys(normalizedCursors).length > 0 ? normalizedCursors : void 0,
+    mode: input.mode === "overwrite" ? "overwrite" : input.mode === "merge" ? "merge" : void 0,
+    doneTables: normalizeTableNames(input.doneTables),
+    progress: normalizeRunProgress(input.progress)
+  };
+}
+function normalizeTableNames(raw) {
+  if (!Array.isArray(raw)) return void 0;
+  const names = raw.filter((value) => typeof value === "string" && value.length > 0);
+  return names.length > 0 ? [...new Set(names)] : void 0;
+}
+function normalizeRunProgress(raw) {
+  const input = asRecord(raw);
+  if (!input) return void 0;
+  const startedAt = Number(input.startedAt ?? 0);
+  if (!Number.isFinite(startedAt) || startedAt <= 0) return void 0;
+  const percent = Math.max(0, Math.min(100, Math.round(Number(input.percent ?? 0) || 0)));
+  return {
+    startedAt,
+    percent,
+    done: input.done === true,
+    tablesTotal: Math.max(0, Number(input.tablesTotal ?? 0) || 0),
+    tablesDone: Math.max(0, Number(input.tablesDone ?? 0) || 0),
+    rowsCopied: Math.max(0, Number(input.rowsCopied ?? 0) || 0),
+    rowsEstimate: Math.max(0, Number(input.rowsEstimate ?? 0) || 0)
   };
 }
 async function readSyncStates(env) {
@@ -36301,6 +36325,17 @@ function toResolvedNodes(config, syncStates) {
     if (a.role !== b.role) return a.role === "primary" ? -1 : 1;
     return a.priority - b.priority;
   });
+}
+async function resolveStoredCluster(env) {
+  const runtime = await loadRuntimeConfig(env);
+  if (!runtime) return null;
+  const syncStates = runtime.policy.syncMode === "write-through" ? await readSyncStates(env) : {};
+  return {
+    mode: "mysql",
+    source: "runtime",
+    nodes: toResolvedNodes(runtime, syncStates),
+    policy: runtime.policy
+  };
 }
 async function resolveDbCluster(env) {
   const fromEnv = resolveDbConfigFromEnv(env);
@@ -37363,6 +37398,22 @@ async function countRows(db, table) {
     return null;
   }
 }
+async function readTableEstimates(db) {
+  try {
+    const result = await db.prepare(
+      "SELECT TABLE_NAME AS name, TABLE_ROWS AS row_count FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'"
+    ).all();
+    const estimates = {};
+    for (const row of result.results ?? []) {
+      const name = String(row.name ?? "");
+      const value = Number(row.row_count);
+      if (name && Number.isFinite(value) && value > 0) estimates[name] = value;
+    }
+    return estimates;
+  } catch {
+    return {};
+  }
+}
 async function syncTable(source, target, table, options = {}, startedAt = Date.now()) {
   const chunkSize = Math.max(1, options.chunkSize ?? SYNC_DEFAULTS.chunkSize);
   const maxRows = Math.max(1, options.maxRowsPerTable ?? SYNC_DEFAULTS.maxRowsPerTable);
@@ -37474,8 +37525,10 @@ async function syncDatabase(source, target, options = {}) {
   const requestedMs = Math.max(MIN_BUDGET_MS, options.maxDurationMs ?? SYNC_DEFAULTS.maxDurationMs);
   const deadline = Math.min(startedAt + requestedMs, options.deadline ?? Number.POSITIVE_INFINITY);
   let tables;
+  let estimates;
   try {
     tables = options.tables ?? await discoverTables(source);
+    estimates = await readTableEstimates(source);
   } catch (error) {
     return {
       ok: false,
@@ -37495,11 +37548,18 @@ async function syncDatabase(source, target, options = {}) {
       rowsWritten: 0,
       truncated: false,
       durationMs: Date.now() - startedAt,
-      cursors: {}
+      cursors: {},
+      tablesTotal: 0,
+      tablesDone: 0,
+      rowsEstimate: 0,
+      skipped: []
     };
   }
+  const skip = new Set(options.skipTables ?? []);
+  const skipped = tables.filter((table) => skip.has(table));
+  const pending = tables.filter((table) => !skip.has(table));
   const results = [];
-  for (const table of tables) {
+  for (const table of pending) {
     if (Date.now() >= deadline) {
       results.push({
         table,
@@ -37511,9 +37571,10 @@ async function syncDatabase(source, target, options = {}) {
       });
       continue;
     }
-    results.push(
-      await syncTable(source, target, table, { ...options, deadline }, Date.now())
-    );
+    const tableResult = await syncTable(source, target, table, { ...options, deadline }, Date.now());
+    const estimate = estimates[table];
+    if (estimate !== void 0) tableResult.rowsEstimate = estimate;
+    results.push(tableResult);
   }
   const rowsRead = results.reduce((sum, entry) => sum + entry.rowsRead, 0);
   const rowsWritten = results.reduce((sum, entry) => sum + entry.rowsWritten, 0);
@@ -37524,6 +37585,8 @@ async function syncDatabase(source, target, options = {}) {
     if (entry.nextCursor) cursors[entry.table] = entry.nextCursor;
   }
   const ok = results.every((entry) => !entry.error);
+  const tablesDone = skipped.length + results.filter((entry) => !entry.truncated && !entry.error).length;
+  const rowsEstimate = tables.reduce((sum, table) => sum + (estimates[table] ?? 0), 0);
   return {
     ok,
     complete: ok && results.every((entry) => !entry.truncated && entry.countMatches !== false),
@@ -37533,7 +37596,11 @@ async function syncDatabase(source, target, options = {}) {
     rowsInserted,
     truncated: results.some((entry) => entry.truncated),
     durationMs: Date.now() - startedAt,
-    cursors
+    cursors,
+    tablesTotal: tables.length,
+    tablesDone,
+    rowsEstimate,
+    skipped
   };
 }
 
@@ -37948,9 +38015,12 @@ async function handleAdminGetDbConfig(request, env, actorUser) {
   void actorUser;
   const cluster = await resolveDbCluster(env);
   const resolved = await resolveDbConfig(env);
+  const stored = await resolveStoredCluster(env);
   const health = peekClusterHealth();
   return jsonResponse({
     cluster: maskCluster(cluster),
+    storedCluster: stored ? maskCluster(stored) : null,
+    storedClusterActive: cluster.source === "runtime",
     // Compatibility: the previous UI read `config` for a single connection.
     config: maskConfig(resolved),
     health: health ?? [],
@@ -38183,12 +38253,40 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
     })
   });
 }
+function buildSyncProgress(input) {
+  const tableFraction = input.tablesTotal > 0 ? input.tablesDone / input.tablesTotal : input.done ? 1 : 0;
+  const rowFraction = input.rowsEstimate > 0 ? input.rowsCopied / input.rowsEstimate : 0;
+  const fraction = Math.max(tableFraction, Math.min(rowFraction, 0.99));
+  return {
+    startedAt: input.startedAt,
+    percent: input.done ? 100 : Math.max(0, Math.min(99, Math.floor(fraction * 100))),
+    done: input.done,
+    tablesTotal: input.tablesTotal,
+    tablesDone: input.tablesDone,
+    rowsCopied: input.rowsCopied,
+    rowsEstimate: input.rowsEstimate
+  };
+}
+function combineProgress(reports) {
+  const measured = reports.map((report) => report.progress).filter((entry) => !!entry);
+  if (measured.length === 0) return void 0;
+  return buildSyncProgress({
+    startedAt: Math.min(...measured.map((entry) => entry.startedAt)),
+    rowsCopied: measured.reduce((sum, entry) => sum + entry.rowsCopied, 0),
+    rowsEstimate: measured.reduce((sum, entry) => sum + entry.rowsEstimate, 0),
+    tablesTotal: measured.reduce((sum, entry) => sum + entry.tablesTotal, 0),
+    tablesDone: measured.reduce((sum, entry) => sum + entry.tablesDone, 0),
+    done: reports.every((report) => report.progress?.done === true)
+  });
+}
 async function handleAdminSyncDbCluster(request, env, actorUser) {
   const body = await readJsonBody3(request);
   const requested = Array.isArray(body.targetIds) ? body.targetIds.map((id) => String(id)) : null;
   const requestedSource = typeof body.sourceId === "string" && body.sourceId.trim() ? body.sourceId.trim() : null;
   const mode = body.mode === "overwrite" ? "overwrite" : "merge";
   const forced = wantsForce(request) || body.force === true;
+  const requestedBudget = Number(body.budgetMs);
+  const budgetMs = Number.isFinite(requestedBudget) && requestedBudget > 0 ? Math.min(3e4, Math.max(3e3, Math.round(requestedBudget))) : null;
   const cluster = await resolveDbCluster(env);
   if (cluster.mode !== "mysql" || cluster.nodes.length === 0) {
     return errorResponse("\u5F53\u524D\u6CA1\u6709\u914D\u7F6E\u5916\u63A5 MySQL \u8282\u70B9\uFF0C\u65E0\u9700\u540C\u6B65\u3002", 400);
@@ -38238,7 +38336,8 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
   }
   const storedStates = await readSyncStates(env);
   const syncedThroughSeq = watermarks.writeSeq;
-  const deadline = Date.now() + 9e4;
+  const perTargetMs = budgetMs ?? 45e3;
+  const deadline = Date.now() + (budgetMs ? Math.min(9e4, perTargetMs * targets.length + 1e4) : 9e4);
   const reports = [];
   for (const target of targets) {
     const spec = cluster.nodes.find((node) => node.id === target.id);
@@ -38259,25 +38358,41 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
       continue;
     }
     const previous = storedStates[target.id];
-    const cursors = previous && previous.sourceId === source.id ? previous.cursors : void 0;
+    const resuming = !!previous && !previous.complete && previous.sourceId === source.id && (previous.mode ?? "merge") === mode;
+    const cursors = resuming ? previous.cursors : void 0;
+    const skipTables = resuming && mode === "merge" ? previous.doneTables : void 0;
     const result = await syncDatabase(source.db, target.db, {
-      maxDurationMs: Math.min(45e3, remaining),
+      maxDurationMs: Math.min(perTargetMs, remaining),
       deadline,
       mode,
-      cursors
+      cursors,
+      skipTables
     });
     const complete = result.ok && result.complete;
     const countsMismatch = result.tables.filter((table) => table.countMatches === false).map((table) => table.table);
     const orphanRows = result.tables.reduce((sum, table) => sum + (table.orphanRows ?? 0), 0);
+    const progress = buildSyncProgress({
+      startedAt: resuming && previous.progress ? previous.progress.startedAt : Date.now(),
+      rowsCopied: (resuming ? previous.progress?.rowsCopied ?? 0 : 0) + result.rowsRead,
+      rowsEstimate: result.rowsEstimate,
+      tablesTotal: result.tablesTotal,
+      tablesDone: result.tablesDone,
+      done: complete
+    });
+    const finishedNow = result.tables.filter((table) => !table.truncated && !table.error).map((table) => table.table);
+    const doneTables = mode === "merge" && !complete ? [.../* @__PURE__ */ new Set([...resuming ? previous.doneTables ?? [] : [], ...finishedNow])] : void 0;
     await saveNodeSyncState(env, target.id, {
       at: Date.now(),
       complete,
       truncated: result.truncated,
       rowsWritten: result.rowsWritten,
-      tables: result.tables.length,
+      tables: result.tablesTotal,
       sourceId: source.id,
       fingerprint: spec ? nodeFingerprint(spec) : void 0,
-      cursors: complete ? void 0 : result.cursors
+      cursors: complete ? void 0 : result.cursors,
+      mode,
+      doneTables,
+      progress
     });
     if (complete) db.markNodeSynced(target.id, syncedThroughSeq);
     reports.push({
@@ -38292,7 +38407,8 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
       durationMs: result.durationMs,
       tables: result.tables,
       countsMismatch: countsMismatch.length > 0 ? countsMismatch : void 0,
-      orphanRows: orphanRows > 0 ? orphanRows : void 0
+      orphanRows: orphanRows > 0 ? orphanRows : void 0,
+      progress
     });
   }
   const ok = reports.every((report) => report.ok);
@@ -38313,7 +38429,9 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
       // Only meaningful when every target measured it; a partial sum would
       // understate the copy without saying so.
       rowsInserted: reports.every((report) => report.rowsInserted !== void 0) ? reports.reduce((sum, report) => sum + (report.rowsInserted ?? 0), 0) : void 0,
-      truncated: reports.some((report) => report.truncated)
+      truncated: reports.some((report) => report.truncated),
+      /** One bar for the page; per-target detail stays in `targets[].progress`. */
+      progress: combineProgress(reports)
     },
     ok ? 200 : 502
   );

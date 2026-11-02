@@ -20,6 +20,12 @@ export interface DbNodeSyncState {
   tables: number;
   /** Node the rows were copied from. */
   sourceId?: string;
+  /** Copy mode of that run. */
+  mode?: DbSyncCopyMode;
+  /** Tables it already finished (a resumed run skips them). */
+  doneTables?: string[];
+  /** How far it got, so an interrupted run shows a position instead of a spinner. */
+  progress?: DbSyncProgress;
 }
 
 export interface MaskedDbNode {
@@ -111,6 +117,13 @@ export interface DbClusterLimits {
 
 export interface DbConfigStatus {
   cluster: MaskedDbCluster;
+  /**
+   * The persisted cluster, returned even when `DB_*` environment variables
+   * shadow it. `null` means nothing is stored.
+   */
+  storedCluster?: MaskedDbCluster | null;
+  /** True when `cluster` *is* the stored config (no env override in the way). */
+  storedClusterActive?: boolean;
   /** Compatibility mirror of the primary node. */
   config: MaskedDbConfig;
   health: NodeHealthSnapshot[];
@@ -263,7 +276,27 @@ export interface DbTargetSyncReport {
   tables: DbTableSyncResult[];
   countsMismatch?: string[];
   orphanRows?: number;
+  /** How far the run got on this node, including earlier chunks. */
+  progress?: DbSyncProgress;
   error?: string;
+}
+
+/**
+ * Progress of a chunked sync run.
+ *
+ * `percent` is already capped by the server: the row estimate behind it comes
+ * from `information_schema.TABLE_ROWS`, so it is never allowed to claim "done"
+ * on its own — only a completed run reports 100.
+ */
+export interface DbSyncProgress {
+  startedAt: number;
+  percent: number;
+  /** The run finished: every table walked and the counts agreed. */
+  done: boolean;
+  tablesTotal: number;
+  tablesDone: number;
+  rowsCopied: number;
+  rowsEstimate: number;
 }
 
 export interface DbSyncResult {
@@ -275,6 +308,8 @@ export interface DbSyncResult {
   truncated: boolean;
   source?: { id: string; label: string };
   mode?: DbSyncCopyMode;
+  /** Aggregate across targets, for one bar. */
+  progress?: DbSyncProgress;
 }
 
 export type DbSyncCopyMode = 'merge' | 'overwrite';
@@ -286,6 +321,12 @@ export interface DbSyncOptions {
   /** `merge` (default) only inserts missing rows; `overwrite` replaces them. */
   mode?: DbSyncCopyMode;
   force?: boolean;
+  /**
+   * Time budget for this call (ms). Setting it opts into chunked mode: the
+   * server copies for roughly that long, reports progress and returns, and the
+   * caller comes back for the next slice.
+   */
+  budgetMs?: number;
 }
 
 export async function syncDbCluster(
@@ -297,6 +338,7 @@ export async function syncDbCluster(
   if (options.sourceId) body.sourceId = options.sourceId;
   if (options.mode) body.mode = options.mode;
   if (options.force) body.force = true;
+  if (options.budgetMs) body.budgetMs = options.budgetMs;
 
   const resp = await authedFetch('/api/admin/db-config/sync', {
     method: 'POST',
@@ -316,6 +358,7 @@ export async function syncDbCluster(
     truncated: payload.truncated === true,
     source: payload.source,
     mode: payload.mode,
+    progress: payload.progress,
   };
 }
 

@@ -212,6 +212,22 @@ const CONFIG_KEYS: StoreKeys = { kv: CONFIG_KV_KEY, object: CONFIG_OBJECT_KEY };
 const SYNC_STATUS_KEYS: StoreKeys = { kv: SYNC_STATUS_KV_KEY, object: SYNC_STATUS_OBJECT_KEY };
 const WATERMARK_KEYS: StoreKeys = { kv: WATERMARK_KV_KEY, object: WATERMARK_OBJECT_KEY };
 
+/** How far a chunked sync run has got, for the admin progress bar. */
+export interface DbSyncRunProgress {
+  /** When this run first started, so the page can show elapsed time. */
+  startedAt: number;
+  /** 0–99 while running, 100 once the run is complete. */
+  percent: number;
+  /** The run finished: every table walked and the counts agreed. */
+  done: boolean;
+  tablesTotal: number;
+  tablesDone: number;
+  /** Rows pushed so far in this run. */
+  rowsCopied: number;
+  /** Sum of the per-table estimates; 0 when unknown. */
+  rowsEstimate: number;
+}
+
 /** What the admin page needs to answer "is this standby ready?". */
 export interface DbNodeSyncState {
   /** When the last sync run finished. */
@@ -235,6 +251,18 @@ export interface DbNodeSyncState {
   sourceId?: string;
   /** Resume positions for the tables that were cut short (B-3). */
   cursors?: Record<string, Array<string | number | boolean | null>>;
+  /**
+   * Copy mode of the recorded run. A `merge` cursor must not be fed to an
+   * `overwrite` repair: the second one has to rewrite rows the first skipped.
+   */
+  mode?: 'merge' | 'overwrite';
+  /**
+   * Tables this run already finished. Handed back as `skipTables`, so a chunked
+   * sync does not re-read tables it has already copied.
+   */
+  doneTables?: string[];
+  /** Progress of the run in flight (or the last one), for the progress bar. */
+  progress?: DbSyncRunProgress;
 }
 
 export type DbSyncStates = Record<string, DbNodeSyncState>;
@@ -487,6 +515,33 @@ function normalizeSyncState(raw: unknown): DbNodeSyncState | null {
     tables: Number(input.tables ?? 0) || 0,
     sourceId: typeof input.sourceId === 'string' && input.sourceId ? input.sourceId : undefined,
     cursors: Object.keys(normalizedCursors).length > 0 ? normalizedCursors : undefined,
+    mode: input.mode === 'overwrite' ? 'overwrite' : input.mode === 'merge' ? 'merge' : undefined,
+    doneTables: normalizeTableNames(input.doneTables),
+    progress: normalizeRunProgress(input.progress),
+  };
+}
+
+/** Table name list from a stored payload; anything odd is dropped. */
+function normalizeTableNames(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const names = raw.filter((value): value is string => typeof value === 'string' && value.length > 0);
+  return names.length > 0 ? [...new Set(names)] : undefined;
+}
+
+function normalizeRunProgress(raw: unknown): DbSyncRunProgress | undefined {
+  const input = asRecord(raw);
+  if (!input) return undefined;
+  const startedAt = Number(input.startedAt ?? 0);
+  if (!Number.isFinite(startedAt) || startedAt <= 0) return undefined;
+  const percent = Math.max(0, Math.min(100, Math.round(Number(input.percent ?? 0) || 0)));
+  return {
+    startedAt,
+    percent,
+    done: input.done === true,
+    tablesTotal: Math.max(0, Number(input.tablesTotal ?? 0) || 0),
+    tablesDone: Math.max(0, Number(input.tablesDone ?? 0) || 0),
+    rowsCopied: Math.max(0, Number(input.rowsCopied ?? 0) || 0),
+    rowsEstimate: Math.max(0, Number(input.rowsEstimate ?? 0) || 0),
   };
 }
 
@@ -793,6 +848,31 @@ function toResolvedNodes(config: DbRuntimeConfigV2, syncStates: DbSyncStates): R
       if (a.role !== b.role) return a.role === 'primary' ? -1 : 1;
       return a.priority - b.priority;
     });
+}
+
+/**
+ * The *persisted* cluster, whether or not it is the one in effect.
+ *
+ * `resolveDbCluster` short-circuits on `DB_*` environment variables, which is
+ * the right precedence for routing but the wrong answer for the settings page:
+ * the moment one env variable exists, a saved two-node cluster disappeared from
+ * the UI entirely and looked like lost work. Callers that need to *show* the
+ * config (not route with it) use this instead.
+ *
+ * Returns `null` when nothing is stored. The nodes are the enabled ones, so an
+ * all-disabled config comes back with an empty `nodes` array — the caller decides
+ * whether that is worth reporting.
+ */
+export async function resolveStoredCluster(env: Env): Promise<ResolvedDbCluster | null> {
+  const runtime = await loadRuntimeConfig(env);
+  if (!runtime) return null;
+  const syncStates = runtime.policy.syncMode === 'write-through' ? await readSyncStates(env) : {};
+  return {
+    mode: 'mysql',
+    source: 'runtime',
+    nodes: toResolvedNodes(runtime, syncStates),
+    policy: runtime.policy,
+  };
 }
 
 export async function resolveDbCluster(env: Env): Promise<ResolvedDbCluster> {

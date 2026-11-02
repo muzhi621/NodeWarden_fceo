@@ -21,6 +21,42 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.7 - A Sync You Can Watch, Configs You Can Still See
+
+### Added
+
+1. **A progress bar for database sync.** "Copy data to a standby" used to run until a hard deadline and then answer with a bare summary, so on a real schema it was impossible to tell a slow copy from a stuck one. The request now works in segments of roughly twelve seconds and returns a percentage, how many tables are done out of how many, rows copied, and an estimated row total, which the settings page draws as a bar with the elapsed time next to it. Row totals come from the table statistics and are labelled as estimates; when a node reports no statistics the bar falls back to table counts instead of showing a meaningless number. Commit: [bcbc3e5](https://github.com/muzhi621/NodeWarden_fceo/commit/bcbc3e5bef2ccb7f8da57c582c667416ceb73639).
+
+### Improved
+
+1. **An interrupted sync resumes where it stopped.** Completed tables are recorded against the run, and the next attempt skips them instead of rescanning from the first table. On a large schema that turns "it timed out again at the same place" into forward progress, and a sync that was closed by accident no longer starts over from zero. Commit: [bcbc3e5](https://github.com/muzhi621/NodeWarden_fceo/commit/bcbc3e5bef2ccb7f8da57c582c667416ceb73639).
+
+1. **The settings page explains when environment variables are shadowing saved config.** The page now says that the visible connection comes from `DB_*` and that removing those variables lets the saved cluster take over — without any data migration. `DEPLOY.md` gained the matching entries in the troubleshooting table, including why a large sync looks idle between segments. Commit: [bcbc3e5](https://github.com/muzhi621/NodeWarden_fceo/commit/bcbc3e5bef2ccb7f8da57c582c667416ceb73639).
+
+### Fixed
+
+1. **Saved database nodes no longer vanish after a refresh.** If `DB_*` environment variables were set, the settings page rebuilt the connection from them and rendered only that one, so a cluster configured earlier in the UI looked deleted on every reload — even though the configuration was still stored. The status response now also returns the stored cluster and whether it is active, and the page lists those nodes in a read-only panel instead of dropping them. Nothing was lost on disk; removing `DB_*` brings the saved nodes back into service. Commit: [bcbc3e5](https://github.com/muzhi621/NodeWarden_fceo/commit/bcbc3e5bef2ccb7f8da57c582c667416ceb73639).
+
+---
+
+# v1.8.7 - 看得见进度的同步，找得回来的配置
+
+### 新增
+
+1. **数据同步有了进度条。** 「同步数据到副库」原本一直跑到硬超时才返回一句汇总，表一多就分不清是慢还是卡死。现在每次执行切成约 12 秒一段，返回百分比、已完成表数与总表数、已复制行数，以及预估总行数，设置页把它们画成进度条并显示已用时。行数来自表统计信息，界面上标注为「估算值」；节点取不到统计时退化为按表数推进，而不是显示一个没有意义的数字。提交：[bcbc3e5](https://github.com/muzhi621/NodeWarden_fceo/commit/bcbc3e5bef2ccb7f8da57c582c667416ceb73639)。
+
+### 改进
+
+1. **中断的同步能接着跑。** 已完成的表会记在这次同步里，下一次执行跳过它们而不是从第一张表重扫。大库上这就把「又在同一个地方超时」变成持续前进，误关页面也不用从头再来。提交：[bcbc3e5](https://github.com/muzhi621/NodeWarden_fceo/commit/bcbc3e5bef2ccb7f8da57c582c667416ceb73639)。
+
+1. **环境变量挡住已保存配置时，页面会说清楚。** 设置页现在明确提示：当前显示的连接来自 `DB_*`，删掉这些变量后已保存的集群会自动接管，数据不需要迁移。`DEPLOY.md` 的排障表补上了对应条目，包括大表同步在两段之间看起来没动静是正常的。提交：[bcbc3e5](https://github.com/muzhi621/NodeWarden_fceo/commit/bcbc3e5bef2ccb7f8da57c582c667416ceb73639)。
+
+### 修复
+
+1. **刷新后已保存的数据库节点不再消失。** 当 `DB_*` 环境变量存在时，设置页会用它们重建连接并且只渲染这一个，于是之前在界面上配好的集群每次刷新都像被删掉了——实际上配置一直存在。状态接口现在同时返回已保存的集群以及它是否生效，页面把这些节点列在只读面板里，而不是直接丢掉。盘上的数据没有丢，删掉 `DB_*` 后已保存的节点就能重新接管。提交：[bcbc3e5](https://github.com/muzhi621/NodeWarden_fceo/commit/bcbc3e5bef2ccb7f8da57c582c667416ceb73639)。
+
+---
+
 # v1.8.6 - Repository Links That Stay in This Repository
 
 ### Added

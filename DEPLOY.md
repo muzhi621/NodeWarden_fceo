@@ -8,7 +8,7 @@
 - 要找某个变量 → [第五节 环境变量总表](#五环境变量总表)
 - 平台专属细节（FC 规格、EdgeOne 限制、定时备份）→ 仍以两份平台文档为准
 
-> 本文对应版本 **v1.8.6**。每个 [Release](https://github.com/muzhi621/NodeWarden_fceo/releases) 都附带
+> 本文对应版本 **v1.8.7**。每个 [Release](https://github.com/muzhi621/NodeWarden_fceo/releases) 都附带
 > 可直接上传的 `nodewarden-fc.zip`（前端 + 后端 bundle + mysql2 依赖，免构建）。
 
 ---
@@ -149,7 +149,7 @@ docker run -d --name nodewarden -p 8787:8787 \
   -e DATA_DIR=/data \
   -e JWT_SECRET="$(openssl rand -base64 32)" \
   -e DB_HOST=... -e DB_USER=... -e DB_PASSWORD=... -e DB_NAME=... \
-  nodewarden:1.8.6
+  nodewarden:1.8.7
 ```
 
 ```yaml
@@ -287,7 +287,7 @@ rclone mount nw-oss:nodewarden /mnt/obj \
 ```yaml
 services:
   nodewarden:
-    image: nodewarden:1.8.6
+    image: nodewarden:1.8.7
     ports: ["8787:8787"]
     devices:
       - /dev/fuse:/dev/fuse          # 必需
@@ -730,7 +730,9 @@ curl -s https://<你的地址>/healthz
 | `/healthz` 返回 `db:down`，日志有证书错误 | 默认严格校验证书，自签库过不了 | 设 `DB_SSL_INSECURE=1`，或 `DB_SSL_CA` 指向 PEM |
 | `/healthz` 正常但登录报错 | 库字符集/时区不对，或 `JWT_SECRET` 部署后变了 | 库用 `utf8mb4`；`JWT_SECRET` 设成 Secret 而不是普通变量 |
 | 后台「测试连接」提示内网地址被拒 | SSRF 防护默认拒绝私网/回环 | 把 host 加进 `DB_HOST_ALLOWLIST` |
-| 后台保存配置成功但提示「未生效」 | `DB_*` 环境变量优先于后台配置 | 想用后台配置就先删掉 `DB_*` |
+| 后台保存配置成功但提示「未生效」 | `DB_*` 环境变量优先于后台配置 | 想用后台配置就先删掉 `DB_*`；删之前后台会把已保存的节点列在「已保存的集群配置（当前未生效）」里，配置并没有丢 |
+| 刷新后「其他数据库节点」不见了 | 页面上方那台是 `DB_*` 还原出来的，已保存的集群被环境变量挡住 | 见上一条：删掉 `DB_*` 并重启，保存过的节点会自动接管（数据不用搬） |
+| 数据同步很久没动静 | 每段约 12 秒，进度条按「已完成表数 + 行数估算」推进；大表会走很多段 | 看进度条上的「数据表 x/y」；中断后再点一次会从上次位置继续，已完成的表不重扫 |
 | 附件上传成功，重启后下载 404 | `DATA_DIR` 还在 `/tmp` 或没挂持久盘 | FC 挂 NAS（[3.2](#32-阿里云-fc挂-nas-才能持久化附件)），自建挂卷（[3.4](#34-自建--docker卷挂到-data_dir)） |
 | FC 上所有路径都返回 `Fail to mount oss: invalid credentials` | 平台层挂载失败，函数**根本没启动**，与代码无关 | 给函数**角色**授权并重新部署，见 [3.7.3](#373-给函数角色授权这一步错了函数直接起不来) |
 | `/healthz` 的 `attachments` 是 `not-mounted` | `ATTACHMENTS_DIR` 指到了挂载点内的子目录 | 改回挂载点本身（如 `/mnt/oss`），见 3.7.7 |
