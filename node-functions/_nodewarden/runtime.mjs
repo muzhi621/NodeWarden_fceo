@@ -4227,6 +4227,10 @@ var init_audit_events = __esm({
       "targetEmail",
       "grantType",
       "webSession",
+      // Whether the request arrived with cookies at all, and with the session
+      // cookie under its expected name. Presence only, never a value.
+      "cookieHeader",
+      "webCookie",
       "deviceIdentifier",
       "deviceType",
       "reason",
@@ -48445,8 +48449,24 @@ async function handleToken(request, env) {
       unofficialServer: true
     });
   } else if (grantType === "refresh_token") {
-    const refreshToken = String(body.refresh_token || "").trim() || (shouldUseWebSession(request) ? parseCookieValue(request, WEB_REFRESH_COOKIE) : null);
+    const webSession = shouldUseWebSession(request);
+    const cookieToken = webSession ? parseCookieValue(request, WEB_REFRESH_COOKIE) : null;
+    const refreshToken = String(body.refresh_token || "").trim() || cookieToken || "";
     if (!refreshToken) {
+      await safeWriteAuditEvent(env, {
+        action: "auth.refresh.failed.missing_token",
+        category: "auth",
+        level: "warn",
+        targetType: "refreshToken",
+        metadata: {
+          grantType,
+          reason: "missing_token",
+          webSession,
+          cookieHeader: String(request.headers.get("Cookie") || "").trim() ? "present" : "absent",
+          webCookie: cookieToken ? "present" : "absent",
+          ...auditRequestMetadata(request)
+        }
+      });
       return identityErrorResponse("Refresh token is required", "invalid_request", 400);
     }
     const refreshTokenHash = await sha256Hex3(refreshToken);
