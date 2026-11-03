@@ -21,6 +21,46 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.11 - A Standby You Can Fill Without Deleting Your Env Vars
+
+### Added
+
+1. **`DB_STANDBY_NAME` declares a standby directly in environment variables.** A `DB_*` deployment used to be a single node, so "sync data to the standby" had no target, while the cluster saved in the admin page was shadowed by those same variables and — on a serverless host — lived in `/tmp`. Setting `DB_STANDBY_NAME` now makes the environment itself describe two nodes; host, port, user, password, TLS and pool size all fall back to the primary, so two schemas on one MySQL instance need a single new line and no NAS. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+2. **The env standby is a manual copy, and the app treats it that way.** Automatic failover and read splitting are switched off whenever the standby comes from environment variables. In `native` mode nothing lets the app tell a synced copy from an empty schema, and promoting an empty one after a brief primary hiccup would log everyone out with no way back in. Normal reads and writes keep going to the primary only; the standby is written to solely by the sync button. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+
+### Improved
+
+1. **The sync button now explains how to get a target instead of telling you to delete your configuration.** When no standby is configured the endpoint names `DB_STANDBY_NAME` as the fix, instead of asking an operator to remove the `DB_*` variables they deliberately set. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+2. **Switching primaries in env mode describes the actual procedure.** "Promote" is refused by design when environment variables decide the primary, and the message now says what to do instead: swap `DB_NAME` with `DB_STANDBY_NAME` and restart — data untouched, reversible at any time. The page greys the button out and says the same thing up front. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+3. **The admin page stops offering edits that cannot take effect.** With `DB_*` in charge, the policy controls and "add node" are disabled with a short explanation, so a change is not silently overwritten the next time the page is saved. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+
+### Fixed
+
+1. **A standby whose database does not exist is reported as a missing database.** The bootstrap step used to answer "schema creation failed", which reads as a permissions problem. It now says the database itself is absent and prints the `CREATE DATABASE` that fixes it. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+2. **"Trying the next node" is no longer logged when there is no next node.** A single-node cluster printed that line on every failed read, which sends whoever is debugging a failover looking for a failover that cannot happen. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+
+---
+
+# v1.8.11 - 不用删环境变量，也能有一个能同步的副库
+
+### 新增
+
+1. **`DB_STANDBY_NAME` 直接用环境变量声明副库。** 以前 `DB_*` 部署就是单节点，「同步数据到副库」没有目标；后台保存的集群又被同一批变量挡住，而且在函数计算上那份配置存在 `/tmp`。现在只要设 `DB_STANDBY_NAME`，环境变量本身就描述了主库 + 副库两台：host、端口、账号、密码、TLS、连接池全部沿用主库，所以「同一台 MySQL 上的两个库」只需要加一行、也不用挂 NAS。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+2. **环境变量副库是「手动同步的副本」，程序就按这个定位处理它。** 只要副库来自环境变量，自动故障切换与读分摊就固定关闭：`native` 模式下应用无法区分「同步完成的副本」和「空库」，主库稍微抖一下就自动切到空库，代价是所有人被登出且没有入口再切回来。正常读和写都只走主库，副库只在点「同步数据到副库」时被写入。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+
+### 改进
+
+1. **没有目标可同步时，同步按钮告诉你该怎么加一个，而不是让你删配置。** 以前会提示「请先删除 DB_HOST 等环境变量」，等于让用户拆掉自己有意保留的部署方式。现在直接指出 `DB_STANDBY_NAME`。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+2. **环境变量模式下点「切换主库」会告诉你真正的切换方法。** 主库由环境变量决定时这个操作按设计会被拒绝，提示改成可执行的步骤：把 `DB_NAME` 与 `DB_STANDBY_NAME` 互换后重启，数据不动、随时可换回。页面上按钮直接置灰并写明同样的原因。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+3. **后台不再提供点了也不会生效的编辑。** 环境变量生效期间，策略选项与「添加节点」置灰并给出说明，避免改了之后一保存就把「已保存的集群配置」覆盖掉。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+
+### 修复
+
+1. **副库的库本身不存在时，会明确说「数据库不存在」。** 自动建表失败以前统一报「建表失败」，看起来像权限问题。现在直接说库不存在，并给出该执行的 `CREATE DATABASE`。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+2. **只有一台库时不再打印「正在尝试下一个节点」。** 单节点集群每次读失败都打这一行，会让排障的人去找一个根本不存在的切换。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+
+---
+
 # v1.8.10 - A Stuck Sync Now Says Why
 
 ### Fixed
