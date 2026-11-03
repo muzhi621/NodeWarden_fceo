@@ -21,6 +21,34 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.15 - The Standby Was Missing a Table, Not Time
+
+### Fixed
+
+1. **A standby that lacks a table now gets it before the copy starts.** Some tables (such as `rate_limit_buckets`) are created lazily by the application the first time it needs them, so they exist on the primary and never on a standby — a standby is a plain schema that nothing else maintains, and the application never runs against it. Copying the missing table answered "table doesn't exist" on every run, which ended that run early: the progress bar sat at "tables 19/20 · 99%" no matter how often you clicked, and the one missing table was never named. The sync now builds every table the primary has and the standby does not, from the primary's own `SHOW CREATE TABLE`. Commit: [de8e0f7](https://github.com/muzhi621/NodeWarden_fceo/commit/de8e0f7).
+2. **A finished sync no longer reports itself as unfinished.** Completeness used to require that both sides hold exactly the same number of rows per table, which a live source can never satisfy: the run itself writes an audit row on the primary when it finishes, and any sign-in during the copy adds more. So a run that had genuinely walked every table still came back "not complete" and the bar stopped at 99%. A run is complete when every table was walked to the end and every row that was pushed is actually on the standby; the row difference is reported as a number instead of being treated as a failure. Rows that were pushed but never landed still keep a run unfinished. Commit: [de8e0f7](https://github.com/muzhi621/NodeWarden_fceo/commit/de8e0f7).
+3. **Environment-variable standbys show their sync state.** The stored sync record was only read back in "application write-through" mode, so a standby described by `DB_STANDBY_NODES` printed "尚未同步（不可接管）" forever — including immediately after a sync that had completed successfully. The node card now shows "已同步 <time> · N tables", or how far the unfinished run got. Commit: [de8e0f7](https://github.com/muzhi621/NodeWarden_fceo/commit/de8e0f7).
+
+### Improved
+
+1. **The sync panel says what it did to the schema and how far behind the copy is.** A completed run now mentions the tables it had to create on the standby and, when the primary kept writing during the copy, exactly how many rows the standby is behind — instead of claiming "row counts verified" or silently showing a stuck percentage. Commit: [de8e0f7](https://github.com/muzhi621/NodeWarden_fceo/commit/de8e0f7).
+
+---
+
+# v1.8.15 - 副库少的是一张表，不是时间
+
+### 修复
+
+1. **副库缺的表，复制前会先补建。** 有些表（例如 `rate_limit_buckets`）是应用第一次用到时才懒建的，所以主库里有、副库里永远没有——副库只是一套普通的 schema，没有任何东西维护它，应用也从不在上面跑。复制这张缺失的表每次都会以「表不存在」失败，而那轮同步就此收工：不管点多少次，进度条都停在「数据表 19/20 · 99%」，而且从来不告诉你是哪张表。现在同步前会用主库自己的 `SHOW CREATE TABLE` 把副库缺的表建好，再开始复制。提交：[de8e0f7](https://github.com/muzhi621/NodeWarden_fceo/commit/de8e0f7)。
+2. **真正跑完的同步，不会再报「未完成」。** 以前要「完成的」条件是每张表在两侧行数完全相等，而线上主库在同步期间一直在写（同步自己结束时还要写一条 `audit_logs`），这个条件永远满足不了。于是一次明明已经把每张表都走完的同步，仍然返回「未完成」，进度条停在 99%。现在「所有表走到结尾 + 推过去的行确实都在副库上」就算完成，行数差值改成如实报一个数字；反过来「推过去却没落地」仍然算失败。提交：[de8e0f7](https://github.com/muzhi621/NodeWarden_fceo/commit/de8e0f7)。
+3. **环境变量描述的副库会显示同步状态。** 同步记录以前只在「应用层双写」模式下才读取，所以用 `DB_STANDBY_NODES` 配的副库一直显示「尚未同步（不可接管）」，哪怕刚刚同步成功。现在节点卡片会显示「已同步 <时间> · N 张表」，或者这次没跑完到了哪一步。提交：[de8e0f7](https://github.com/muzhi621/NodeWarden_fceo/commit/de8e0f7)。
+
+### 改进
+
+1. **同步面板会说清它动了哪些表、以及副库落后多少。** 同步完成时会提到它在副库补建了哪些表；如果主库在复制期间持续写入，也会直接告诉你副库少了几行——而不是笼统地写「行数校验通过」，或者让进度条无声地卡住。提交：[de8e0f7](https://github.com/muzhi621/NodeWarden_fceo/commit/de8e0f7)。
+
+---
+
 # v1.8.14 - A Sync That Finishes Instead of Looping at 19/20
 
 ### Fixed

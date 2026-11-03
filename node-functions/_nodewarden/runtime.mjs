@@ -6440,7 +6440,7 @@ var APP_VERSION;
 var init_app_version = __esm({
   "shared/app-version.ts"() {
     "use strict";
-    APP_VERSION = "1.8.14";
+    APP_VERSION = "1.8.15";
   }
 });
 
