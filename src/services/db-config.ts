@@ -797,6 +797,13 @@ export async function clearRuntimeConfig(env: Env): Promise<boolean> {
   return saved;
 }
 
+/** Booleans from env: unset means "keep the primary's value", not "true". */
+function parseEnvFlag(raw: unknown, fallback: boolean): boolean {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (!value) return fallback;
+  return value !== 'false' && value !== '0' && value !== 'no' && value !== 'off';
+}
+
 /**
  * env-var driven cluster: a single primary node.
  *
@@ -814,9 +821,55 @@ export function resolveDbConfigFromEnv(env: Env): ResolvedDbConfig | null {
     user: (env.DB_USER || '').trim(),
     password: env.DB_PASSWORD || '',
     database: (env.DB_NAME || '').trim(),
-    ssl: (env.DB_SSL || '').toLowerCase() !== 'false' && (env.DB_SSL || '') !== '0',
+    ssl: parseEnvFlag(env.DB_SSL, true),
     connectionLimit: parsePort(env.DB_CONN_LIMIT, 5),
   };
+}
+
+/**
+ * Optional standby described entirely by environment variables.
+ *
+ * `DB_*` deployments could not sync at all: the effective cluster was one node,
+ * so "同步数据到副库" had no target, while the admin-saved two-node cluster was
+ * shadowed and its config died with `/tmp` on FC. Operators who keep their
+ * credentials in env vars — the recommended, IaC-friendly setup — therefore had
+ * a standby they could never fill.
+ *
+ * `DB_STANDBY_NAME` is the only required variable: an empty value means "no
+ * standby". Everything else falls back to the primary, which is what makes the
+ * common case — two schemas on the same MySQL instance — a one-line change.
+ */
+export function resolveStandbyFromEnv(env: Env): ResolvedDbConfig | null {
+  const primary = resolveDbConfigFromEnv(env);
+  if (!primary) return null;
+  const database = (env.DB_STANDBY_NAME || '').trim();
+  if (!database) return null;
+  const standby: ResolvedDbConfig = {
+    mode: 'mysql',
+    source: 'env',
+    host: (env.DB_STANDBY_HOST || '').trim() || primary.host,
+    port: parsePort(env.DB_STANDBY_PORT ?? env.DB_PORT, primary.port),
+    user: (env.DB_STANDBY_USER || '').trim() || primary.user,
+    password: env.DB_STANDBY_PASSWORD || primary.password,
+    database,
+    ssl: parseEnvFlag(env.DB_STANDBY_SSL, primary.ssl),
+    connectionLimit: parsePort(env.DB_STANDBY_CONN_LIMIT, primary.connectionLimit),
+  };
+  // The very same server *and* schema is the primary: a "standby" pointing at
+  // itself would copy every row onto itself and report the table as its own
+  // target. Ignore it instead of failing the whole config.
+  if (
+    standby.host === primary.host &&
+    standby.port === primary.port &&
+    standby.database === primary.database
+  ) {
+    console.warn(
+      '[db-config] DB_STANDBY_NAME points at the primary database (' +
+        `${primary.host}:${primary.port}/${primary.database}); ignoring the standby entry`
+    );
+    return null;
+  }
+  return standby;
 }
 
 function toResolvedNodes(config: DbRuntimeConfigV2, syncStates: DbSyncStates): ResolvedDbNode[] {
@@ -878,27 +931,53 @@ export async function resolveStoredCluster(env: Env): Promise<ResolvedDbCluster 
 export async function resolveDbCluster(env: Env): Promise<ResolvedDbCluster> {
   const fromEnv = resolveDbConfigFromEnv(env);
   if (fromEnv) {
+    const standby = resolveStandbyFromEnv(env);
+    const nodes: ResolvedDbNode[] = [
+      {
+        id: 'env-primary',
+        label: '环境变量主库',
+        role: 'primary',
+        priority: 1,
+        enabled: true,
+        host: fromEnv.host,
+        port: fromEnv.port,
+        user: fromEnv.user,
+        password: fromEnv.password,
+        database: fromEnv.database,
+        ssl: fromEnv.ssl,
+        connectionLimit: fromEnv.connectionLimit,
+        source: 'env',
+      },
+    ];
+    if (standby) {
+      nodes.push({
+        id: 'env-standby',
+        label: '环境变量副库（手动同步）',
+        role: 'replica',
+        priority: 2,
+        enabled: true,
+        host: standby.host,
+        port: standby.port,
+        user: standby.user,
+        password: standby.password,
+        database: standby.database,
+        ssl: standby.ssl,
+        connectionLimit: standby.connectionLimit,
+        source: 'env',
+      });
+    }
+    // Automatic failover stays OFF for an env-described standby, and that is a
+    // deliberate safety decision rather than an omission: in `native` mode the
+    // app has no way to tell a replicated standby from an empty schema, so
+    // "primary hiccuped" would silently promote the copy into serving traffic.
+    // For a schema that has never been synced that means everyone is logged out
+    // and nobody can get back in. A manual sync target is filled by a person and
+    // promoted by a person (swap DB_NAME with DB_STANDBY_NAME).
     return {
       mode: 'mysql',
       source: 'env',
-      nodes: [
-        {
-          id: 'env-primary',
-          label: '环境变量主库',
-          role: 'primary',
-          priority: 1,
-          enabled: true,
-          host: fromEnv.host,
-          port: fromEnv.port,
-          user: fromEnv.user,
-          password: fromEnv.password,
-          database: fromEnv.database,
-          ssl: fromEnv.ssl,
-          connectionLimit: fromEnv.connectionLimit,
-          source: 'env',
-        },
-      ],
-      policy: { ...DEFAULT_CLUSTER_POLICY },
+      nodes,
+      policy: standby ? { ...DEFAULT_CLUSTER_POLICY, failoverEnabled: false } : { ...DEFAULT_CLUSTER_POLICY },
     };
   }
 

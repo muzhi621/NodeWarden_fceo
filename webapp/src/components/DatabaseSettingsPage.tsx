@@ -603,6 +603,20 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
   const shadowedStored =
     status?.storedCluster && status.storedClusterActive === false ? status.storedCluster : null;
 
+  /** Everything the page edits is decided by env vars in this mode. */
+  const envMode = status?.cluster.source === 'env';
+  /**
+   * A standby that exists only because `DB_STANDBY_NAME` is set.
+   *
+   * `native` normally means "the database replicates itself, the app must not
+   * write to the copy", which is why the sync button is hidden outside
+   * write-through. An env-described standby is the opposite: it is a plain
+   * schema that nothing else ever fills, so a manual copy is the only way it can
+   * become a usable backup.
+   */
+  const envStandby = envMode && nodes.some((node) => node.role === 'replica');
+  const canManualSync = policy.syncMode === 'write-through' || envStandby;
+
   /**
    * Position of a sync that stopped short, read back from the stored state.
    *
@@ -704,6 +718,9 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
               {shadowedStored && shadowedStored.nodes.length > 0
                 ? `已保存的 ${shadowedStored.nodes.length} 个节点见下方「已保存的集群配置」，配置没有丢失，只是被环境变量挡住了。`
                 : ''}
+              {envStandby
+                ? ' 副库已由 DB_STANDBY_NAME 声明，本页可直接「同步数据到副库」。'
+                : ' 只想要一个可同步的副库，不需要删除环境变量：加一个 DB_STANDBY_NAME 即可。'}
             </span>
           </p>
         )}
@@ -737,6 +754,9 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
               让它生效的办法是清掉环境变量：删除函数/容器上的 <code>DB_HOST</code>、<code>DB_USER</code>、
               <code>DB_PASSWORD</code>、<code>DB_NAME</code>（以及 <code>DB_PORT</code>、<code>DB_SSL</code>，如果设过）后重启；
               重启后本页会自动切到这份配置，附件与账号数据都不需要重搬。
+              <br />
+              只想让副库能同步、并不想改部署方式的话，不用清环境变量：加一个
+              <code>DB_STANDBY_NAME</code>（副库库名）就是这种部署下的双节点模式，其余参数沿用主库。
             </p>
             <p className="db-inline-hint">
               在此之前，上方编辑区里的节点是从环境变量还原出来的那一台，
@@ -768,7 +788,8 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
             <button
               type="button"
               className="btn btn-secondary small"
-              disabled={occupied || nodes.length >= (status?.limits?.maxNodes ?? 8)}
+              disabled={occupied || envMode || nodes.length >= (status?.limits?.maxNodes ?? 8)}
+              title={envMode ? '节点由环境变量决定：请添加 DB_STANDBY_NAME 等变量，而不是在这里加节点' : undefined}
               onClick={addNode}
             >
               <Plus size={14} className="btn-icon" /> 添加节点
@@ -834,13 +855,15 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
                         <button
                           type="button"
                           className="btn btn-secondary small"
-                          disabled={occupied || dirty || !stored}
+                          disabled={occupied || dirty || !stored || envMode}
                           title={
-                            dirty
-                              ? '有未保存的修改：先保存，再做主库切换'
-                              : !stored
-                                ? '新节点需要先保存一次，才能接管写入'
-                                : '立即把写入切到该节点（校验连通性、只读状态与同步进度）'
+                            envMode
+                              ? '主库由环境变量决定：把 DB_NAME 与 DB_STANDBY_NAME 互换后重启，才是真正的主副切换'
+                              : dirty
+                                ? '有未保存的修改：先保存，再做主库切换'
+                                : !stored
+                                  ? '新节点需要先保存一次，才能接管写入'
+                                  : '立即把写入切到该节点（校验连通性、只读状态与同步进度）'
                           }
                           onClick={() => {
                             setPromoteForce(false);
@@ -1027,11 +1050,13 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
             <button
               type="button"
               className="btn btn-secondary small"
-              disabled={occupied || policy.syncMode !== 'write-through' || nodes.filter((node) => node.enabled && node.role === 'replica').length === 0}
+              disabled={occupied || !canManualSync || nodes.filter((node) => node.enabled && node.role === 'replica').length === 0}
               title={
-                policy.syncMode !== 'write-through'
+                !canManualSync
                   ? '仅「应用层实时双写」需要手动同步：数据库自身复制由数据库负责'
-                  : '把源节点的数据补到副库；默认只插入缺失行，不会覆盖已有的更新'
+                  : envStandby
+                    ? '把环境变量主库的数据补到 DB_STANDBY_NAME 指向的副库；默认只插入缺失行，不会覆盖已有数据'
+                    : '把源节点的数据补到副库；默认只插入缺失行，不会覆盖已有的更新'
               }
               onClick={() => setConfirmSync(true)}
             >
@@ -1091,7 +1116,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
           </div>
         )}
 
-        {policy.syncMode === 'write-through' && (
+        {canManualSync && (
           <div className="db-grid">
             <label className="field">
               <span>同步源（从哪个节点读数据）</span>
@@ -1124,12 +1149,21 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
           </div>
         )}
 
+        {envMode && (
+          <p className="db-inline-hint">
+            当前生效的配置来自环境变量：节点与策略都由环境变量决定，下面这些选项改了也不会生效
+            （在本页保存只会覆盖「已保存的集群配置」）。副库由 <code>DB_STANDBY_NAME</code> 声明时，
+            自动切换与读分摊固定关闭——副库只是手动同步出来的备份，主库抖动时不能自动接管。
+          </p>
+        )}
+
         <div className="db-grid">
           <label className="field">
             <span>副库同步方式</span>
             <select
               className="input"
               value={policy.syncMode}
+              disabled={envMode}
               onChange={(e) => updatePolicy({ syncMode: (e.target as HTMLSelectElement).value as DbClusterPolicy['syncMode'] })}
             >
               <option value="native">数据库自身复制（推荐）</option>
@@ -1142,6 +1176,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
               className="input"
               value={String(policy.failureThreshold)}
               placeholder="3"
+              disabled={envMode}
               onInput={(e) => updatePolicy({ failureThreshold: Number((e.target as HTMLInputElement).value) || 3 })}
             />
           </label>
@@ -1151,6 +1186,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
               className="input"
               value={String(Math.round(policy.cooldownMs / 1000))}
               placeholder="30"
+              disabled={envMode}
               onInput={(e) => updatePolicy({ cooldownMs: (Number((e.target as HTMLInputElement).value) || 30) * 1000 })}
             />
           </label>
@@ -1161,6 +1197,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
             <input
               type="checkbox"
               checked={policy.failoverEnabled}
+              disabled={envMode}
               onChange={(e) => updatePolicy({ failoverEnabled: (e.target as HTMLInputElement).checked })}
             />
             <span>主库连接失败时自动切换到下一个健康节点（按优先级）</span>
@@ -1169,6 +1206,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
             <input
               type="checkbox"
               checked={policy.readSplit}
+              disabled={envMode}
               onChange={(e) => updatePolicy({ readSplit: (e.target as HTMLInputElement).checked })}
             />
             <span>读请求分摊到副库（写请求仍然只走主库）</span>
@@ -1178,6 +1216,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
               <input
                 type="checkbox"
                 checked={policy.syncAsync}
+                disabled={envMode}
                 onChange={(e) => updatePolicy({ syncAsync: (e.target as HTMLInputElement).checked })}
               />
               <span>双写异步执行（请求更快，但副库失败只会在本页告警）</span>

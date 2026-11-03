@@ -29,6 +29,7 @@ import {
   resolveDbCluster,
   resolveDbConfig,
   resolveDbConfigFromEnv,
+  resolveStandbyFromEnv,
   resolveStoredCluster,
   saveRuntimeConfig,
   readSyncStates,
@@ -950,18 +951,22 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       ? Math.min(30_000, Math.max(3_000, Math.round(requestedBudget)))
       : null;
 
-  // `DB_*` wins over the stored cluster, so in that mode the cluster this
-  // endpoint sees is a *single* node: no standby to copy into, and a policy of
-  // `native`. The generic messages below ("数据库自身复制", "没有可同步的目标节点")
-  // describe a cluster state the operator never configured, which is why the
-  // real cause — the saved cluster is shadowed by environment variables — has to
-  // be named here.
-  if (resolveDbConfigFromEnv(env)) {
+  // A cluster described by DB_* env vars is normally a single node, and then
+  // there is nothing to copy into: the saved cluster is shadowed, so its
+  // standbys never reach the effective config. Say that plainly *and* name the
+  // one variable that fixes it — an env-only deployment is the recommended
+  // setup, and it can have a sync target now (see resolveStandbyFromEnv).
+  const envPrimary = resolveDbConfigFromEnv(env);
+  if (envPrimary && !resolveStandbyFromEnv(env)) {
+    const stored = await resolveStoredCluster(env);
+    const savedStandbys = (stored?.nodes ?? []).filter((node) => node.id !== 'env-primary').length;
     return errorResponse(
-      '当前生效的是环境变量里的那一个库（单节点），后台保存的副库没有生效，因此没有可同步的目标。' +
-        '请先删除 DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME 并重启，再执行同步。' +
-        '(DB_* environment variables shadow the saved cluster: the effective configuration is the single ' +
-        'node they point at, so there is no standby to copy into.)',
+      '当前生效的是环境变量里的那一个库（单节点），没有可同步的目标库。' +
+        '要同步到副库，请给函数加上 DB_STANDBY_NAME（副库的库名）；' +
+        '同实例时其它参数会沿用 DB_HOST / DB_PORT / DB_USER / DB_PASSWORD。' +
+        (savedStandbys > 0
+          ? `后台已保存的 ${savedStandbys} 个副库节点被 DB_* 环境变量挡住了，不会参与同步。`
+          : ''),
       409
     );
   }
@@ -970,7 +975,12 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
   if (cluster.mode !== 'mysql' || cluster.nodes.length === 0) {
     return errorResponse('当前没有配置外接 MySQL 节点，无需同步。', 400);
   }
-  if (cluster.policy.syncMode !== 'write-through') {
+  // `native` means the database replicates on its own — except for an
+  // env-described standby, which is by definition not part of any replication
+  // setup: it is a plain schema that only this endpoint ever fills. Refusing to
+  // sync it would leave that deployment with no way to make a copy at all.
+  const manualEnvStandby = cluster.source === 'env' && cluster.nodes.length > 1;
+  if (cluster.policy.syncMode !== 'write-through' && !manualEnvStandby) {
     return errorResponse(
       '当前副库同步方式是「数据库自身复制」，数据由数据库负责，应用层不需要也不应该写入副库。' +
         '如需应用层双写，请先切换到「应用层实时双写」并保存。',
@@ -1077,10 +1087,16 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
     // so the run reports one identical error per table and nothing is copied.
     // Create the schema first — the same idempotent step the save path runs —
     // and say so plainly when the account has no DDL rights.
+    //
+    // `null` counts too: it means the probe itself failed (the database does not
+    // exist, or the account cannot read information_schema), which is exactly
+    // the case where bootstrapping either fixes it or produces the real error.
     const targetTableCount = await countBaseTables(target.db, spec?.database);
-    if (targetTableCount === 0 && spec) {
+    if ((targetTableCount === 0 || targetTableCount === null) && spec) {
       const bootstrap = await bootstrapSchemaOnCandidate(spec);
       if (!bootstrap.ok) {
+        const detail = bootstrap.error ?? 'unknown error';
+        const missingDatabase = /unknown database|1049/i.test(detail);
         reports.push({
           id: target.id,
           label: spec.label,
@@ -1091,9 +1107,12 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
           truncated: false,
           durationMs: 0,
           tables: [],
-          error:
-            `副库「${spec.label}」里没有任何数据表，自动建表也失败了（${bootstrap.error ?? 'unknown error'}）。` +
-            '请给该库账号授予 CREATE/ALTER/INDEX 权限，或手动导入表结构后重试。',
+          error: missingDatabase
+            ? `副库「${spec.label}」指向的数据库「${spec.database}」在服务器上不存在（${detail}）。` +
+              `请先执行 CREATE DATABASE \`${spec.database}\`（字符集建议 utf8mb4），` +
+              '表结构会在下一次点「同步数据到副库」时自动建好。'
+            : `副库「${spec.label}」里没有任何数据表，自动建表也失败了（${detail}）。` +
+              '请给该库账号授予 CREATE/ALTER/INDEX 权限，或手动导入表结构后重试。',
         });
         continue;
       }
@@ -1285,8 +1304,12 @@ export async function handleAdminPromoteDbNode(
   if (!targetId) return errorResponse('缺少 nodeId：请指定要提升为主库的节点。', 400);
 
   if (resolveDbConfigFromEnv(env)) {
+    const standby = resolveStandbyFromEnv(env);
     return errorResponse(
-      'DB_* 环境变量优先于运行时配置：主库由环境变量决定，页面上的切换不会生效。请修改环境变量后重启。',
+      '主库由环境变量决定，页面上的切换不会生效。' +
+        (standby
+          ? `要切换到副库「${standby.database}」，请把 DB_NAME 改成它、把 DB_STANDBY_NAME 改成现在的库，再重启。`
+          : '要换主库，请改 DB_HOST / DB_NAME 后重启；想先有一个可切换的副库，加 DB_STANDBY_NAME。'),
       409
     );
   }

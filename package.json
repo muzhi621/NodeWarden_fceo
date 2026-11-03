@@ -1,6 +1,6 @@
 {
   "name": "nodewarden",
-  "version": "1.8.10",
+  "version": "1.8.11",
   "description": "Minimal Bitwarden-compatible server running on Cloudflare Workers",
   "author": "shuaiplus",
   "license": "LGPL-3.0",
@@ -30,6 +30,7 @@
     "test:app-routes": "tsx --test scripts/app-routes.test.ts",
     "test:db-config-save": "tsx --test scripts/db-config-save.test.ts",
     "test:db-config-status": "tsx --test scripts/db-config-status.test.ts",
+    "test:db-env-standby": "tsx --test scripts/db-config-env-standby.test.ts",
     "test:db-promote": "tsx --test scripts/db-config-promote.test.ts",
     "test:db-availability": "tsx --test scripts/db-availability.test.ts",
     "test:db-policy": "tsx --test scripts/db-host-policy.test.ts",

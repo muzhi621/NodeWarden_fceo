@@ -931,8 +931,13 @@ export class MySqlClusterDatabase implements D1LikeDatabase {
         lastError = error;
         if (!isNodeLevelFailure(error)) throw error; // a SQL error is not a node outage
         this.markFailure(node, error);
+        // With one candidate there is no next node, and saying so sends whoever
+        // reads the log looking for a failover that cannot happen (an
+        // env-declared standby runs with `failoverEnabled: false`).
         console.warn(
-          `[db-cluster] read on "${node.spec.label}" failed (${nodeFailureMessage(error)}); trying the next node`
+          candidates.length > 1
+            ? `[db-cluster] read on "${node.spec.label}" failed (${nodeFailureMessage(error)}); trying the next node`
+            : `[db-cluster] read on "${node.spec.label}" failed (${nodeFailureMessage(error)}); no other node is eligible`
         );
       }
     }

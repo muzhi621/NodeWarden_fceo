@@ -27,6 +27,16 @@ export interface Env {
   DB_NAME?: string;
   DB_SSL?: string;
   DB_CONN_LIMIT?: string;
+  // Optional standby, declared in env instead of the admin UI. Only the schema
+  // name is required: host/port/user/password/ssl fall back to the primary,
+  // which is what a second schema on the same instance needs.
+  DB_STANDBY_NAME?: string;
+  DB_STANDBY_HOST?: string;
+  DB_STANDBY_PORT?: string;
+  DB_STANDBY_USER?: string;
+  DB_STANDBY_PASSWORD?: string;
+  DB_STANDBY_SSL?: string;
+  DB_STANDBY_CONN_LIMIT?: string;
   // Master key for the encrypted runtime DB config written from the admin UI.
   DB_CONFIG_KEY?: string;
   // Optional KV-like store for the encrypted runtime DB config.

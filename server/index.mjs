@@ -6419,7 +6419,7 @@ var APP_VERSION;
 var init_app_version = __esm({
   "shared/app-version.ts"() {
     "use strict";
-    APP_VERSION = "1.8.10";
+    APP_VERSION = "1.8.11";
   }
 });
 
@@ -36397,6 +36397,11 @@ async function clearRuntimeConfig(env) {
   }
   return saved;
 }
+function parseEnvFlag(raw, fallback) {
+  const value = String(raw ?? "").trim().toLowerCase();
+  if (!value) return fallback;
+  return value !== "false" && value !== "0" && value !== "no" && value !== "off";
+}
 function resolveDbConfigFromEnv(env) {
   const host = (env.DB_HOST || "").trim();
   if (!host) return null;
@@ -36408,9 +36413,33 @@ function resolveDbConfigFromEnv(env) {
     user: (env.DB_USER || "").trim(),
     password: env.DB_PASSWORD || "",
     database: (env.DB_NAME || "").trim(),
-    ssl: (env.DB_SSL || "").toLowerCase() !== "false" && (env.DB_SSL || "") !== "0",
+    ssl: parseEnvFlag(env.DB_SSL, true),
     connectionLimit: parsePort(env.DB_CONN_LIMIT, 5)
   };
+}
+function resolveStandbyFromEnv(env) {
+  const primary = resolveDbConfigFromEnv(env);
+  if (!primary) return null;
+  const database = (env.DB_STANDBY_NAME || "").trim();
+  if (!database) return null;
+  const standby = {
+    mode: "mysql",
+    source: "env",
+    host: (env.DB_STANDBY_HOST || "").trim() || primary.host,
+    port: parsePort(env.DB_STANDBY_PORT ?? env.DB_PORT, primary.port),
+    user: (env.DB_STANDBY_USER || "").trim() || primary.user,
+    password: env.DB_STANDBY_PASSWORD || primary.password,
+    database,
+    ssl: parseEnvFlag(env.DB_STANDBY_SSL, primary.ssl),
+    connectionLimit: parsePort(env.DB_STANDBY_CONN_LIMIT, primary.connectionLimit)
+  };
+  if (standby.host === primary.host && standby.port === primary.port && standby.database === primary.database) {
+    console.warn(
+      `[db-config] DB_STANDBY_NAME points at the primary database (${primary.host}:${primary.port}/${primary.database}); ignoring the standby entry`
+    );
+    return null;
+  }
+  return standby;
 }
 function toResolvedNodes(config, syncStates) {
   const writeThrough = config.policy.syncMode === "write-through";
@@ -36446,27 +36475,46 @@ async function resolveStoredCluster(env) {
 async function resolveDbCluster(env) {
   const fromEnv = resolveDbConfigFromEnv(env);
   if (fromEnv) {
+    const standby = resolveStandbyFromEnv(env);
+    const nodes = [
+      {
+        id: "env-primary",
+        label: "\u73AF\u5883\u53D8\u91CF\u4E3B\u5E93",
+        role: "primary",
+        priority: 1,
+        enabled: true,
+        host: fromEnv.host,
+        port: fromEnv.port,
+        user: fromEnv.user,
+        password: fromEnv.password,
+        database: fromEnv.database,
+        ssl: fromEnv.ssl,
+        connectionLimit: fromEnv.connectionLimit,
+        source: "env"
+      }
+    ];
+    if (standby) {
+      nodes.push({
+        id: "env-standby",
+        label: "\u73AF\u5883\u53D8\u91CF\u526F\u5E93\uFF08\u624B\u52A8\u540C\u6B65\uFF09",
+        role: "replica",
+        priority: 2,
+        enabled: true,
+        host: standby.host,
+        port: standby.port,
+        user: standby.user,
+        password: standby.password,
+        database: standby.database,
+        ssl: standby.ssl,
+        connectionLimit: standby.connectionLimit,
+        source: "env"
+      });
+    }
     return {
       mode: "mysql",
       source: "env",
-      nodes: [
-        {
-          id: "env-primary",
-          label: "\u73AF\u5883\u53D8\u91CF\u4E3B\u5E93",
-          role: "primary",
-          priority: 1,
-          enabled: true,
-          host: fromEnv.host,
-          port: fromEnv.port,
-          user: fromEnv.user,
-          password: fromEnv.password,
-          database: fromEnv.database,
-          ssl: fromEnv.ssl,
-          connectionLimit: fromEnv.connectionLimit,
-          source: "env"
-        }
-      ],
-      policy: { ...DEFAULT_CLUSTER_POLICY }
+      nodes,
+      policy: standby ? { ...DEFAULT_CLUSTER_POLICY, failoverEnabled: false } : { ...DEFAULT_CLUSTER_POLICY }
     };
   }
   const runtime2 = await loadRuntimeConfig(env);
@@ -37156,7 +37204,7 @@ var MySqlClusterDatabase = class {
         if (!isNodeLevelFailure(error)) throw error;
         this.markFailure(node, error);
         console.warn(
-          `[db-cluster] read on "${node.spec.label}" failed (${nodeFailureMessage(error)}); trying the next node`
+          candidates.length > 1 ? `[db-cluster] read on "${node.spec.label}" failed (${nodeFailureMessage(error)}); trying the next node` : `[db-cluster] read on "${node.spec.label}" failed (${nodeFailureMessage(error)}); no other node is eligible`
         );
       }
     }
@@ -38470,9 +38518,12 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
   const forced = wantsForce(request) || body.force === true;
   const requestedBudget = Number(body.budgetMs);
   const budgetMs = Number.isFinite(requestedBudget) && requestedBudget > 0 ? Math.min(3e4, Math.max(3e3, Math.round(requestedBudget))) : null;
-  if (resolveDbConfigFromEnv(env)) {
+  const envPrimary = resolveDbConfigFromEnv(env);
+  if (envPrimary && !resolveStandbyFromEnv(env)) {
+    const stored = await resolveStoredCluster(env);
+    const savedStandbys = (stored?.nodes ?? []).filter((node) => node.id !== "env-primary").length;
     return errorResponse(
-      "\u5F53\u524D\u751F\u6548\u7684\u662F\u73AF\u5883\u53D8\u91CF\u91CC\u7684\u90A3\u4E00\u4E2A\u5E93\uFF08\u5355\u8282\u70B9\uFF09\uFF0C\u540E\u53F0\u4FDD\u5B58\u7684\u526F\u5E93\u6CA1\u6709\u751F\u6548\uFF0C\u56E0\u6B64\u6CA1\u6709\u53EF\u540C\u6B65\u7684\u76EE\u6807\u3002\u8BF7\u5148\u5220\u9664 DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME \u5E76\u91CD\u542F\uFF0C\u518D\u6267\u884C\u540C\u6B65\u3002(DB_* environment variables shadow the saved cluster: the effective configuration is the single node they point at, so there is no standby to copy into.)",
+      "\u5F53\u524D\u751F\u6548\u7684\u662F\u73AF\u5883\u53D8\u91CF\u91CC\u7684\u90A3\u4E00\u4E2A\u5E93\uFF08\u5355\u8282\u70B9\uFF09\uFF0C\u6CA1\u6709\u53EF\u540C\u6B65\u7684\u76EE\u6807\u5E93\u3002\u8981\u540C\u6B65\u5230\u526F\u5E93\uFF0C\u8BF7\u7ED9\u51FD\u6570\u52A0\u4E0A DB_STANDBY_NAME\uFF08\u526F\u5E93\u7684\u5E93\u540D\uFF09\uFF1B\u540C\u5B9E\u4F8B\u65F6\u5176\u5B83\u53C2\u6570\u4F1A\u6CBF\u7528 DB_HOST / DB_PORT / DB_USER / DB_PASSWORD\u3002" + (savedStandbys > 0 ? `\u540E\u53F0\u5DF2\u4FDD\u5B58\u7684 ${savedStandbys} \u4E2A\u526F\u5E93\u8282\u70B9\u88AB DB_* \u73AF\u5883\u53D8\u91CF\u6321\u4F4F\u4E86\uFF0C\u4E0D\u4F1A\u53C2\u4E0E\u540C\u6B65\u3002` : ""),
       409
     );
   }
@@ -38480,7 +38531,8 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
   if (cluster.mode !== "mysql" || cluster.nodes.length === 0) {
     return errorResponse("\u5F53\u524D\u6CA1\u6709\u914D\u7F6E\u5916\u63A5 MySQL \u8282\u70B9\uFF0C\u65E0\u9700\u540C\u6B65\u3002", 400);
   }
-  if (cluster.policy.syncMode !== "write-through") {
+  const manualEnvStandby = cluster.source === "env" && cluster.nodes.length > 1;
+  if (cluster.policy.syncMode !== "write-through" && !manualEnvStandby) {
     return errorResponse(
       "\u5F53\u524D\u526F\u5E93\u540C\u6B65\u65B9\u5F0F\u662F\u300C\u6570\u636E\u5E93\u81EA\u8EAB\u590D\u5236\u300D\uFF0C\u6570\u636E\u7531\u6570\u636E\u5E93\u8D1F\u8D23\uFF0C\u5E94\u7528\u5C42\u4E0D\u9700\u8981\u4E5F\u4E0D\u5E94\u8BE5\u5199\u5165\u526F\u5E93\u3002\u5982\u9700\u5E94\u7528\u5C42\u53CC\u5199\uFF0C\u8BF7\u5148\u5207\u6362\u5230\u300C\u5E94\u7528\u5C42\u5B9E\u65F6\u53CC\u5199\u300D\u5E76\u4FDD\u5B58\u3002",
       400
@@ -38551,9 +38603,11 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
     const cursors = resuming ? previous.cursors : void 0;
     const skipTables = resuming && mode === "merge" ? previous.doneTables : void 0;
     const targetTableCount = await countBaseTables(target.db, spec?.database);
-    if (targetTableCount === 0 && spec) {
+    if ((targetTableCount === 0 || targetTableCount === null) && spec) {
       const bootstrap = await bootstrapSchemaOnCandidate(spec);
       if (!bootstrap.ok) {
+        const detail = bootstrap.error ?? "unknown error";
+        const missingDatabase = /unknown database|1049/i.test(detail);
         reports.push({
           id: target.id,
           label: spec.label,
@@ -38564,7 +38618,7 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
           truncated: false,
           durationMs: 0,
           tables: [],
-          error: `\u526F\u5E93\u300C${spec.label}\u300D\u91CC\u6CA1\u6709\u4EFB\u4F55\u6570\u636E\u8868\uFF0C\u81EA\u52A8\u5EFA\u8868\u4E5F\u5931\u8D25\u4E86\uFF08${bootstrap.error ?? "unknown error"}\uFF09\u3002\u8BF7\u7ED9\u8BE5\u5E93\u8D26\u53F7\u6388\u4E88 CREATE/ALTER/INDEX \u6743\u9650\uFF0C\u6216\u624B\u52A8\u5BFC\u5165\u8868\u7ED3\u6784\u540E\u91CD\u8BD5\u3002`
+          error: missingDatabase ? `\u526F\u5E93\u300C${spec.label}\u300D\u6307\u5411\u7684\u6570\u636E\u5E93\u300C${spec.database}\u300D\u5728\u670D\u52A1\u5668\u4E0A\u4E0D\u5B58\u5728\uFF08${detail}\uFF09\u3002\u8BF7\u5148\u6267\u884C CREATE DATABASE \`${spec.database}\`\uFF08\u5B57\u7B26\u96C6\u5EFA\u8BAE utf8mb4\uFF09\uFF0C\u8868\u7ED3\u6784\u4F1A\u5728\u4E0B\u4E00\u6B21\u70B9\u300C\u540C\u6B65\u6570\u636E\u5230\u526F\u5E93\u300D\u65F6\u81EA\u52A8\u5EFA\u597D\u3002` : `\u526F\u5E93\u300C${spec.label}\u300D\u91CC\u6CA1\u6709\u4EFB\u4F55\u6570\u636E\u8868\uFF0C\u81EA\u52A8\u5EFA\u8868\u4E5F\u5931\u8D25\u4E86\uFF08${detail}\uFF09\u3002\u8BF7\u7ED9\u8BE5\u5E93\u8D26\u53F7\u6388\u4E88 CREATE/ALTER/INDEX \u6743\u9650\uFF0C\u6216\u624B\u52A8\u5BFC\u5165\u8868\u7ED3\u6784\u540E\u91CD\u8BD5\u3002`
         });
         continue;
       }
@@ -38683,8 +38737,9 @@ async function handleAdminPromoteDbNode(request, env, actorUser) {
   const forced = wantsForce(request) || body.force === true;
   if (!targetId) return errorResponse("\u7F3A\u5C11 nodeId\uFF1A\u8BF7\u6307\u5B9A\u8981\u63D0\u5347\u4E3A\u4E3B\u5E93\u7684\u8282\u70B9\u3002", 400);
   if (resolveDbConfigFromEnv(env)) {
+    const standby = resolveStandbyFromEnv(env);
     return errorResponse(
-      "DB_* \u73AF\u5883\u53D8\u91CF\u4F18\u5148\u4E8E\u8FD0\u884C\u65F6\u914D\u7F6E\uFF1A\u4E3B\u5E93\u7531\u73AF\u5883\u53D8\u91CF\u51B3\u5B9A\uFF0C\u9875\u9762\u4E0A\u7684\u5207\u6362\u4E0D\u4F1A\u751F\u6548\u3002\u8BF7\u4FEE\u6539\u73AF\u5883\u53D8\u91CF\u540E\u91CD\u542F\u3002",
+      "\u4E3B\u5E93\u7531\u73AF\u5883\u53D8\u91CF\u51B3\u5B9A\uFF0C\u9875\u9762\u4E0A\u7684\u5207\u6362\u4E0D\u4F1A\u751F\u6548\u3002" + (standby ? `\u8981\u5207\u6362\u5230\u526F\u5E93\u300C${standby.database}\u300D\uFF0C\u8BF7\u628A DB_NAME \u6539\u6210\u5B83\u3001\u628A DB_STANDBY_NAME \u6539\u6210\u73B0\u5728\u7684\u5E93\uFF0C\u518D\u91CD\u542F\u3002` : "\u8981\u6362\u4E3B\u5E93\uFF0C\u8BF7\u6539 DB_HOST / DB_NAME \u540E\u91CD\u542F\uFF1B\u60F3\u5148\u6709\u4E00\u4E2A\u53EF\u5207\u6362\u7684\u526F\u5E93\uFF0C\u52A0 DB_STANDBY_NAME\u3002"),
       409
     );
   }
@@ -50670,6 +50725,17 @@ function buildNodeEnv() {
     DB_NAME: process.env.DB_NAME,
     DB_SSL: process.env.DB_SSL,
     DB_CONN_LIMIT: process.env.DB_CONN_LIMIT,
+    // Optional env-declared standby. Listed explicitly because this object is a
+    // whitelist: a variable that is not copied here does not exist as far as
+    // src/ is concerned, which is exactly how "I set DB_STANDBY_NAME and nothing
+    // happened" would look.
+    DB_STANDBY_NAME: process.env.DB_STANDBY_NAME,
+    DB_STANDBY_HOST: process.env.DB_STANDBY_HOST,
+    DB_STANDBY_PORT: process.env.DB_STANDBY_PORT,
+    DB_STANDBY_USER: process.env.DB_STANDBY_USER,
+    DB_STANDBY_PASSWORD: process.env.DB_STANDBY_PASSWORD,
+    DB_STANDBY_SSL: process.env.DB_STANDBY_SSL,
+    DB_STANDBY_CONN_LIMIT: process.env.DB_STANDBY_CONN_LIMIT,
     DB_CONFIG_KEY: process.env.DB_CONFIG_KEY
   };
   sharedEnv = env;
