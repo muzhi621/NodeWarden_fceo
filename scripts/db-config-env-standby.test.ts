@@ -233,5 +233,6 @@ test('a dropped entry never prints its password', () => {
   }
   const text = seen.join('\n');
   assert.match(text, /nodewarden-bak/, 'the host and schema must stay readable');
+  assert.ok(text.includes('bak_user:***@'), 'the account must stay readable; only the secret is removed');
   assert.doesNotMatch(text, /liwu1454994390/, 'the password must not reach the log');
 });

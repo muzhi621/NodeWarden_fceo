@@ -877,7 +877,10 @@ function decodeUrlPart(value: string): string {
  * on the way out, not on the way in — parsing still needs the real value.
  */
 function redactEntry(entry: string): string {
-  return entry.replace(/\/\/[^/]*@/, '//***@');
+  // Only the secret is removed. The account stays visible because it is what
+  // separates "wrong user" from "wrong host" when reading the log:
+  // mysql://user:pass@host/db -> mysql://user:***@host/db
+  return entry.replace(/\/\/([^/@:]*):[^/]*@/, '//$1:***@');
 }
 
 function parseStandbyUrl(entry: string, base: ResolvedDbConfig): ResolvedDbConfig | null {
