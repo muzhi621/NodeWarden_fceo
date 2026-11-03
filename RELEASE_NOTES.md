@@ -21,6 +21,36 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.14 - A Sync That Finishes Instead of Looping at 19/20
+
+### Fixed
+
+1. **A "repair" sync no longer restarts from the first table on every click.** With "overwrite existing rows" selected, the run never recorded which tables it had already copied, so each 12-second slice began again at table one, spent its budget on the next table, and stopped in exactly the same place: "tables 19/20 · 99%", for as long as you were willing to click. Both copy modes now record finished tables, so the second click has only the remaining table to copy and the run completes. Commit: [7952456](https://github.com/muzhi621/NodeWarden_fceo/commit/7952456).
+2. **A table the slice never reached keeps its resume position.** The stored cursors were *replaced* by each slice's own map, and a table the slice ran out of budget before touching has no cursor of its own — so its position was silently discarded and it restarted from its first row next time. Cursors are now merged, and removed only for tables that actually finished. Commit: [7952456](https://github.com/muzhi621/NodeWarden_fceo/commit/7952456).
+3. **The page says which table is holding the sync up.** A failed sync used to report only "部分数据表出错", which is not something an operator can act on. The response now names the tables that errored with the reason, and the tables this slice did not reach. Commit: [7952456](https://github.com/muzhi621/NodeWarden_fceo/commit/7952456).
+
+### Improved
+
+1. **"Start over from the first table" is available when a resume point goes stale.** A cursor is a position in the source's key space: once rows are edited or deleted upstream, continuing from it would permanently skip everything before it. The sync panel now offers an explicit restart, and the first slice is the only one that sends it. Commit: [7952456](https://github.com/muzhi621/NodeWarden_fceo/commit/7952456).
+2. **The row estimate is only shown while it is still ahead of reality.** `information_schema.TABLE_ROWS` is 0 for a table InnoDB has never analysed, so the panel printed "2,040 rows processed (about 388 in total)". The estimate now appears only when it is larger than the rows actually processed, and the percentage falls back to completed tables when it is not. Commit: [7952456](https://github.com/muzhi621/NodeWarden_fceo/commit/7952456).
+
+---
+
+# v1.8.14 - 同步会跑完，不再卡在 19/20
+
+### 修复
+
+1. **「覆盖已有行」的修复同步不再每次从第一张表重来。** 这个模式之前不记录哪些表已经复制完，于是每个 12 秒的分片都从第一张表重新开始、把预算花在下一张表上、停在完全相同的位置：只要你还愿意点，「数据表 19/20 · 99%」就一直不变。现在两种模式都会记录已完成的表，第二次点只处理剩下的那张，同步能跑到 100%。提交：[7952456](https://github.com/muzhi621/NodeWarden_fceo/commit/7952456)。
+2. **本轮没轮到的表不会丢掉断点。** 之前保存位置时用「本次分片的游标」整体覆盖旧记录，而本轮预算耗尽、根本没被摸到的表没有自己的游标——它上次的进度就这样被清空，下一次从第一行重来。现在游标是合并保存的，只有真正完成的表才会被删除。提交：[7952456](https://github.com/muzhi621/NodeWarden_fceo/commit/7952456)。
+3. **页面会说清是哪张表卡住了。** 以前同步失败只报「部分数据表出错」，这句话没法据以行动。现在响应里带上出错表的表名与原因，以及本次没来得及处理的表。提交：[7952456](https://github.com/muzhi621/NodeWarden_fceo/commit/7952456)。
+
+### 改进
+
+1. **断点过期时可以直接「从第一张表重新开始」。** 游标是源库键空间里的一个位置：源库的行被改过或删过之后，从它继续会永久跳过前面的所有行。同步区现在提供显式的重新开始，且只有第一个分片会带上这个标记。提交：[7952456](https://github.com/muzhi621/NodeWarden_fceo/commit/7952456)。
+2. **行数估算只在它还领先于实际行数时显示。** InnoDB 从未分析过的表，`information_schema.TABLE_ROWS` 是 0，于是面板会显示「已处理 2,040 行（估算共 388 行）」。现在只有估算值大于已处理行数时才显示，否则百分比按「已完成的数据表」计算。提交：[7952456](https://github.com/muzhi621/NodeWarden_fceo/commit/7952456)。
+
+---
+
 # v1.8.13 - Diagnostics That Keep the Password Out of the Log
 
 ### Fixed

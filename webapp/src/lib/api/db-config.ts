@@ -274,6 +274,10 @@ export interface DbTargetSyncReport {
   truncated: boolean;
   durationMs: number;
   tables: DbTableSyncResult[];
+  /** Tables that raised an error, with the reason. */
+  failedTables?: Array<{ table: string; error: string }>;
+  /** Tables this slice did not reach; the next slice continues with them. */
+  pendingTables?: string[];
   countsMismatch?: string[];
   orphanRows?: number;
   /** How far the run got on this node, including earlier chunks. */
@@ -327,6 +331,14 @@ export interface DbSyncOptions {
    * caller comes back for the next slice.
    */
   budgetMs?: number;
+  /**
+   * Forget the resume point of an unfinished run and start from the first table.
+   *
+   * A cursor is a position in the source's key space: after rows are edited or
+   * deleted upstream, continuing from it would permanently skip everything
+   * before it, so the operator needs a way to say "start over".
+   */
+  restart?: boolean;
 }
 
 export async function syncDbCluster(
@@ -339,6 +351,7 @@ export async function syncDbCluster(
   if (options.mode) body.mode = options.mode;
   if (options.force) body.force = true;
   if (options.budgetMs) body.budgetMs = options.budgetMs;
+  if (options.restart) body.restart = true;
 
   const resp = await authedFetch('/api/admin/db-config/sync', {
     method: 'POST',

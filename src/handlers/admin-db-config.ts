@@ -46,7 +46,7 @@ import {
 } from '../services/db-config';
 import { resetDatabaseCache, getDatabase, peekClusterHealth } from '../services/storage-factory';
 import { isMySqlClusterDatabase } from '../services/db-cluster';
-import { countBaseTables, syncDatabase, type ClusterSyncResult } from '../services/db-cluster-sync';
+import { advanceSyncResume, countBaseTables, syncDatabase, type ClusterSyncResult } from '../services/db-cluster-sync';
 import { resetDbLifecycle } from '../services/db-lifecycle';
 import { MySqlDatabase } from '../services/storage-mysql';
 import { StorageService } from '../services/storage';
@@ -879,6 +879,10 @@ interface TargetSyncReport {
   truncated: boolean;
   durationMs: number;
   tables: ClusterSyncResult['tables'];
+  /** Tables that raised an error, with the reason (what the page should show). */
+  failedTables?: Array<{ table: string; error: string }>;
+  /** Tables this slice did not reach; the next slice continues with them. */
+  pendingTables?: string[];
   /** Tables whose row count differs between source and target (S1). */
   countsMismatch?: string[];
   /** Rows present on the target but not on the source (S2). */
@@ -1092,15 +1096,23 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
     // cursor is useless to an `overwrite` repair that has to rewrite the rows
     // merge deliberately skipped.
     const previous = storedStates[target.id];
+    // `restart` is the operator saying "forget where you got to". It exists
+    // because a resume point is only valid while the source is unchanged: after
+    // rows are edited or deleted upstream, continuing from a stored cursor would
+    // skip everything before it — forever.
+    const restart = body.restart === true;
     const resuming =
+      !restart &&
       !!previous &&
       !previous.complete &&
       previous.sourceId === source.id &&
       (previous.mode ?? 'merge') === mode;
     const cursors = resuming ? previous.cursors : undefined;
-    // Tables an earlier chunk already finished are not re-read: without this,
-    // every round starts over at table one and the bar would reset with it.
-    const skipTables = resuming && mode === 'merge' ? previous.doneTables : undefined;
+    // Tables an earlier slice already finished are not re-read: without this,
+    // every slice starts over at table one and the bar resets with it. This
+    // applies to `overwrite` as well — a repair rewrites the tables it *reaches*,
+    // so one it has already rewritten needs no second pass inside the same run.
+    const skipTables = resuming ? previous.doneTables : undefined;
 
     // A standby whose schema was never created answers every INSERT with 1146,
     // so the run reports one identical error per table and nothing is copied.
@@ -1166,13 +1178,16 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       tablesDone: result.tablesDone,
       done: complete,
     });
-    const finishedNow = result.tables
-      .filter((table) => !table.truncated && !table.error)
-      .map((table) => table.table);
-    const doneTables =
-      mode === 'merge' && !complete
-        ? [...new Set([...(resuming ? previous.doneTables ?? [] : []), ...finishedNow])]
-        : undefined;
+    // Where the next slice picks up. `previous` is passed only while actually
+    // resuming: after a restart (or a mode/source change) its cursors describe a
+    // key space this run is not walking.
+    const resume = advanceSyncResume({
+      previous: resuming ? previous : null,
+      result,
+      complete,
+      skipTables,
+    });
+    const { doneTables, cursors: nextCursors, pendingTables, failedTables } = resume;
 
     // Persist the outcome so "is this standby ready?" survives a restart and can
     // be shown before the next failover (B-4).
@@ -1184,7 +1199,7 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       tables: result.tablesTotal,
       sourceId: source.id,
       fingerprint: spec ? nodeFingerprint(spec) : undefined,
-      cursors: complete ? undefined : result.cursors,
+      cursors: nextCursors,
       mode,
       doneTables,
       progress,
@@ -1202,6 +1217,8 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       truncated: result.truncated,
       durationMs: result.durationMs,
       tables: result.tables,
+      failedTables: failedTables.length > 0 ? failedTables : undefined,
+      pendingTables: pendingTables.length > 0 ? pendingTables : undefined,
       countsMismatch: countsMismatch.length > 0 ? countsMismatch : undefined,
       orphanRows: orphanRows > 0 ? orphanRows : undefined,
       progress,
