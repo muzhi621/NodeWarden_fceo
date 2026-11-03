@@ -21,6 +21,36 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.10 - A Stuck Sync Now Says Why
+
+### Fixed
+
+1. **"Syncing to the standby" no longer sits at `0/?` with no explanation.** A run that found zero tables used to count as a finished sync — "every table succeeded" is vacuously true when there are no tables — so a copy that moved nothing reported success while the progress bar never moved. It is now reported as a failure that names the schema, and the admin page prints it. Commit: [54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d).
+2. **A standby with no schema is created before the copy instead of failing row by row.** Copying into a database that was never bootstrapped answered `1146 table doesn't exist` for every table, which read as "sync failed" with no hint that the fix was "create the tables". The sync endpoint now runs the same idempotent schema step the save path uses, and reports the missing DDL grants when that is what blocks it. Commit: [54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d).
+3. **Table discovery no longer depends on the connection's default database.** `information_schema … WHERE TABLE_SCHEMA = DATABASE()` matches nothing when a node connects without a default schema, which is how a misconfigured entry turned into "0 tables, done". Every lookup now binds the database name from the node configuration. Commit: [54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d).
+
+### Improved
+
+1. **The sync button names the real blocker when environment variables are in charge.** With `DB_*` set, the effective cluster is a single node, and the endpoint used to answer "replication is the database's job" or "no target to sync into" — describing a cluster the operator never configured. It now says the saved cluster is shadowed by environment variables and which ones to remove. Commit: [54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d).
+2. **Boot warns when the data directory dies with the instance.** The cluster saved in the admin page lives in `$DATA_DIR/kv-store.json`; on a serverless host that is `/tmp`, so the config — the app's only database once `DB_*` is removed — disappears when the instance is recycled. The startup log now prints a warning, which is the difference between a survivable restart and a deployment nobody can log into. Commit: [54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d).
+
+---
+
+# v1.8.10 - 同步卡住时，页面会说出原因
+
+### 修复
+
+1. **「同步数据到副库」不再停在 `0/?` 什么也不说。** 一次没找到任何表的同步，以前会被当成"已完成"——没有表时"每张表都成功"是空真——于是一行数据都没搬的运行反倒报告成功，进度条却永远不动。现在它是一条明确失败，并且报出是哪台库，后台页面会原样显示。提交：[54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d)。
+2. **副库没建过表时，先建表再搬数据，而不是逐表报错。** 往一个从没初始化过的库复制，每张表都会回 `1146 表不存在`，读起来像"同步失败"，却看不出真正要做的是"建表"。同步接口现在会先跑一次和保存路径完全相同的幂等建表；如果是账号缺 DDL 权限，也会直接说出来。提交：[54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d)。
+3. **表名探测不再依赖连接的默认库。** 连接没有默认库时，`information_schema … WHERE TABLE_SCHEMA = DATABASE()` 匹配不到任何行，这就是"库名填错"被显示成"0 张表、同步完成"的原因。现在所有查询都用节点配置里的库名做绑定。提交：[54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d)。
+
+### 改进
+
+1. **环境变量接管时，同步按钮会说清真正的拦路原因。** 设了 `DB_*` 之后生效的集群只有一台，以前接口会回「数据库自身复制」或「没有可同步的目标节点」——描述的是一种用户从未配置过的状态。现在它直接说：后台保存的集群被环境变量挡住，并点名要删哪几个变量。提交：[54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d)。
+2. **数据目录随实例消失时，启动日志会警告。** 后台保存的集群配置存在 `$DATA_DIR/kv-store.json`；在函数计算这类平台上它是 `/tmp`，一旦实例回收，这份配置——删掉 `DB_*` 之后就是应用唯一的数据库——也随之消失。启动日志现在会打一条 WARNING，这就是"重启还能进"和"谁都登不进去"之间的差别。提交：[54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d)。
+
+---
+
 # v1.8.9 - Refresh Tokens That Stopped Expiring in 1970
 
 ### Fixed
