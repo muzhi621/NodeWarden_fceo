@@ -213,3 +213,25 @@ test('standbys are capped at the cluster node limit', () => {
   const standbys = resolveStandbysFromEnv(asEnv({ DB_STANDBY_NODES: 'a,b,c,d,e,f,g,h,i,j' }));
   assert.equal(standbys.length, 7);
 });
+
+test('a dropped entry never prints its password', () => {
+  // Every message that quotes an entry ends up in the platform log, and a URL
+  // entry carries credentials. A typo — or a standby that turns out to be the
+  // primary — must not turn the database password into a log line.
+  const seen: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => void seen.push(args.map(String).join(' '));
+  try {
+    resolveStandbysFromEnv(
+      asEnv({
+        DB_NAME: 'nodewarden-bak',
+        DB_STANDBY_NODES: 'mysql://bak_user:liwu1454994390@mysql.example.com:3307/nodewarden-bak',
+      })
+    );
+  } finally {
+    console.warn = original;
+  }
+  const text = seen.join('\n');
+  assert.match(text, /nodewarden-bak/, 'the host and schema must stay readable');
+  assert.doesNotMatch(text, /liwu1454994390/, 'the password must not reach the log');
+});

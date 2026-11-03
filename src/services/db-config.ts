@@ -869,6 +869,17 @@ function decodeUrlPart(value: string): string {
  * "standby lives on another machine" case, without inventing a variable per
  * field per node.
  */
+/**
+ * A standby entry may be a URL that carries a password, and every message that
+ * quotes one ends up in the platform log (FC / EdgeOne keep those, and they are
+ * readable by anyone with console access). The host and schema are what make a
+ * diagnostic message useful; the credentials are what make it a leak. Strip them
+ * on the way out, not on the way in — parsing still needs the real value.
+ */
+function redactEntry(entry: string): string {
+  return entry.replace(/\/\/[^/]*@/, '//***@');
+}
+
 function parseStandbyUrl(entry: string, base: ResolvedDbConfig): ResolvedDbConfig | null {
   let url: URL;
   try {
@@ -876,7 +887,7 @@ function parseStandbyUrl(entry: string, base: ResolvedDbConfig): ResolvedDbConfi
   } catch {
     reportOnce(
       `malformed:${entry}`,
-      `[db-config] standby entry "${entry}" looks like a URL but does not parse; ignoring it. ` +
+      `[db-config] standby entry "${redactEntry(entry)}" looks like a URL but does not parse; ignoring it. ` +
         'Percent-encode special characters in the password (for example @ becomes %40).'
     );
     return null;
@@ -885,7 +896,7 @@ function parseStandbyUrl(entry: string, base: ResolvedDbConfig): ResolvedDbConfi
   if (!['mysql', 'mysqls', 'mariadb', 'mariadbs'].includes(protocol)) {
     reportOnce(
       `protocol:${entry}`,
-      `[db-config] standby entry "${entry}" uses protocol "${protocol}"; expected mysql:// . Ignoring it.`
+      `[db-config] standby entry "${redactEntry(entry)}" uses protocol "${protocol}"; expected mysql:// . Ignoring it.`
     );
     return null;
   }
@@ -895,7 +906,7 @@ function parseStandbyUrl(entry: string, base: ResolvedDbConfig): ResolvedDbConfi
   if (!url.hostname) {
     reportOnce(
       `nohost:${entry}`,
-      `[db-config] standby entry "${entry}" has no host; write the schema name on its own to inherit the primary connection. Ignoring it.`
+      `[db-config] standby entry "${redactEntry(entry)}" has no host; write the schema name on its own to inherit the primary connection. Ignoring it.`
     );
     return null;
   }
@@ -903,7 +914,7 @@ function parseStandbyUrl(entry: string, base: ResolvedDbConfig): ResolvedDbConfi
   if (!database) {
     reportOnce(
       `nodatabase:${entry}`,
-      `[db-config] standby entry "${entry}" has no database name in the path (mysql://host:3306/DATABASE); ignoring it.`
+      `[db-config] standby entry "${redactEntry(entry)}" has no database name in the path (mysql://host:3306/DATABASE); ignoring it.`
     );
     return null;
   }
@@ -970,7 +981,7 @@ export function resolveStandbysFromEnv(env: Env): ResolvedDbConfig[] {
     const parsed = entry.includes('://') ? parseStandbyUrl(entry, defaults) : { ...defaults, database: entry };
     if (!parsed) continue;
     if (!parsed.database) {
-      reportOnce(`emptydb:${entry}`, `[db-config] standby entry "${entry}" has no database name; ignoring it.`);
+      reportOnce(`emptydb:${entry}`, `[db-config] standby entry "${redactEntry(entry)}" has no database name; ignoring it.`);
       continue;
     }
     const fingerprint = `${parsed.host}:${parsed.port}/${parsed.database}`;
@@ -979,7 +990,7 @@ export function resolveStandbysFromEnv(env: Env): ResolvedDbConfig[] {
       // every row onto itself and report the table as its own target.
       reportOnce(
         `duplicate:${fingerprint}`,
-        `[db-config] standby entry "${entry}" resolves to ${fingerprint}, which is already in the list (or is the primary); ignoring it.`
+        `[db-config] standby entry "${redactEntry(entry)}" resolves to ${fingerprint}, which is already in the list (or is the primary); ignoring it.`
       );
       continue;
     }
