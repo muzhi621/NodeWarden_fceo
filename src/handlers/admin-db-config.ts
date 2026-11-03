@@ -44,7 +44,7 @@ import {
 } from '../services/db-config';
 import { resetDatabaseCache, getDatabase, peekClusterHealth } from '../services/storage-factory';
 import { isMySqlClusterDatabase } from '../services/db-cluster';
-import { syncDatabase, type ClusterSyncResult } from '../services/db-cluster-sync';
+import { countBaseTables, syncDatabase, type ClusterSyncResult } from '../services/db-cluster-sync';
 import { resetDbLifecycle } from '../services/db-lifecycle';
 import { MySqlDatabase } from '../services/storage-mysql';
 import { StorageService } from '../services/storage';
@@ -950,6 +950,22 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       ? Math.min(30_000, Math.max(3_000, Math.round(requestedBudget)))
       : null;
 
+  // `DB_*` wins over the stored cluster, so in that mode the cluster this
+  // endpoint sees is a *single* node: no standby to copy into, and a policy of
+  // `native`. The generic messages below ("数据库自身复制", "没有可同步的目标节点")
+  // describe a cluster state the operator never configured, which is why the
+  // real cause — the saved cluster is shadowed by environment variables — has to
+  // be named here.
+  if (resolveDbConfigFromEnv(env)) {
+    return errorResponse(
+      '当前生效的是环境变量里的那一个库（单节点），后台保存的副库没有生效，因此没有可同步的目标。' +
+        '请先删除 DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME 并重启，再执行同步。' +
+        '(DB_* environment variables shadow the saved cluster: the effective configuration is the single ' +
+        'node they point at, so there is no standby to copy into.)',
+      409
+    );
+  }
+
   const cluster = await resolveDbCluster(env);
   if (cluster.mode !== 'mysql' || cluster.nodes.length === 0) {
     return errorResponse('当前没有配置外接 MySQL 节点，无需同步。', 400);
@@ -1056,12 +1072,44 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
     // Tables an earlier chunk already finished are not re-read: without this,
     // every round starts over at table one and the bar would reset with it.
     const skipTables = resuming && mode === 'merge' ? previous.doneTables : undefined;
+
+    // A standby whose schema was never created answers every INSERT with 1146,
+    // so the run reports one identical error per table and nothing is copied.
+    // Create the schema first — the same idempotent step the save path runs —
+    // and say so plainly when the account has no DDL rights.
+    const targetTableCount = await countBaseTables(target.db, spec?.database);
+    if (targetTableCount === 0 && spec) {
+      const bootstrap = await bootstrapSchemaOnCandidate(spec);
+      if (!bootstrap.ok) {
+        reports.push({
+          id: target.id,
+          label: spec.label,
+          ok: false,
+          complete: false,
+          rowsRead: 0,
+          rowsWritten: 0,
+          truncated: false,
+          durationMs: 0,
+          tables: [],
+          error:
+            `副库「${spec.label}」里没有任何数据表，自动建表也失败了（${bootstrap.error ?? 'unknown error'}）。` +
+            '请给该库账号授予 CREATE/ALTER/INDEX 权限，或手动导入表结构后重试。',
+        });
+        continue;
+      }
+      console.info('[db-config] created the missing schema on standby before syncing:', spec.label);
+    }
+
     const result = await syncDatabase(source.db, target.db, {
       maxDurationMs: Math.min(perTargetMs, remaining),
       deadline,
       mode,
       cursors,
       skipTables,
+      // Explicit schema: `information_schema … = DATABASE()` returns nothing
+      // when the connection has no default database, which used to look like a
+      // finished sync of zero tables.
+      sourceSchema: cluster.nodes.find((node) => node.id === source.id)?.database || undefined,
     });
 
     const complete = result.ok && result.complete;

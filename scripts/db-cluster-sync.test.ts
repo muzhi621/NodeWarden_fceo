@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { syncDatabase, syncTable, type SyncDatabase } from '../src/services/db-cluster-sync';
+import { countBaseTables, syncDatabase, syncTable, type SyncDatabase } from '../src/services/db-cluster-sync';
 import type { D1LikeResult, D1LikeStatement } from '../src/services/storage-mysql';
 
 /**
@@ -99,6 +99,9 @@ class FakeStatement implements D1LikeStatement {
     const asResult = (rows: unknown[]): D1LikeResult<R> =>
       ({ results: rows as R[], success: true, meta: { changes: 0, last_row_id: 0 } }) as D1LikeResult<R>;
 
+    if (sql.includes('information_schema.TABLES') && sql.includes('COUNT(*)')) {
+      return asResult([{ n: this.node.tables.length }]);
+    }
     if (sql.includes('information_schema.TABLES')) {
       return asResult(
         this.node.tables.map((name) => ({
@@ -108,11 +111,11 @@ class FakeStatement implements D1LikeStatement {
       );
     }
     if (sql.includes('information_schema.COLUMNS')) {
-      const table = String(this.params[0] ?? '');
+      const table = String(this.params[this.params.length - 1] ?? '');
       return asResult((this.node.columns[table] ?? []).map((name) => ({ name })));
     }
     if (sql.includes('information_schema.KEY_COLUMN_USAGE')) {
-      const table = String(this.params[0] ?? '');
+      const table = String(this.params[this.params.length - 1] ?? '');
       return asResult((this.node.primaryKeys[table] ?? []).map((name) => ({ name })));
     }
     if (sql.includes('COUNT(*)')) {
@@ -349,14 +352,20 @@ test('an unreadable table list is reported once, not thrown', async () => {
   assert.equal(result.rowsWritten, 0);
 });
 
-test('an empty table list is a successful no-op', async () => {
+test('an empty table list is reported as a failure, not a successful no-op', async () => {
+  // It used to return `ok`/`complete` because "every table succeeded" is
+  // vacuously true for an empty list: the admin page then showed a finished
+  // 0-row sync and the operator had no idea nothing was copied. A sync source
+  // with no tables is always a misconfiguration (wrong schema name, an empty
+  // standby picked as the source), so it must surface as an error.
   const source = new FakeNode([], {});
   const target = new FakeNode([], {});
 
   const result = await syncDatabase(source, target);
-  assert.equal(result.ok, true);
-  assert.equal(result.complete, true);
-  assert.equal(result.tables.length, 0);
+  assert.equal(result.ok, false);
+  assert.equal(result.complete, false);
+  assert.equal(result.tables.length, 1);
+  assert.match(result.tables[0].error ?? '', /没有/);
   assert.equal(target.inserts.length, 0);
 });
 
@@ -533,4 +542,37 @@ test('a schema without estimates degrades to table counts, not to NaN', async ()
 
   assert.equal(result.rowsEstimate, 0);
   assert.equal(result.tablesDone, result.tablesTotal);
+});
+
+test('an empty source schema is a failure, not a finished sync', async () => {
+  // The 0/?" progress bar came from exactly this: zero tables is vacuously
+  // "every table succeeded", so the run claimed success and copied nothing.
+  const empty = new FakeNode([], {});
+  const target = new FakeNode([], {});
+
+  const result = await syncDatabase(empty, target, { sourceSchema: 'nodewarden-bak' });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.complete, false);
+  assert.equal(result.tablesTotal, 0);
+  assert.equal(target.inserts.length, 0);
+  assert.match(result.tables[0].error ?? '', /nodewarden-bak/);
+});
+
+test('naming the source schema does not change a normal copy', async () => {
+  const source = sourceNode();
+  const target = new FakeNode([], {});
+
+  const result = await syncDatabase(source, target, { chunkSize: 10, sourceSchema: 'nodewarden' });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.complete, true);
+  assert.equal(result.rowsWritten, 6);
+});
+
+test('countBaseTables reports how many tables a node actually has', async () => {
+  const node = new FakeNode(['users', 'ciphers'], {});
+
+  assert.equal(await countBaseTables(node), 2);
+  assert.equal(await countBaseTables(new FakeNode([], {}), 'nodewarden-bak'), 0);
 });

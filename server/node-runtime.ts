@@ -107,6 +107,17 @@ function isInsideDirectory(child: string, parent: string): boolean {
   return !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
+/**
+ * True when the data directory lives on a volume that dies with the instance.
+ *
+ * `SETTINGS_KV` is a file in `DATA_DIR`, so an admin-saved database cluster
+ * stored under `/tmp` disappears the moment the platform recycles the
+ * container — and with it the only database the app has, if `DB_*` was removed.
+ */
+export function isDataDirEphemeral(dataDir: string): boolean {
+  return isInsideDirectory(dataDir, os.tmpdir());
+}
+
 function resolveState(options: NodeRuntimeOptions): RuntimeState {
   const assets = options.assets || 'disk';
   let dataDir = path.resolve(

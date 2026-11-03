@@ -37447,6 +37447,13 @@ function peekClusterHealth() {
 }
 
 // src/services/db-cluster-sync.ts
+function schemaFilter(schema) {
+  const name = (schema ?? "").trim();
+  return name ? { sql: "TABLE_SCHEMA = ?", bind: [name] } : { sql: "TABLE_SCHEMA = DATABASE()", bind: [] };
+}
+function bindAll(statement, params) {
+  return params.length > 0 ? statement.bind(...params) : statement;
+}
 var SYNC_DEFAULTS = {
   chunkSize: 200,
   maxRowsPerTable: 2e4,
@@ -37465,23 +37472,45 @@ function isPacketTooLarge(error) {
   if (errno === 1153 || code === "ER_NET_PACKET_TOO_LARGE") return true;
   return /max_allowed_packet|Packet for query is too large/i.test(errorMessage(error));
 }
-async function discoverTables(db) {
-  const result = await db.prepare(
-    "SELECT TABLE_NAME AS name FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME"
+async function discoverTables(db, schema) {
+  const filter = schemaFilter(schema);
+  const result = await bindAll(
+    db.prepare(
+      `SELECT TABLE_NAME AS name FROM information_schema.TABLES WHERE ${filter.sql} AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME`
+    ),
+    filter.bind
   ).all();
   return (result.results ?? []).map((row) => String(row.name ?? "")).filter((name) => name.length > 0);
 }
-async function discoverColumns(db, table) {
+async function countBaseTables(db, schema) {
+  try {
+    const filter = schemaFilter(schema);
+    const row = await bindAll(
+      db.prepare(
+        `SELECT COUNT(*) AS n FROM information_schema.TABLES WHERE ${filter.sql} AND TABLE_TYPE = 'BASE TABLE'`
+      ),
+      filter.bind
+    ).first();
+    if (!row) return null;
+    const value = Number(row.n);
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+async function discoverColumns(db, table, schema) {
+  const filter = schemaFilter(schema);
   const result = await db.prepare(
-    "SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND (EXTRA IS NULL OR EXTRA NOT LIKE '%GENERATED%') ORDER BY ORDINAL_POSITION"
-  ).bind(table).all();
+    `SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE ${filter.sql} AND TABLE_NAME = ? AND (EXTRA IS NULL OR EXTRA NOT LIKE '%GENERATED%') ORDER BY ORDINAL_POSITION`
+  ).bind(...filter.bind, table).all();
   return (result.results ?? []).map((row) => String(row.name ?? "")).filter((name) => name.length > 0);
 }
-async function discoverPrimaryKey(db, table) {
+async function discoverPrimaryKey(db, table, schema) {
   try {
+    const filter = schemaFilter(schema);
     const result = await db.prepare(
-      "SELECT COLUMN_NAME AS name FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY' ORDER BY ORDINAL_POSITION"
-    ).bind(table).all();
+      `SELECT COLUMN_NAME AS name FROM information_schema.KEY_COLUMN_USAGE WHERE ${filter.sql} AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY' ORDER BY ORDINAL_POSITION`
+    ).bind(...filter.bind, table).all();
     return (result.results ?? []).map((row) => String(row.name ?? "")).filter((name) => name.length > 0);
   } catch {
     return [];
@@ -37511,10 +37540,14 @@ async function countRows(db, table) {
     return null;
   }
 }
-async function readTableEstimates(db) {
+async function readTableEstimates(db, schema) {
   try {
-    const result = await db.prepare(
-      "SELECT TABLE_NAME AS name, TABLE_ROWS AS row_count FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'"
+    const filter = schemaFilter(schema);
+    const result = await bindAll(
+      db.prepare(
+        `SELECT TABLE_NAME AS name, TABLE_ROWS AS row_count FROM information_schema.TABLES WHERE ${filter.sql} AND TABLE_TYPE = 'BASE TABLE'`
+      ),
+      filter.bind
     ).all();
     const estimates = {};
     for (const row of result.results ?? []) {
@@ -37544,13 +37577,13 @@ async function syncTable(source, target, table, options = {}, startedAt = Date.n
   };
   let targetRowsBefore = null;
   try {
-    const columns = await discoverColumns(source, table);
+    const columns = await discoverColumns(source, table, options.sourceSchema);
     if (columns.length === 0) {
-      result.error = "no readable columns (table missing on the source?)";
+      result.error = `no readable columns (table missing on the source${options.sourceSchema ? ` ${options.sourceSchema}` : ""}?)`;
       return result;
     }
     result.columns = columns.length;
-    const keys = await discoverPrimaryKey(source, table);
+    const keys = await discoverPrimaryKey(source, table, options.sourceSchema);
     if (keys.length === 0) result.paging = "offset";
     const selectList = columns.map(quoteIdent).join(", ");
     const keyList = keys.map(quoteIdent).join(", ");
@@ -37640,8 +37673,8 @@ async function syncDatabase(source, target, options = {}) {
   let tables;
   let estimates;
   try {
-    tables = options.tables ?? await discoverTables(source);
-    estimates = await readTableEstimates(source);
+    tables = options.tables ?? await discoverTables(source, options.sourceSchema);
+    estimates = await readTableEstimates(source, options.sourceSchema);
   } catch (error) {
     return {
       ok: false,
@@ -37655,6 +37688,33 @@ async function syncDatabase(source, target, options = {}) {
           truncated: false,
           paging: "keyset",
           error: errorMessage(error)
+        }
+      ],
+      rowsRead: 0,
+      rowsWritten: 0,
+      truncated: false,
+      durationMs: Date.now() - startedAt,
+      cursors: {},
+      tablesTotal: 0,
+      tablesDone: 0,
+      rowsEstimate: 0,
+      skipped: []
+    };
+  }
+  if (tables.length === 0) {
+    const label = options.sourceSchema ? `\u6E90\u5E93\u300C${options.sourceSchema}\u300D` : "\u6E90\u5E93";
+    return {
+      ok: false,
+      complete: false,
+      tables: [
+        {
+          table: "*",
+          columns: 0,
+          rowsRead: 0,
+          rowsWritten: 0,
+          truncated: false,
+          paging: "keyset",
+          error: `${label}\u91CC\u6CA1\u6709\u4EFB\u4F55\u57FA\u7840\u8868\uFF08Base Table\uFF09\uFF0C\u6CA1\u6709\u53EF\u590D\u5236\u7684\u5185\u5BB9\uFF1A\u8BF7\u786E\u8BA4\u8282\u70B9\u914D\u7F6E\u91CC\u7684\u5E93\u540D\u662F\u5426\u6B63\u786E\u3001\u8BE5\u5E93\u662F\u5426\u5DF2\u7ECF\u5EFA\u8868\u3002\u526F\u5E93\u4E3A\u7A7A\u65F6\uFF0C\u5148\u5728\u540E\u53F0\u4FDD\u5B58\u4E00\u6B21\u96C6\u7FA4\u914D\u7F6E\u8BA9\u7CFB\u7EDF\u5EFA\u8868\u3002`
         }
       ],
       rowsRead: 0,
@@ -38400,6 +38460,12 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
   const forced = wantsForce(request) || body.force === true;
   const requestedBudget = Number(body.budgetMs);
   const budgetMs = Number.isFinite(requestedBudget) && requestedBudget > 0 ? Math.min(3e4, Math.max(3e3, Math.round(requestedBudget))) : null;
+  if (resolveDbConfigFromEnv(env)) {
+    return errorResponse(
+      "\u5F53\u524D\u751F\u6548\u7684\u662F\u73AF\u5883\u53D8\u91CF\u91CC\u7684\u90A3\u4E00\u4E2A\u5E93\uFF08\u5355\u8282\u70B9\uFF09\uFF0C\u540E\u53F0\u4FDD\u5B58\u7684\u526F\u5E93\u6CA1\u6709\u751F\u6548\uFF0C\u56E0\u6B64\u6CA1\u6709\u53EF\u540C\u6B65\u7684\u76EE\u6807\u3002\u8BF7\u5148\u5220\u9664 DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME \u5E76\u91CD\u542F\uFF0C\u518D\u6267\u884C\u540C\u6B65\u3002(DB_* environment variables shadow the saved cluster: the effective configuration is the single node they point at, so there is no standby to copy into.)",
+      409
+    );
+  }
   const cluster = await resolveDbCluster(env);
   if (cluster.mode !== "mysql" || cluster.nodes.length === 0) {
     return errorResponse("\u5F53\u524D\u6CA1\u6709\u914D\u7F6E\u5916\u63A5 MySQL \u8282\u70B9\uFF0C\u65E0\u9700\u540C\u6B65\u3002", 400);
@@ -38474,12 +38540,36 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
     const resuming = !!previous && !previous.complete && previous.sourceId === source.id && (previous.mode ?? "merge") === mode;
     const cursors = resuming ? previous.cursors : void 0;
     const skipTables = resuming && mode === "merge" ? previous.doneTables : void 0;
+    const targetTableCount = await countBaseTables(target.db, spec?.database);
+    if (targetTableCount === 0 && spec) {
+      const bootstrap = await bootstrapSchemaOnCandidate(spec);
+      if (!bootstrap.ok) {
+        reports.push({
+          id: target.id,
+          label: spec.label,
+          ok: false,
+          complete: false,
+          rowsRead: 0,
+          rowsWritten: 0,
+          truncated: false,
+          durationMs: 0,
+          tables: [],
+          error: `\u526F\u5E93\u300C${spec.label}\u300D\u91CC\u6CA1\u6709\u4EFB\u4F55\u6570\u636E\u8868\uFF0C\u81EA\u52A8\u5EFA\u8868\u4E5F\u5931\u8D25\u4E86\uFF08${bootstrap.error ?? "unknown error"}\uFF09\u3002\u8BF7\u7ED9\u8BE5\u5E93\u8D26\u53F7\u6388\u4E88 CREATE/ALTER/INDEX \u6743\u9650\uFF0C\u6216\u624B\u52A8\u5BFC\u5165\u8868\u7ED3\u6784\u540E\u91CD\u8BD5\u3002`
+        });
+        continue;
+      }
+      console.info("[db-config] created the missing schema on standby before syncing:", spec.label);
+    }
     const result = await syncDatabase(source.db, target.db, {
       maxDurationMs: Math.min(perTargetMs, remaining),
       deadline,
       mode,
       cursors,
-      skipTables
+      skipTables,
+      // Explicit schema: `information_schema … = DATABASE()` returns nothing
+      // when the connection has no default database, which used to look like a
+      // finished sync of zero tables.
+      sourceSchema: cluster.nodes.find((node) => node.id === source.id)?.database || void 0
     });
     const complete = result.ok && result.complete;
     const countsMismatch = result.tables.filter((table) => table.countMatches === false).map((table) => table.table);
