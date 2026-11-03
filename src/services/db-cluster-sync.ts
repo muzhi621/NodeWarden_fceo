@@ -629,3 +629,80 @@ export async function syncDatabase(
     skipped,
   };
 }
+
+/** What a previous store-backed run left behind, as far as resuming cares. */
+export interface SyncResumeSource {
+  doneTables?: string[];
+  cursors?: Record<string, Array<string | number | boolean | null>>;
+}
+
+/** The resume point after one slice, plus what is still outstanding. */
+export interface SyncResumeState {
+  /** Tables the run has finished; fed back as `skipTables`. */
+  doneTables?: string[];
+  /** Positions to continue from; fed back as `cursors`. */
+  cursors?: Record<string, Array<string | number | boolean | null>>;
+  /** Tables this slice did not reach (out of budget). */
+  pendingTables: string[];
+  /** Tables that raised an error, with the reason. */
+  failedTables: Array<{ table: string; error: string }>;
+}
+
+/**
+ * Advance the resume point of a chunked sync run by one slice.
+ *
+ * This was inlined in the admin handler, and two bugs lived in it:
+ *
+ *   • `doneTables` was recorded for `merge` only. A repair (`overwrite`) run
+ *     therefore forgot everything it had copied: each slice re-read the first N
+ *     tables from the top, ran out of budget on table N+1, and stopped at the
+ *     same place — "数据表 19/20" forever, at 99%, because the row-based
+ *     fraction was already maxed out by the repeated copies.
+ *   • `cursors` were *replaced* by the slice's own map. A table that the slice
+ *     did not reach has no cursor of its own, so writing that (near-empty) map
+ *     over the stored one discarded the position an earlier slice had reached,
+ *     and the table restarted from its first row on the next click.
+ *
+ * Both are only visible across slices, which is exactly why this belongs in a
+ * function with a test rather than three inline `const`s.
+ *
+ * `previous` must be `null` when the caller is deliberately not resuming (a
+ * different source, a different copy mode, or an explicit restart): its cursors
+ * describe a key space the new run is not walking.
+ */
+export function advanceSyncResume(input: {
+  previous?: SyncResumeSource | null;
+  result: ClusterSyncResult;
+  /** The whole run finished; nothing needs to be resumed. */
+  complete: boolean;
+  /** Tables this slice was told to leave alone. */
+  skipTables?: string[];
+}): SyncResumeState {
+  const { result, complete } = input;
+  const previous = input.previous ?? null;
+  const finishedNow = result.tables
+    .filter((table) => !table.truncated && !table.error)
+    .map((table) => table.table);
+
+  const doneTables = complete
+    ? undefined
+    : [...new Set([...(previous?.doneTables ?? []), ...finishedNow])];
+
+  const cursors: Record<string, Array<string | number | boolean | null>> = {
+    ...(previous?.cursors ?? {}),
+    ...result.cursors,
+  };
+  // A finished table's position means nothing (the caller must start from the
+  // top if it ever copies that table again), and a skipped table's cursor is
+  // stale by definition.
+  for (const table of [...finishedNow, ...(input.skipTables ?? [])]) delete cursors[table];
+
+  return {
+    doneTables,
+    cursors: complete || Object.keys(cursors).length === 0 ? undefined : cursors,
+    pendingTables: result.tables.filter((table) => table.truncated).map((table) => table.table),
+    failedTables: result.tables
+      .filter((table) => !!table.error)
+      .map((table) => ({ table: table.table, error: table.error as string })),
+  };
+}

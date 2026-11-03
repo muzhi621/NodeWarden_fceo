@@ -1,7 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { countBaseTables, syncDatabase, syncTable, type SyncDatabase } from '../src/services/db-cluster-sync';
+import {
+  advanceSyncResume,
+  countBaseTables,
+  syncDatabase,
+  syncTable,
+  type ClusterSyncResult,
+  type SyncDatabase,
+  type SyncResumeSource,
+} from '../src/services/db-cluster-sync';
 import type { D1LikeResult, D1LikeStatement } from '../src/services/storage-mysql';
 
 /**
@@ -26,6 +34,19 @@ class FakeNode implements SyncDatabase {
 
   /** `information_schema.TABLES.TABLE_ROWS`: undefined means "not available". */
   readonly estimates?: Record<string, number>;
+
+  /**
+   * Artificial round-trip delay per statement.
+   *
+   * A real node across the internet answers in ~100ms, and a slice copies
+   * roughly six statements per table — so a 12s budget runs out part-way through
+   * a 20-table schema. That is what made the "19/20" case reproducible at all.
+   */
+  latencyMs = 0;
+
+  private async tick(): Promise<void> {
+    if (this.latencyMs > 0) await new Promise((resolve) => setTimeout(resolve, this.latencyMs));
+  }
 
   constructor(
     readonly tables: string[],
@@ -67,6 +88,7 @@ class FakeStatement implements D1LikeStatement {
   }
 
   async run(): Promise<D1LikeResult> {
+    await this.node.tick();
     const table = /INSERT INTO `([^`]+)`/.exec(this.sql)?.[1] ?? '';
     if (this.node.failOnTable === table) throw new Error('ER_NO_SUCH_TABLE');
     this.node.inserts.push({ sql: this.sql, params: this.params });
@@ -95,6 +117,7 @@ class FakeStatement implements D1LikeStatement {
   }
 
   async all<R = Record<string, unknown>>(): Promise<D1LikeResult<R>> {
+    await this.node.tick();
     const sql = this.sql;
     const asResult = (rows: unknown[]): D1LikeResult<R> =>
       ({ results: rows as R[], success: true, meta: { changes: 0, last_row_id: 0 } }) as D1LikeResult<R>;
@@ -575,4 +598,214 @@ test('countBaseTables reports how many tables a node actually has', async () => 
 
   assert.equal(await countBaseTables(node), 2);
   assert.equal(await countBaseTables(new FakeNode([], {}), 'nodewarden-bak'), 0);
+});
+
+/* ── Chunked-run resume state ────────────────────────────────────────────────
+ *
+ * The "进度卡在 99%，数据表 19/20" report traced back to this function's
+ * predecessor, which was three inline `const`s in the admin handler. Both bugs
+ * only appear across slices, which is why it is tested here rather than through
+ * a single call.
+ */
+
+/** A `ClusterSyncResult` for one slice: which tables it finished / reached. */
+function fakeSlice(options: {
+  finished?: string[];
+  truncated?: string[];
+  failed?: Array<{ table: string; error: string }>;
+  cursors?: Record<string, Array<string | number | boolean | null>>;
+}): ClusterSyncResult {
+  const finished = options.finished ?? [];
+  const truncated = options.truncated ?? [];
+  const failed = options.failed ?? [];
+  const tables = [
+    ...finished.map((table) => ({ table, truncated: false, error: undefined as string | undefined })),
+    ...truncated.map((table) => ({ table, truncated: true, error: undefined as string | undefined })),
+    ...failed.map((entry) => ({ table: entry.table, truncated: false, error: entry.error })),
+  ].map((entry) => ({
+    table: entry.table,
+    columns: 2,
+    rowsRead: 3,
+    rowsWritten: 3,
+    truncated: entry.truncated,
+    paging: 'keyset' as const,
+    error: entry.error,
+  }));
+  return {
+    ok: tables.every((table) => !table.error),
+    complete: truncated.length === 0 && tables.every((table) => !table.error),
+    tables,
+    rowsRead: tables.length * 3,
+    rowsWritten: tables.length * 3,
+    truncated: truncated.length > 0,
+    durationMs: 1,
+    cursors: options.cursors ?? {},
+    tablesTotal: tables.length,
+    tablesDone: finished.length,
+    rowsEstimate: 0,
+    skipped: [],
+  };
+}
+
+test('an interrupted repair run remembers the tables it already rewrote', () => {
+  // This used to be recorded for `merge` only. An `overwrite` run therefore
+  // re-copied the first N tables on every slice, spent its budget on table N+1
+  // and stopped in exactly the same place: "数据表 19/20" at 99%, forever.
+  const state = advanceSyncResume({
+    result: fakeSlice({ finished: ['audit_logs', 'ciphers'], truncated: ['users'] }),
+    complete: false,
+  });
+
+  assert.deepEqual(state.doneTables, ['audit_logs', 'ciphers']);
+  assert.deepEqual(state.pendingTables, ['users']);
+  assert.deepEqual(state.failedTables, []);
+});
+
+test('finished tables accumulate across slices until the run completes', () => {
+  const first = advanceSyncResume({
+    result: fakeSlice({ finished: ['a', 'b'], truncated: ['c', 'd'] }),
+    complete: false,
+  });
+  const second = advanceSyncResume({
+    previous: first,
+    result: fakeSlice({ finished: ['c'], truncated: ['d'] }),
+    complete: false,
+    skipTables: first.doneTables,
+  });
+  const third = advanceSyncResume({
+    previous: second,
+    result: fakeSlice({ finished: ['d'] }),
+    complete: true,
+    skipTables: second.doneTables,
+  });
+
+  assert.deepEqual(first.doneTables, ['a', 'b']);
+  assert.deepEqual(second.doneTables, ['a', 'b', 'c']);
+  // A finished run carries no resume point: the next click is a fresh copy.
+  assert.equal(third.doneTables, undefined);
+  assert.equal(third.cursors, undefined);
+});
+
+test('a table this slice never reached keeps the cursor an earlier slice stored', () => {
+  // Cursors used to be *replaced* by the slice's own map. A table the slice ran
+  // out of budget before reaching has no cursor, so the stored position was
+  // discarded and that table restarted from its first row on the next click.
+  const state = advanceSyncResume({
+    previous: { doneTables: ['a'], cursors: { users: ['u900'] } },
+    result: fakeSlice({ finished: ['b'], truncated: ['users'] }),
+    complete: false,
+    skipTables: ['a'],
+  });
+
+  assert.deepEqual(state.cursors, { users: ['u900'] });
+  assert.deepEqual(state.doneTables, ['a', 'b']);
+  assert.deepEqual(state.pendingTables, ['users']);
+});
+
+test('the cursor of a table that finished is dropped', () => {
+  const state = advanceSyncResume({
+    previous: { cursors: { users: ['u5'], ciphers: ['c9'] } },
+    result: fakeSlice({ finished: ['users'], truncated: ['ciphers'] }),
+    complete: false,
+  });
+
+  // Keeping `users` would make a later copy of that table skip its first rows.
+  assert.deepEqual(state.cursors, { ciphers: ['c9'] });
+});
+
+test('a table that raised an error is reported with its reason, not as pending', () => {
+  const state = advanceSyncResume({
+    result: fakeSlice({
+      failed: [{ table: 'attachments', error: 'ER_DATA_TOO_LONG' }],
+      truncated: ['users'],
+    }),
+    complete: false,
+  });
+
+  assert.deepEqual(state.failedTables, [{ table: 'attachments', error: 'ER_DATA_TOO_LONG' }]);
+  assert.deepEqual(state.pendingTables, ['users']);
+  assert.deepEqual(state.doneTables, []);
+});
+
+test('a run that copies five tables per slice converges instead of restarting', () => {
+  const tables = Array.from({ length: 20 }, (_, index) => `t${String(index).padStart(2, '0')}`);
+  let previous: SyncResumeSource | null = null;
+  let rounds = 0;
+
+  for (;;) {
+    rounds += 1;
+    assert.ok(rounds <= 10, 'the run must converge, not loop at 19/20');
+    const skip = new Set(previous?.doneTables ?? []);
+    const pending = tables.filter((table) => !skip.has(table));
+    const finished = pending.slice(0, 5);
+    const complete = pending.length <= 5;
+    const state = advanceSyncResume({
+      previous,
+      result: fakeSlice({
+        finished,
+        truncated: complete ? [] : pending.slice(5, 6),
+      }),
+      complete,
+      skipTables: [...skip],
+    });
+    if (complete) break;
+    previous = state;
+  }
+
+  assert.equal(rounds, 4); // 20 tables at five per slice
+});
+
+test('a slice that cannot reach the last table still converges on the next one', async () => {
+  // The reported case: 20 tables, one 12s slice only gets through 19 of them
+  // (about six round trips per table), and the page shows "数据表 19/20 · 99%".
+  // Before `advanceSyncResume`, every slice re-read the first tables from the
+  // top and expired in the same place, so it never finished — clicking again
+  // just repeated the same 19/20.
+  const tables = Array.from({ length: 20 }, (_, index) => `t${String(index).padStart(2, '0')}`);
+  const columns = Object.fromEntries(tables.map((table) => [table, ['id']]));
+  const rows = Object.fromEntries(
+    tables.map((table) => [table, Array.from({ length: 3 }, (_, index) => ({ id: `${table}-${index}` }))])
+  );
+  const source = new FakeNode(tables, columns, rows);
+  source.latencyMs = 4;
+  const target = new FakeNode([], {});
+  target.latencyMs = 4;
+
+  let previous: SyncResumeSource | null = null;
+  let rounds = 0;
+  let last: ClusterSyncResult | null = null;
+  const donePerRound: number[] = [];
+
+  for (;;) {
+    rounds += 1;
+    assert.ok(rounds <= 8, 'the run must converge, not loop at 19/20');
+    const slice = await syncDatabase(source, target, {
+      mode: 'overwrite',
+      maxDurationMs: 250,
+      skipTables: previous?.doneTables,
+      cursors: previous?.cursors,
+    });
+    last = slice;
+    donePerRound.push(slice.tablesDone);
+    const complete = slice.ok && slice.complete;
+    const state = advanceSyncResume({
+      previous,
+      result: slice,
+      complete,
+      skipTables: previous?.doneTables,
+    });
+    if (complete) break;
+    previous = state;
+  }
+
+  assert.ok(rounds >= 2, 'the artificial latency should split the copy into slices');
+  assert.equal(last?.complete, true);
+  assert.equal(last?.tablesTotal, 20);
+  // The bar must move forward. A restart would show up as a drop here.
+  for (let index = 1; index < donePerRound.length; index += 1) {
+    assert.ok(donePerRound[index] >= donePerRound[index - 1], `slice ${index} went backwards`);
+  }
+  for (const table of tables) {
+    assert.equal((target.rows[table] ?? []).length, 3, `${table} was not copied`);
+  }
 });

@@ -477,7 +477,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
     }
   };
 
-  const onSync = async () => {
+  const onSync = async (restart = false) => {
     setConfirmSync(false);
     setBusy('sync');
     setNotice(null);
@@ -494,12 +494,20 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
       rowsEstimate: 0,
     });
     try {
-      const request = () =>
-        syncDbCluster(props.authedFetch, {
+      // "Start over" applies to the first slice only. Sending it on every slice
+      // would discard the resume point this very run has just built, and the
+      // loop could never finish.
+      let firstSlice = true;
+      const request = () => {
+        const startOver = restart && firstSlice;
+        firstSlice = false;
+        return syncDbCluster(props.authedFetch, {
           sourceId: syncSourceId || undefined,
           mode: syncMode,
           budgetMs: SYNC_BUDGET_MS,
+          restart: startOver,
         });
+      };
 
       // Each request copies for ~12s and reports where it got to; the next one
       // resumes from there and skips the tables already finished. So the bar is
@@ -545,22 +553,40 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
       const failed = finished.targets.filter((target) => !target.ok);
       const partial = finished.targets.filter((target) => target.ok && !target.complete);
       const mismatched = finished.targets.flatMap((target) => target.countsMismatch ?? []);
+      // A table that raised an error is why the run stops; without naming it the
+      // page can only say "部分数据表出错", which is not something an operator
+      // can act on.
+      const failedDetail = finished.targets.flatMap((target) =>
+        (target.failedTables ?? []).map((entry) => `${entry.table}（${entry.error}）`)
+      );
+      const pendingDetail = finished.targets.flatMap((target) => target.pendingTables ?? []);
       if (failed.length > 0) {
         setNotice({
           kind: 'error',
           text:
             `${failed.length}/${finished.targets.length} 个副库同步失败：` +
-            failed.map((target) => `${target.label}（${target.error ?? '部分数据表出错'}）`).join('、'),
+            failed.map((target) => `${target.label}（${target.error ?? '部分数据表出错'}）`).join('、') +
+            (failedDetail.length > 0 ? ` 出错的数据表：${failedDetail.slice(0, 3).join('、')}` : ''),
         });
       } else if (partial.length > 0) {
         setNotice({
-          kind: 'info',
+          kind: failedDetail.length > 0 ? 'error' : 'info',
           text: stalled
             ? `同步停住了：还有 ${partial.map((target) => target.label).join('、')} 没有同步完，且这一轮没有读到任何新行。` +
-              '请查看上面节点卡片里的错误信息，处理后再点一次。'
+              (failedDetail.length > 0
+                ? `出错的数据表：${failedDetail.slice(0, 3).join('、')}。`
+                : '') +
+              '请处理后再点一次。'
             : `已处理 ${formatCount(totals.rowsWritten)} 行，` +
               `但 ${partial.length} 个副库还没同步完（${partial.map((target) => target.label).join('、')}）。` +
-              `当前进度 ${finished.progress?.percent ?? 0}%，再点一次会从上次的位置继续（已完成的表不会重扫）。`,
+              `当前进度 ${finished.progress?.percent ?? 0}%` +
+              (pendingDetail.length > 0
+                ? `，剩下 ${pendingDetail.length} 张表本次没来得及处理（${pendingDetail.slice(0, 3).join('、')}${
+                    pendingDetail.length > 3 ? '…' : ''
+                  }）`
+                : '') +
+              '。再点一次会接着同步，已完成的表不会重扫。' +
+              (failedDetail.length > 0 ? ` 出错的数据表：${failedDetail.slice(0, 3).join('、')}。` : ''),
         });
       } else {
         setNotice({
@@ -1103,7 +1129,13 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
               </span>
               <span>
                 已处理 <b>{formatCount(shownProgress.rowsCopied)}</b> 行
-                {shownProgress.rowsEstimate > 0 ? `（估算共 ${formatCount(shownProgress.rowsEstimate)} 行）` : ''}
+                {/* The estimate comes from `information_schema.TABLE_ROWS`, which
+                    is 0 for a table InnoDB has never analysed. Printing "估算共
+                    388 行" next to "已处理 2,040 行" reads as a bug, so only show
+                    it while it is still ahead of the real count. */}
+                {shownProgress.rowsEstimate > shownProgress.rowsCopied
+                  ? `（估算共 ${formatCount(shownProgress.rowsEstimate)} 行）`
+                  : ''}
               </span>
               {busy === 'sync' && (
                 <span>
@@ -1114,6 +1146,25 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
             {shownProgress.rowsEstimate === 0 && shownProgress.tablesTotal > 0 && (
               <p className="db-inline-hint">
                 数据库没有提供行数估算（<code>information_schema.TABLE_ROWS</code> 为 0），百分比按「已完成的数据表」计算。
+              </p>
+            )}
+            {shownProgress.rowsEstimate > 0 && shownProgress.rowsCopied > shownProgress.rowsEstimate && (
+              <p className="db-inline-hint">
+                行数估算（<code>information_schema.TABLE_ROWS</code>）比实际少，百分比按「已完成的数据表」计算。
+              </p>
+            )}
+            {busy !== 'sync' && shownProgress.percent < 100 && (
+              <p className="db-inline-hint">
+                再次同步会从上次停下的位置继续，已完成的表不会重扫。如果源库的数据在这期间被改过或删过，
+                <button
+                  type="button"
+                  className="db-inline-action"
+                  disabled={occupied}
+                  onClick={() => void onSync(true)}
+                >
+                  从第一张表重新开始
+                </button>
+                。
               </p>
             )}
           </div>

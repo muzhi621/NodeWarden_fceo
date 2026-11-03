@@ -37933,6 +37933,23 @@ async function syncDatabase(source, target, options = {}) {
     skipped
   };
 }
+function advanceSyncResume(input) {
+  const { result, complete } = input;
+  const previous = input.previous ?? null;
+  const finishedNow = result.tables.filter((table) => !table.truncated && !table.error).map((table) => table.table);
+  const doneTables = complete ? void 0 : [.../* @__PURE__ */ new Set([...previous?.doneTables ?? [], ...finishedNow])];
+  const cursors = {
+    ...previous?.cursors ?? {},
+    ...result.cursors
+  };
+  for (const table of [...finishedNow, ...input.skipTables ?? []]) delete cursors[table];
+  return {
+    doneTables,
+    cursors: complete || Object.keys(cursors).length === 0 ? void 0 : cursors,
+    pendingTables: result.tables.filter((table) => table.truncated).map((table) => table.table),
+    failedTables: result.tables.filter((table) => !!table.error).map((table) => ({ table: table.table, error: table.error }))
+  };
+}
 
 // src/services/db-lifecycle.ts
 init_storage();
@@ -38705,9 +38722,10 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
       continue;
     }
     const previous = storedStates[target.id];
-    const resuming = !!previous && !previous.complete && previous.sourceId === source.id && (previous.mode ?? "merge") === mode;
+    const restart = body.restart === true;
+    const resuming = !restart && !!previous && !previous.complete && previous.sourceId === source.id && (previous.mode ?? "merge") === mode;
     const cursors = resuming ? previous.cursors : void 0;
-    const skipTables = resuming && mode === "merge" ? previous.doneTables : void 0;
+    const skipTables = resuming ? previous.doneTables : void 0;
     const targetTableCount = await countBaseTables(target.db, spec?.database);
     if ((targetTableCount === 0 || targetTableCount === null) && spec) {
       const bootstrap = await bootstrapSchemaOnCandidate(spec);
@@ -38752,8 +38770,13 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
       tablesDone: result.tablesDone,
       done: complete
     });
-    const finishedNow = result.tables.filter((table) => !table.truncated && !table.error).map((table) => table.table);
-    const doneTables = mode === "merge" && !complete ? [.../* @__PURE__ */ new Set([...resuming ? previous.doneTables ?? [] : [], ...finishedNow])] : void 0;
+    const resume = advanceSyncResume({
+      previous: resuming ? previous : null,
+      result,
+      complete,
+      skipTables
+    });
+    const { doneTables, cursors: nextCursors, pendingTables, failedTables } = resume;
     await saveNodeSyncState(env, target.id, {
       at: Date.now(),
       complete,
@@ -38762,7 +38785,7 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
       tables: result.tablesTotal,
       sourceId: source.id,
       fingerprint: spec ? nodeFingerprint(spec) : void 0,
-      cursors: complete ? void 0 : result.cursors,
+      cursors: nextCursors,
       mode,
       doneTables,
       progress
@@ -38779,6 +38802,8 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
       truncated: result.truncated,
       durationMs: result.durationMs,
       tables: result.tables,
+      failedTables: failedTables.length > 0 ? failedTables : void 0,
+      pendingTables: pendingTables.length > 0 ? pendingTables : void 0,
       countsMismatch: countsMismatch.length > 0 ? countsMismatch : void 0,
       orphanRows: orphanRows > 0 ? orphanRows : void 0,
       progress
