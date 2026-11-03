@@ -8,7 +8,7 @@
 - 要找某个变量 → [第五节 环境变量总表](#五环境变量总表)
 - 平台专属细节（FC 规格、EdgeOne 限制、定时备份）→ 仍以两份平台文档为准
 
-> 本文对应版本 **v1.8.11**。每个 [Release](https://github.com/muzhi621/NodeWarden_fceo/releases) 都附带
+> 本文对应版本 **v1.8.12**。每个 [Release](https://github.com/muzhi621/NodeWarden_fceo/releases) 都附带
 > 可直接上传的 `nodewarden-fc.zip`（前端 + 后端 bundle + mysql2 依赖，免构建）。
 
 ---
@@ -149,7 +149,7 @@ docker run -d --name nodewarden -p 8787:8787 \
   -e DATA_DIR=/data \
   -e JWT_SECRET="$(openssl rand -base64 32)" \
   -e DB_HOST=... -e DB_USER=... -e DB_PASSWORD=... -e DB_NAME=... \
-  nodewarden:1.8.11
+  nodewarden:1.8.12
 ```
 
 ```yaml
@@ -287,7 +287,7 @@ rclone mount nw-oss:nodewarden /mnt/obj \
 ```yaml
 services:
   nodewarden:
-    image: nodewarden:1.8.11
+    image: nodewarden:1.8.12
     ports: ["8787:8787"]
     devices:
       - /dev/fuse:/dev/fuse          # 必需
@@ -655,8 +655,9 @@ npm run start:node               # 默认 http://localhost:8787
 | `DB_SSL_INSECURE` | 未设（严格校验证书） | F/E/N | 自签证书库设 `1`（等价于不校验证书）；EdgeOne 上只能用这个 |
 | `DB_SSL_CA` | — | F/N | 私有 CA 的 PEM 路径（比关校验更安全）；EdgeOne 无持久文件，不可用 |
 | `DB_CONN_LIMIT` | `5` | F/E/N | 连接池上限；函数环境别调大 |
-| `DB_STANDBY_NAME` | 空 | F/E/N | **副库库名**（可选）。设置后环境变量配置即为主库 + 副库双节点，可在后台「同步数据到副库」搬数据；不设 = 单节点。副库不参与自动切换与读分摊，切换靠互换 `DB_NAME` 与它 |
-| `DB_STANDBY_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_SSL` / `_CONN_LIMIT` | 沿用主库 | F/E/N | 副库在另一台服务器或另一套账号时才需要 |
+| `DB_STANDBY_NODES` | 空 | F/E/N | **副库清单**（可选），逗号分隔、数量不限（最多 7 个）、库名随意。同实例的库只写库名（其余沿用主库），另一台服务器上的库写 `mysql://用户:密码@主机:端口/库名`，两种可混写。设置后环境变量配置本身就是「主库 + 若干副库」，可在后台「同步数据到副库」搬数据；不设 = 单节点。副库不参与自动切换与读分摊（防主库抖动切到空库），换主库靠「改 `DB_NAME` 并从清单删掉目标库」 |
+| `DB_STANDBY_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_SSL` / `_CONN_LIMIT` | 沿用主库 | F/E/N | 清单里**只写库名**那些条目的连接默认值（副库都在同一台备用服务器时用）。完整 URL 条目不受影响 |
+| `DB_STANDBY_NAME` / `DB_STANDBYS` | 空 | F/E/N | v1.8.11 的单数写法，仍被读取，等价于清单里的一行 |
 | `DB_HOST_ALLOWLIST` | 空 | 全部 | 逗号分隔的域名/IP/CIDR 白名单。后台「测试连接」默认**拒绝内网地址**，自建库在内网时必须填 |
 | `BACKUP_ENDPOINT_ALLOWLIST` | 空 | 全部 | 同上，但作用于**备份目的地**。自建 MinIO 在 `127.0.0.1` / 内网 NAS 上时填它，否则备份目标会以「host is not allowed」被拒 |
 | `S3_REQUEST_TIMEOUT_MS` | `120000` | 全部 | 单次 S3 请求超时；每个请求最多重试 3 次（429/5xx/网络中断） |

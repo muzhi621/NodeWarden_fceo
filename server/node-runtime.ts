@@ -397,10 +397,12 @@ export function buildNodeEnv(): Env {
     DB_NAME: process.env.DB_NAME,
     DB_SSL: process.env.DB_SSL,
     DB_CONN_LIMIT: process.env.DB_CONN_LIMIT,
-    // Optional env-declared standby. Listed explicitly because this object is a
+    // Optional env-declared standbys. Listed explicitly because this object is a
     // whitelist: a variable that is not copied here does not exist as far as
-    // src/ is concerned, which is exactly how "I set DB_STANDBY_NAME and nothing
-    // happened" would look.
+    // src/ is concerned, which is exactly how "I set DB_STANDBY_NODES and
+    // nothing happened" would look.
+    DB_STANDBY_NODES: process.env.DB_STANDBY_NODES,
+    DB_STANDBYS: process.env.DB_STANDBYS,
     DB_STANDBY_NAME: process.env.DB_STANDBY_NAME,
     DB_STANDBY_HOST: process.env.DB_STANDBY_HOST,
     DB_STANDBY_PORT: process.env.DB_STANDBY_PORT,

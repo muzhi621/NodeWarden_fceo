@@ -30,6 +30,7 @@ import {
   resolveDbConfig,
   resolveDbConfigFromEnv,
   resolveStandbyFromEnv,
+  resolveStandbysFromEnv,
   resolveStoredCluster,
   saveRuntimeConfig,
   readSyncStates,
@@ -499,7 +500,7 @@ async function testMySqlConnection(
       errorKind: kind,
     };
   } finally {
-    await db.close();
+    await closeQuietly(db, 'probe');
   }
 }
 
@@ -608,7 +609,7 @@ async function bootstrapSchemaOnCandidate(config: DbNodeConfig): Promise<{ ok: b
     console.error('[db-config] schema bootstrap on candidate database failed:', initError);
     return { ok: false, error: message };
   } finally {
-    await probe.close();
+    await closeQuietly(probe, 'schema bootstrap');
   }
 }
 
@@ -639,13 +640,30 @@ async function hasUserRows(node: DbNodeConfig): Promise<boolean | null> {
     // above already reported the real problem.
     return null;
   } finally {
-    await db.close();
+    await closeQuietly(db, 'probe');
   }
 }
 
 /** Clearing the runtime config falls back to env config or D1 — neither may exist here. */
 function clearingWouldLeaveNoDatabase(env: Env): boolean {
   return !resolveDbConfigFromEnv(env) && !env.DB;
+}
+
+/**
+ * Close a probe pool without letting it fail the request.
+ *
+ * When the server is unreachable the pool has no connection to close and
+ * `close()` rethrows the original connect error — from a `finally` block, which
+ * replaces the (already correct) "could not connect" answer with a 502. Every
+ * caller here has already decided what to report; closing is cleanup, not a step
+ * whose result anybody reads.
+ */
+async function closeQuietly(pool: { close: () => Promise<void> }, label: string): Promise<void> {
+  try {
+    await pool.close();
+  } catch (error) {
+    console.warn(`[db-config] closing the ${label} pool failed:`, error);
+  }
 }
 
 function wantsForce(request: Request): boolean {
@@ -955,15 +973,16 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
   // there is nothing to copy into: the saved cluster is shadowed, so its
   // standbys never reach the effective config. Say that plainly *and* name the
   // one variable that fixes it — an env-only deployment is the recommended
-  // setup, and it can have a sync target now (see resolveStandbyFromEnv).
+  // setup, and it can have sync targets now (see resolveStandbysFromEnv).
   const envPrimary = resolveDbConfigFromEnv(env);
-  if (envPrimary && !resolveStandbyFromEnv(env)) {
+  if (envPrimary && resolveStandbysFromEnv(env).length === 0) {
     const stored = await resolveStoredCluster(env);
     const savedStandbys = (stored?.nodes ?? []).filter((node) => node.id !== 'env-primary').length;
     return errorResponse(
       '当前生效的是环境变量里的那一个库（单节点），没有可同步的目标库。' +
-        '要同步到副库，请给函数加上 DB_STANDBY_NAME（副库的库名）；' +
-        '同实例时其它参数会沿用 DB_HOST / DB_PORT / DB_USER / DB_PASSWORD。' +
+        '要同步到副库，请给函数加上 DB_STANDBY_NODES，值是一个副库清单（逗号分隔，数量不限）：' +
+        '同实例的库只写库名，如 DB_STANDBY_NODES=档案库,离线库；' +
+        '在另一台服务器的库写完整连接串，如 DB_STANDBY_NODES=mysql://user:pass@10.0.0.5:3306/nodewarden_bak。' +
         (savedStandbys > 0
           ? `后台已保存的 ${savedStandbys} 个副库节点被 DB_* 环境变量挡住了，不会参与同步。`
           : ''),
@@ -1256,7 +1275,7 @@ async function probeWritability(node: DbNodeConfig): Promise<'writable' | 'read-
     console.warn('[db-config] could not read the read_only flag:', error);
     return 'unknown';
   } finally {
-    await db.close();
+    await closeQuietly(db, 'probe');
   }
 }
 
@@ -1304,12 +1323,19 @@ export async function handleAdminPromoteDbNode(
   if (!targetId) return errorResponse('缺少 nodeId：请指定要提升为主库的节点。', 400);
 
   if (resolveDbConfigFromEnv(env)) {
-    const standby = resolveStandbyFromEnv(env);
+    const standbys = resolveStandbysFromEnv(env);
+    const pickedIndex = standbys.findIndex((_, index) => `env-standby-${index + 1}` === targetId);
+    const picked = pickedIndex >= 0 ? standbys[pickedIndex] : null;
+    const onSameServer = picked ? picked.host === resolveDbConfigFromEnv(env)?.host : false;
     return errorResponse(
       '主库由环境变量决定，页面上的切换不会生效。' +
-        (standby
-          ? `要切换到副库「${standby.database}」，请把 DB_NAME 改成它、把 DB_STANDBY_NAME 改成现在的库，再重启。`
-          : '要换主库，请改 DB_HOST / DB_NAME 后重启；想先有一个可切换的副库，加 DB_STANDBY_NAME。'),
+        (picked
+          ? `要把写入切到「${picked.database}」：把 DB_NAME 改成它，并把它从 DB_STANDBY_NODES 里删掉` +
+            (onSameServer
+              ? '；同一台服务器上 DB_HOST / DB_PORT 不用动'
+              : '；它原来在另一台服务器，所以 DB_HOST / DB_PORT / DB_USER / DB_PASSWORD 也要改成它的') +
+            '，重启即可。'
+          : '要换主库，请改 DB_HOST / DB_NAME 后重启；想先有几个可同步的副库，加 DB_STANDBY_NODES=库名1,库名2。'),
       409
     );
   }

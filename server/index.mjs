@@ -6419,7 +6419,7 @@ var APP_VERSION;
 var init_app_version = __esm({
   "shared/app-version.ts"() {
     "use strict";
-    APP_VERSION = "1.8.11";
+    APP_VERSION = "1.8.12";
   }
 });
 
@@ -29390,6 +29390,749 @@ function createLimitedBody(source, maxBytes) {
 // server/index.ts
 init_response();
 
+// src/services/db-config.ts
+var CONFIG_OBJECT_KEY = "__system__/db-config.json";
+var CONFIG_KV_KEY = "db-config:v1";
+var SYNC_STATUS_OBJECT_KEY = "__system__/db-sync-status.json";
+var SYNC_STATUS_KV_KEY = "db-sync-status:v1";
+var WATERMARK_OBJECT_KEY = "__system__/db-watermark.json";
+var WATERMARK_KV_KEY = "db-watermark:v1";
+var CONFIG_KEYS = { kv: CONFIG_KV_KEY, object: CONFIG_OBJECT_KEY };
+var SYNC_STATUS_KEYS = { kv: SYNC_STATUS_KV_KEY, object: SYNC_STATUS_OBJECT_KEY };
+var WATERMARK_KEYS = { kv: WATERMARK_KV_KEY, object: WATERMARK_OBJECT_KEY };
+function nodeFingerprint(node) {
+  return `${node.host}|${node.port}|${node.database}`;
+}
+var DEFAULT_CLUSTER_POLICY = {
+  readSplit: false,
+  syncMode: "native",
+  syncAsync: false,
+  failoverEnabled: true,
+  failureThreshold: 3,
+  cooldownMs: 3e4
+};
+var CLUSTER_LIMITS = {
+  maxNodes: 8,
+  minConnectionLimit: 1,
+  maxConnectionLimit: 64,
+  minFailureThreshold: 1,
+  maxFailureThreshold: 10,
+  minCooldownMs: 5e3,
+  maxCooldownMs: 10 * 6e4
+};
+function asKvLike(value) {
+  if (!value || typeof value !== "object") return null;
+  const kv = value;
+  if (typeof kv.get !== "function" || typeof kv.put !== "function") return null;
+  return {
+    get: (key) => Promise.resolve(kv.get.call(value, key)),
+    put: (key, val) => Promise.resolve(kv.put.call(value, key, val)),
+    delete: (key) => Promise.resolve(kv.delete?.call(value, key))
+  };
+}
+function getConfigStore(env) {
+  if (asKvLike(env.SETTINGS_KV)) return "kv";
+  if (env.ATTACHMENTS) return "r2";
+  if (asKvLike(env.ATTACHMENTS_KV)) return "attachment-kv";
+  return null;
+}
+async function deriveKey(env) {
+  const raw = (env.DB_CONFIG_KEY || "").trim();
+  if (!raw) return null;
+  const subtle = crypto.subtle;
+  let keyBytes = null;
+  try {
+    const b64 = atob(raw.trim());
+    if (b64.length === 32) {
+      const bytes = new Uint8Array(b64.length);
+      for (let i2 = 0; i2 < b64.length; i2 += 1) bytes[i2] = b64.charCodeAt(i2);
+      keyBytes = bytes.buffer;
+    }
+  } catch {
+  }
+  if (!keyBytes) {
+    keyBytes = await subtle.digest("SHA-256", new TextEncoder().encode(raw));
+  }
+  return subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+async function encryptJson(env, data) {
+  const key = await deriveKey(env);
+  if (!key) return null;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = new TextEncoder().encode(JSON.stringify(data));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: new TextEncoder().encode("nodewarden-db-config:v1") },
+    key,
+    plaintext
+  );
+  const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(ciphertext), iv.length);
+  let binary = "";
+  combined.forEach((b) => {
+    binary += String.fromCharCode(b);
+  });
+  return `v1:${btoa(binary)}`;
+}
+async function decryptJson(env, payload) {
+  const key = await deriveKey(env);
+  if (!key) return null;
+  if (!payload.startsWith("v1:")) return null;
+  try {
+    const binary = atob(payload.slice(3));
+    const combined = new Uint8Array(binary.length);
+    for (let i2 = 0; i2 < binary.length; i2 += 1) combined[i2] = binary.charCodeAt(i2);
+    const iv = combined.slice(0, 12);
+    const ciphertext = combined.slice(12);
+    const plaintext = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv, additionalData: new TextEncoder().encode("nodewarden-db-config:v1") },
+      key,
+      ciphertext
+    );
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  } catch {
+    return null;
+  }
+}
+async function readStoredText(env, keys) {
+  const store = getConfigStore(env);
+  if (store === "kv") {
+    return await asKvLike(env.SETTINGS_KV).get(keys.kv);
+  }
+  if (store === "attachment-kv") {
+    return await asKvLike(env.ATTACHMENTS_KV).get(keys.kv);
+  }
+  if (store === "r2") {
+    const object = await env.ATTACHMENTS.get(keys.object);
+    if (!object) return null;
+    return await new Response(object.body).text();
+  }
+  return null;
+}
+async function writeStoredText(env, keys, payload) {
+  const store = getConfigStore(env);
+  if (!store) return false;
+  if (store === "kv") {
+    const kv = asKvLike(env.SETTINGS_KV);
+    if (payload) await kv.put(keys.kv, payload);
+    else await kv.delete(keys.kv);
+    return true;
+  }
+  if (store === "attachment-kv") {
+    const kv = asKvLike(env.ATTACHMENTS_KV);
+    if (payload) await kv.put(keys.kv, payload);
+    else await kv.delete(keys.kv);
+    return true;
+  }
+  if (store === "r2") {
+    if (payload) {
+      await env.ATTACHMENTS.put(keys.object, payload, {
+        httpMetadata: { contentType: "application/json" },
+        customMetadata: {
+          purpose: keys.object === SYNC_STATUS_OBJECT_KEY ? "db-sync-status" : keys.object === WATERMARK_OBJECT_KEY ? "db-watermark" : "db-config"
+        }
+      });
+    } else {
+      await env.ATTACHMENTS.delete(keys.object);
+    }
+    return true;
+  }
+  return false;
+}
+async function readStoredPayload(env) {
+  return readStoredText(env, CONFIG_KEYS);
+}
+async function writeStoredPayload(env, payload) {
+  return writeStoredText(env, CONFIG_KEYS, payload);
+}
+var CONFIG_CACHE_TTL_MS = 3e4;
+var payloadCache = /* @__PURE__ */ new WeakMap();
+var cacheEpoch = 0;
+function cacheStoreRef(env) {
+  const store = getConfigStore(env);
+  if (store === "kv") return env.SETTINGS_KV ?? null;
+  if (store === "attachment-kv") return env.ATTACHMENTS_KV ?? null;
+  if (store === "r2") return env.ATTACHMENTS ?? null;
+  return null;
+}
+async function readStoredPayloadCached(env) {
+  const ref = cacheStoreRef(env);
+  const now = Date.now();
+  if (ref) {
+    const hit = payloadCache.get(ref);
+    if (hit && hit.epoch === cacheEpoch && now - hit.at < CONFIG_CACHE_TTL_MS) return hit.payload;
+  }
+  const payload = await readStoredPayload(env);
+  if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: now });
+  return payload;
+}
+var SYNC_CACHE_TTL_MS = 5e3;
+var syncCache = /* @__PURE__ */ new WeakMap();
+function normalizeSyncState(raw) {
+  const input = asRecord(raw);
+  if (!input) return null;
+  const at = Number(input.at ?? 0);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  const cursors = asRecord(input.cursors);
+  const normalizedCursors = {};
+  if (cursors) {
+    for (const [table, cursor] of Object.entries(cursors)) {
+      if (!Array.isArray(cursor)) continue;
+      const values = cursor.filter(
+        (value) => value === null || ["string", "number", "boolean"].includes(typeof value)
+      );
+      if (values.length === cursor.length && values.length > 0) normalizedCursors[table] = values;
+    }
+  }
+  return {
+    at,
+    complete: input.complete === true,
+    fingerprint: typeof input.fingerprint === "string" && input.fingerprint ? input.fingerprint : void 0,
+    truncated: input.truncated === true,
+    rowsWritten: Number(input.rowsWritten ?? 0) || 0,
+    tables: Number(input.tables ?? 0) || 0,
+    sourceId: typeof input.sourceId === "string" && input.sourceId ? input.sourceId : void 0,
+    cursors: Object.keys(normalizedCursors).length > 0 ? normalizedCursors : void 0,
+    mode: input.mode === "overwrite" ? "overwrite" : input.mode === "merge" ? "merge" : void 0,
+    doneTables: normalizeTableNames(input.doneTables),
+    progress: normalizeRunProgress(input.progress)
+  };
+}
+function normalizeTableNames(raw) {
+  if (!Array.isArray(raw)) return void 0;
+  const names = raw.filter((value) => typeof value === "string" && value.length > 0);
+  return names.length > 0 ? [...new Set(names)] : void 0;
+}
+function normalizeRunProgress(raw) {
+  const input = asRecord(raw);
+  if (!input) return void 0;
+  const startedAt = Number(input.startedAt ?? 0);
+  if (!Number.isFinite(startedAt) || startedAt <= 0) return void 0;
+  const percent = Math.max(0, Math.min(100, Math.round(Number(input.percent ?? 0) || 0)));
+  return {
+    startedAt,
+    percent,
+    done: input.done === true,
+    tablesTotal: Math.max(0, Number(input.tablesTotal ?? 0) || 0),
+    tablesDone: Math.max(0, Number(input.tablesDone ?? 0) || 0),
+    rowsCopied: Math.max(0, Number(input.rowsCopied ?? 0) || 0),
+    rowsEstimate: Math.max(0, Number(input.rowsEstimate ?? 0) || 0)
+  };
+}
+async function readSyncStates(env) {
+  const ref = cacheStoreRef(env);
+  const now = Date.now();
+  if (ref) {
+    const hit = syncCache.get(ref);
+    if (hit && hit.epoch === cacheEpoch && now - hit.at < SYNC_CACHE_TTL_MS) return hit.value;
+  }
+  const raw = await readStoredText(env, SYNC_STATUS_KEYS).catch(() => null);
+  const states = {};
+  if (raw) {
+    try {
+      const parsed = asRecord(JSON.parse(raw));
+      if (parsed) {
+        for (const [id, value] of Object.entries(parsed)) {
+          const state2 = normalizeSyncState(value);
+          if (state2) states[id] = state2;
+        }
+      }
+    } catch {
+      console.warn("[db-config] sync status payload is not valid JSON; ignoring it");
+    }
+  }
+  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: now, value: states });
+  return states;
+}
+async function saveNodeSyncState(env, nodeId, state2) {
+  const current = await readSyncStates(env);
+  const next = { ...current, [nodeId]: state2 };
+  const saved = await writeStoredText(env, SYNC_STATUS_KEYS, JSON.stringify(next));
+  const ref = cacheStoreRef(env);
+  if (saved && ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: next });
+  return saved;
+}
+async function deleteNodeSyncStates(env, ids) {
+  if (ids.length === 0) return;
+  const current = await readSyncStates(env);
+  const next = { ...current };
+  let changed = false;
+  for (const id of ids) {
+    if (!(id in next)) continue;
+    delete next[id];
+    changed = true;
+  }
+  if (!changed) return;
+  await writeStoredText(env, SYNC_STATUS_KEYS, JSON.stringify(next));
+  const ref = cacheStoreRef(env);
+  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: next });
+}
+async function clearSyncStates(env) {
+  await writeStoredText(env, SYNC_STATUS_KEYS, null).catch(() => false);
+  const ref = cacheStoreRef(env);
+  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: {} });
+  await clearClusterWatermark(env);
+}
+async function readClusterWatermark(env) {
+  try {
+    const raw = await readStoredText(env, WATERMARK_KEYS);
+    if (!raw) return null;
+    const parsed = asRecord(JSON.parse(raw));
+    if (!parsed) return null;
+    const writeSeq = Number(parsed.writeSeq);
+    if (!Number.isFinite(writeSeq) || writeSeq <= 0) return null;
+    const nodes = {};
+    const rawNodes = asRecord(parsed.nodes);
+    if (rawNodes) {
+      for (const [id, value] of Object.entries(rawNodes)) {
+        const seq = Number(value);
+        if (Number.isFinite(seq) && seq >= 0) nodes[id] = Math.floor(seq);
+      }
+    }
+    return { writeSeq: Math.floor(writeSeq), nodes };
+  } catch {
+    return null;
+  }
+}
+async function saveClusterWatermark(env, snapshot) {
+  return writeStoredText(env, WATERMARK_KEYS, JSON.stringify(snapshot)).catch(() => false);
+}
+async function clearClusterWatermark(env) {
+  await writeStoredText(env, WATERMARK_KEYS, null).catch(() => false);
+}
+function asRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function parsePort(raw, fallback) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 && n <= 65535 ? Math.floor(n) : fallback;
+}
+function clampInt(raw, fallback, min, max2) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max2, Math.max(min, Math.floor(n)));
+}
+function normalizePolicy(raw) {
+  const input = asRecord(raw) ?? {};
+  const syncMode = input.syncMode === "write-through" ? "write-through" : "native";
+  return {
+    readSplit: input.readSplit === true,
+    syncMode,
+    // Async only makes sense for an app-level replay; ignore it otherwise so a
+    // stale flag cannot silently downgrade a native pair.
+    syncAsync: syncMode === "write-through" && input.syncAsync === true,
+    failoverEnabled: input.failoverEnabled !== false,
+    failureThreshold: clampInt(
+      input.failureThreshold,
+      DEFAULT_CLUSTER_POLICY.failureThreshold,
+      CLUSTER_LIMITS.minFailureThreshold,
+      CLUSTER_LIMITS.maxFailureThreshold
+    ),
+    cooldownMs: clampInt(
+      input.cooldownMs,
+      DEFAULT_CLUSTER_POLICY.cooldownMs,
+      CLUSTER_LIMITS.minCooldownMs,
+      CLUSTER_LIMITS.maxCooldownMs
+    )
+  };
+}
+function normalizeNode(raw, index) {
+  const input = asRecord(raw);
+  if (!input) return null;
+  const host = String(input.host ?? "").trim();
+  if (!host) return null;
+  const id = String(input.id ?? "").trim() || `node-${index + 1}`;
+  return {
+    id,
+    label: String(input.label ?? "").trim() || (index === 0 ? "\u4E3B\u5E93" : `\u8282\u70B9 ${index + 1}`),
+    role: input.role === "replica" ? "replica" : "primary",
+    priority: clampInt(input.priority, index + 1, 1, 99),
+    enabled: input.enabled !== false,
+    host,
+    port: parsePort(input.port, 3306),
+    user: String(input.user ?? "").trim(),
+    password: typeof input.password === "string" ? input.password : "",
+    database: String(input.database ?? "").trim(),
+    ssl: input.ssl !== false,
+    connectionLimit: clampInt(
+      input.connectionLimit,
+      5,
+      CLUSTER_LIMITS.minConnectionLimit,
+      CLUSTER_LIMITS.maxConnectionLimit
+    )
+  };
+}
+function normalizeRuntimeConfig(raw) {
+  const input = asRecord(raw);
+  if (!input) return null;
+  const rawNodes = Array.isArray(input.nodes) ? input.nodes : [];
+  const nodes = rawNodes.map((node, index) => normalizeNode(node, index)).filter((node) => node !== null).slice(0, CLUSTER_LIMITS.maxNodes);
+  if (nodes.length === 0) {
+    const legacy = normalizeNode(
+      {
+        id: "node-1",
+        label: "\u4E3B\u5E93",
+        role: "primary",
+        priority: 1,
+        enabled: true,
+        host: input.host,
+        port: input.port,
+        user: input.user,
+        password: input.password,
+        database: input.database,
+        ssl: input.ssl,
+        connectionLimit: input.connectionLimit
+      },
+      0
+    );
+    if (!legacy) return null;
+    nodes.push(legacy);
+  }
+  const activePrimaries = nodes.filter((node) => node.role === "primary" && node.enabled);
+  if (activePrimaries.length > 1) {
+    activePrimaries.slice().sort((a, b) => a.priority - b.priority).slice(1).forEach((node) => {
+      node.role = "replica";
+    });
+  }
+  return {
+    version: 2,
+    mode: "mysql",
+    nodes,
+    policy: normalizePolicy(input.policy)
+  };
+}
+async function loadRuntimeConfig(env) {
+  const payload = await readStoredPayloadCached(env);
+  if (!payload) return null;
+  const decrypted = await decryptJson(env, payload);
+  return normalizeRuntimeConfig(decrypted);
+}
+async function saveRuntimeConfig(env, config) {
+  const payload = await encryptJson(env, config);
+  if (!payload) return false;
+  const saved = await writeStoredPayload(env, payload);
+  if (saved) {
+    const ref = cacheStoreRef(env);
+    if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: Date.now() });
+  }
+  return saved;
+}
+async function clearRuntimeConfig(env) {
+  const saved = await writeStoredPayload(env, null);
+  if (saved) {
+    const ref = cacheStoreRef(env);
+    if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload: null, at: Date.now() });
+  }
+  return saved;
+}
+function parseEnvFlag(raw, fallback) {
+  const value = String(raw ?? "").trim().toLowerCase();
+  if (!value) return fallback;
+  return value !== "false" && value !== "0" && value !== "no" && value !== "off";
+}
+function resolveDbConfigFromEnv(env) {
+  const host = (env.DB_HOST || "").trim();
+  if (!host) return null;
+  return {
+    mode: "mysql",
+    source: "env",
+    host,
+    port: parsePort(env.DB_PORT, 3306),
+    user: (env.DB_USER || "").trim(),
+    password: env.DB_PASSWORD || "",
+    database: (env.DB_NAME || "").trim(),
+    ssl: parseEnvFlag(env.DB_SSL, true),
+    connectionLimit: parsePort(env.DB_CONN_LIMIT, 5)
+  };
+}
+var STANDBY_LIST_VARS = ["DB_STANDBY_NODES", "DB_STANDBYS", "DB_STANDBY_NAME"];
+var reportedStandbyEntries = /* @__PURE__ */ new Set();
+function reportOnce(key, message) {
+  if (reportedStandbyEntries.has(key)) return;
+  reportedStandbyEntries.add(key);
+  console.warn(message);
+}
+function splitStandbyEntries(raw) {
+  return raw.split(/[,;\r\n]+/).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+}
+function decodeUrlPart(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+function parseStandbyUrl(entry, base) {
+  let url;
+  try {
+    url = new URL(entry);
+  } catch {
+    reportOnce(
+      `malformed:${entry}`,
+      `[db-config] standby entry "${entry}" looks like a URL but does not parse; ignoring it. Percent-encode special characters in the password (for example @ becomes %40).`
+    );
+    return null;
+  }
+  const protocol = url.protocol.replace(/:$/, "").toLowerCase();
+  if (!["mysql", "mysqls", "mariadb", "mariadbs"].includes(protocol)) {
+    reportOnce(
+      `protocol:${entry}`,
+      `[db-config] standby entry "${entry}" uses protocol "${protocol}"; expected mysql:// . Ignoring it.`
+    );
+    return null;
+  }
+  if (!url.hostname) {
+    reportOnce(
+      `nohost:${entry}`,
+      `[db-config] standby entry "${entry}" has no host; write the schema name on its own to inherit the primary connection. Ignoring it.`
+    );
+    return null;
+  }
+  const database = decodeUrlPart(url.pathname.replace(/^\/+/, "")).trim();
+  if (!database) {
+    reportOnce(
+      `nodatabase:${entry}`,
+      `[db-config] standby entry "${entry}" has no database name in the path (mysql://host:3306/DATABASE); ignoring it.`
+    );
+    return null;
+  }
+  const sslParam = url.searchParams.get("ssl") ?? url.searchParams.get("tls");
+  const connParam = url.searchParams.get("conn") ?? url.searchParams.get("connectionLimit") ?? url.searchParams.get("connLimit");
+  return {
+    mode: "mysql",
+    source: "env",
+    host: url.hostname || base.host,
+    port: url.port ? parsePort(url.port, base.port) : base.port,
+    user: url.username ? decodeUrlPart(url.username) : base.user,
+    password: url.password ? decodeUrlPart(url.password) : base.password,
+    database,
+    ssl: sslParam === null ? base.ssl : parseEnvFlag(sslParam, base.ssl),
+    connectionLimit: connParam === null ? base.connectionLimit : parsePort(connParam, base.connectionLimit)
+  };
+}
+function resolveStandbysFromEnv(env) {
+  const primary = resolveDbConfigFromEnv(env);
+  if (!primary) return [];
+  const entries = [];
+  for (const key of STANDBY_LIST_VARS) {
+    const raw = env[key];
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    entries.push(...splitStandbyEntries(raw));
+  }
+  if (entries.length === 0) return [];
+  const defaults = {
+    ...primary,
+    host: (env.DB_STANDBY_HOST || "").trim() || primary.host,
+    port: parsePort(env.DB_STANDBY_PORT ?? env.DB_PORT, primary.port),
+    user: (env.DB_STANDBY_USER || "").trim() || primary.user,
+    password: env.DB_STANDBY_PASSWORD || primary.password,
+    ssl: parseEnvFlag(env.DB_STANDBY_SSL, primary.ssl),
+    connectionLimit: parsePort(env.DB_STANDBY_CONN_LIMIT, primary.connectionLimit)
+  };
+  const standbys = [];
+  const seen = /* @__PURE__ */ new Set([`${primary.host}:${primary.port}/${primary.database}`]);
+  const limit = Math.max(1, CLUSTER_LIMITS.maxNodes - 1);
+  for (const entry of entries) {
+    const parsed = entry.includes("://") ? parseStandbyUrl(entry, defaults) : { ...defaults, database: entry };
+    if (!parsed) continue;
+    if (!parsed.database) {
+      reportOnce(`emptydb:${entry}`, `[db-config] standby entry "${entry}" has no database name; ignoring it.`);
+      continue;
+    }
+    const fingerprint = `${parsed.host}:${parsed.port}/${parsed.database}`;
+    if (seen.has(fingerprint)) {
+      reportOnce(
+        `duplicate:${fingerprint}`,
+        `[db-config] standby entry "${entry}" resolves to ${fingerprint}, which is already in the list (or is the primary); ignoring it.`
+      );
+      continue;
+    }
+    if (standbys.length >= limit) {
+      reportOnce(
+        `limit:${limit}`,
+        `[db-config] more than ${limit} standby entries configured; only the first ${limit} are used.`
+      );
+      break;
+    }
+    seen.add(fingerprint);
+    standbys.push(parsed);
+  }
+  return standbys;
+}
+function toResolvedNodes(config, syncStates) {
+  const writeThrough = config.policy.syncMode === "write-through";
+  return config.nodes.filter((node) => node.enabled).map((node) => {
+    const recorded = syncStates[node.id];
+    const syncStatus = recorded && recorded.fingerprint && recorded.fingerprint !== nodeFingerprint(node) ? void 0 : recorded;
+    return {
+      ...node,
+      source: "runtime",
+      syncStatus,
+      // In native mode the database replicates itself: whether a standby is
+      // filled is not something the app can judge. In write-through it is, and
+      // a replica that never completed a sync must not become a failover
+      // target (B-4).
+      syncReady: node.role === "primary" || !writeThrough ? void 0 : syncStatus?.complete === true
+    };
+  }).sort((a, b) => {
+    if (a.role !== b.role) return a.role === "primary" ? -1 : 1;
+    return a.priority - b.priority;
+  });
+}
+async function resolveStoredCluster(env) {
+  const runtime2 = await loadRuntimeConfig(env);
+  if (!runtime2) return null;
+  const syncStates = runtime2.policy.syncMode === "write-through" ? await readSyncStates(env) : {};
+  return {
+    mode: "mysql",
+    source: "runtime",
+    nodes: toResolvedNodes(runtime2, syncStates),
+    policy: runtime2.policy
+  };
+}
+async function resolveDbCluster(env) {
+  const fromEnv = resolveDbConfigFromEnv(env);
+  if (fromEnv) {
+    const standbys = resolveStandbysFromEnv(env);
+    const nodes = [
+      {
+        id: "env-primary",
+        label: "\u73AF\u5883\u53D8\u91CF\u4E3B\u5E93",
+        role: "primary",
+        priority: 1,
+        enabled: true,
+        host: fromEnv.host,
+        port: fromEnv.port,
+        user: fromEnv.user,
+        password: fromEnv.password,
+        database: fromEnv.database,
+        ssl: fromEnv.ssl,
+        connectionLimit: fromEnv.connectionLimit,
+        source: "env"
+      }
+    ];
+    if (standbys.length > 0) {
+      standbys.forEach((standby, index) => {
+        nodes.push({
+          // Positional id: the list order is the operator's failover order, and
+          // the per-node fingerprint check discards a sync record whose
+          // host/port/schema no longer match, so a reordered list cannot inherit
+          // a stale "complete" from a different database.
+          id: `env-standby-${index + 1}`,
+          label: `\u526F\u5E93 ${index + 1} \xB7 ${standby.database}`,
+          role: "replica",
+          priority: index + 2,
+          enabled: true,
+          host: standby.host,
+          port: standby.port,
+          user: standby.user,
+          password: standby.password,
+          database: standby.database,
+          ssl: standby.ssl,
+          connectionLimit: standby.connectionLimit,
+          source: "env"
+        });
+      });
+    }
+    return {
+      mode: "mysql",
+      source: "env",
+      nodes,
+      policy: standbys.length > 0 ? { ...DEFAULT_CLUSTER_POLICY, failoverEnabled: false } : { ...DEFAULT_CLUSTER_POLICY }
+    };
+  }
+  const runtime2 = await loadRuntimeConfig(env);
+  if (runtime2) {
+    const syncStates = runtime2.policy.syncMode === "write-through" ? await readSyncStates(env) : {};
+    const nodes = toResolvedNodes(runtime2, syncStates);
+    if (nodes.length > 0) {
+      return { mode: "mysql", source: "runtime", nodes, policy: runtime2.policy };
+    }
+    return {
+      mode: "d1",
+      source: "d1",
+      nodes: [],
+      policy: runtime2.policy,
+      unavailableReason: runtime2.nodes.length > 0 ? `\u5DF2\u4FDD\u5B58\u7684 MySQL \u96C6\u7FA4\u914D\u7F6E\u4E2D\u6709 ${runtime2.nodes.length} \u4E2A\u8282\u70B9\uFF0C\u4F46\u5168\u90E8\u5904\u4E8E\u300C\u505C\u7528\u300D\u72B6\u6001` : "\u5DF2\u4FDD\u5B58\u7684 MySQL \u96C6\u7FA4\u914D\u7F6E\u91CC\u6CA1\u6709\u4EFB\u4F55\u8282\u70B9"
+    };
+  }
+  return { mode: "d1", source: "d1", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } };
+}
+function primaryNodeOf(cluster) {
+  return cluster.nodes.find((node) => node.role === "primary") ?? cluster.nodes[0] ?? null;
+}
+async function resolveDbConfig(env) {
+  const cluster = await resolveDbCluster(env);
+  const primary = primaryNodeOf(cluster);
+  if (cluster.mode === "mysql" && primary) {
+    return {
+      mode: "mysql",
+      source: cluster.source,
+      host: primary.host,
+      port: primary.port,
+      user: primary.user,
+      password: primary.password,
+      database: primary.database,
+      ssl: primary.ssl,
+      connectionLimit: primary.connectionLimit
+    };
+  }
+  return {
+    mode: "d1",
+    source: "d1",
+    host: "",
+    port: 3306,
+    user: "",
+    password: "",
+    database: "",
+    ssl: false,
+    connectionLimit: 5
+  };
+}
+function maskNode(node) {
+  return {
+    id: node.id,
+    label: node.label,
+    role: node.role,
+    priority: node.priority,
+    enabled: node.enabled,
+    host: node.host,
+    port: node.port,
+    user: node.user,
+    database: node.database,
+    ssl: node.ssl,
+    connectionLimit: node.connectionLimit,
+    passwordSet: !!node.password,
+    syncStatus: node.syncStatus,
+    syncReady: node.syncReady
+  };
+}
+function maskCluster(cluster) {
+  return {
+    mode: cluster.mode,
+    source: cluster.source,
+    nodes: cluster.nodes.map(maskNode),
+    policy: cluster.policy,
+    unavailableReason: cluster.unavailableReason
+  };
+}
+function maskConfig(config) {
+  return {
+    mode: config.mode,
+    source: config.source,
+    host: config.host,
+    port: config.port,
+    user: config.user,
+    database: config.database,
+    ssl: config.ssl,
+    connectionLimit: config.connectionLimit,
+    passwordSet: !!config.password
+  };
+}
+function hasConfigStore(env) {
+  return getConfigStore(env) !== null;
+}
+
 // server/node-runtime.ts
 import fs2 from "node:fs";
 import fsp3 from "node:fs/promises";
@@ -35962,653 +36705,6 @@ async function handleAdminBackupRoute(request, env, actorUser, path4, method) {
 // src/handlers/admin-db-config.ts
 init_response();
 
-// src/services/db-config.ts
-var CONFIG_OBJECT_KEY = "__system__/db-config.json";
-var CONFIG_KV_KEY = "db-config:v1";
-var SYNC_STATUS_OBJECT_KEY = "__system__/db-sync-status.json";
-var SYNC_STATUS_KV_KEY = "db-sync-status:v1";
-var WATERMARK_OBJECT_KEY = "__system__/db-watermark.json";
-var WATERMARK_KV_KEY = "db-watermark:v1";
-var CONFIG_KEYS = { kv: CONFIG_KV_KEY, object: CONFIG_OBJECT_KEY };
-var SYNC_STATUS_KEYS = { kv: SYNC_STATUS_KV_KEY, object: SYNC_STATUS_OBJECT_KEY };
-var WATERMARK_KEYS = { kv: WATERMARK_KV_KEY, object: WATERMARK_OBJECT_KEY };
-function nodeFingerprint(node) {
-  return `${node.host}|${node.port}|${node.database}`;
-}
-var DEFAULT_CLUSTER_POLICY = {
-  readSplit: false,
-  syncMode: "native",
-  syncAsync: false,
-  failoverEnabled: true,
-  failureThreshold: 3,
-  cooldownMs: 3e4
-};
-var CLUSTER_LIMITS = {
-  maxNodes: 8,
-  minConnectionLimit: 1,
-  maxConnectionLimit: 64,
-  minFailureThreshold: 1,
-  maxFailureThreshold: 10,
-  minCooldownMs: 5e3,
-  maxCooldownMs: 10 * 6e4
-};
-function asKvLike(value) {
-  if (!value || typeof value !== "object") return null;
-  const kv = value;
-  if (typeof kv.get !== "function" || typeof kv.put !== "function") return null;
-  return {
-    get: (key) => Promise.resolve(kv.get.call(value, key)),
-    put: (key, val) => Promise.resolve(kv.put.call(value, key, val)),
-    delete: (key) => Promise.resolve(kv.delete?.call(value, key))
-  };
-}
-function getConfigStore(env) {
-  if (asKvLike(env.SETTINGS_KV)) return "kv";
-  if (env.ATTACHMENTS) return "r2";
-  if (asKvLike(env.ATTACHMENTS_KV)) return "attachment-kv";
-  return null;
-}
-async function deriveKey(env) {
-  const raw = (env.DB_CONFIG_KEY || "").trim();
-  if (!raw) return null;
-  const subtle = crypto.subtle;
-  let keyBytes = null;
-  try {
-    const b64 = atob(raw.trim());
-    if (b64.length === 32) {
-      const bytes = new Uint8Array(b64.length);
-      for (let i2 = 0; i2 < b64.length; i2 += 1) bytes[i2] = b64.charCodeAt(i2);
-      keyBytes = bytes.buffer;
-    }
-  } catch {
-  }
-  if (!keyBytes) {
-    keyBytes = await subtle.digest("SHA-256", new TextEncoder().encode(raw));
-  }
-  return subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt", "decrypt"]);
-}
-async function encryptJson(env, data) {
-  const key = await deriveKey(env);
-  if (!key) return null;
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const plaintext = new TextEncoder().encode(JSON.stringify(data));
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv, additionalData: new TextEncoder().encode("nodewarden-db-config:v1") },
-    key,
-    plaintext
-  );
-  const combined = new Uint8Array(iv.length + ciphertext.byteLength);
-  combined.set(iv, 0);
-  combined.set(new Uint8Array(ciphertext), iv.length);
-  let binary = "";
-  combined.forEach((b) => {
-    binary += String.fromCharCode(b);
-  });
-  return `v1:${btoa(binary)}`;
-}
-async function decryptJson(env, payload) {
-  const key = await deriveKey(env);
-  if (!key) return null;
-  if (!payload.startsWith("v1:")) return null;
-  try {
-    const binary = atob(payload.slice(3));
-    const combined = new Uint8Array(binary.length);
-    for (let i2 = 0; i2 < binary.length; i2 += 1) combined[i2] = binary.charCodeAt(i2);
-    const iv = combined.slice(0, 12);
-    const ciphertext = combined.slice(12);
-    const plaintext = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv, additionalData: new TextEncoder().encode("nodewarden-db-config:v1") },
-      key,
-      ciphertext
-    );
-    return JSON.parse(new TextDecoder().decode(plaintext));
-  } catch {
-    return null;
-  }
-}
-async function readStoredText(env, keys) {
-  const store = getConfigStore(env);
-  if (store === "kv") {
-    return await asKvLike(env.SETTINGS_KV).get(keys.kv);
-  }
-  if (store === "attachment-kv") {
-    return await asKvLike(env.ATTACHMENTS_KV).get(keys.kv);
-  }
-  if (store === "r2") {
-    const object = await env.ATTACHMENTS.get(keys.object);
-    if (!object) return null;
-    return await new Response(object.body).text();
-  }
-  return null;
-}
-async function writeStoredText(env, keys, payload) {
-  const store = getConfigStore(env);
-  if (!store) return false;
-  if (store === "kv") {
-    const kv = asKvLike(env.SETTINGS_KV);
-    if (payload) await kv.put(keys.kv, payload);
-    else await kv.delete(keys.kv);
-    return true;
-  }
-  if (store === "attachment-kv") {
-    const kv = asKvLike(env.ATTACHMENTS_KV);
-    if (payload) await kv.put(keys.kv, payload);
-    else await kv.delete(keys.kv);
-    return true;
-  }
-  if (store === "r2") {
-    if (payload) {
-      await env.ATTACHMENTS.put(keys.object, payload, {
-        httpMetadata: { contentType: "application/json" },
-        customMetadata: {
-          purpose: keys.object === SYNC_STATUS_OBJECT_KEY ? "db-sync-status" : keys.object === WATERMARK_OBJECT_KEY ? "db-watermark" : "db-config"
-        }
-      });
-    } else {
-      await env.ATTACHMENTS.delete(keys.object);
-    }
-    return true;
-  }
-  return false;
-}
-async function readStoredPayload(env) {
-  return readStoredText(env, CONFIG_KEYS);
-}
-async function writeStoredPayload(env, payload) {
-  return writeStoredText(env, CONFIG_KEYS, payload);
-}
-var CONFIG_CACHE_TTL_MS = 3e4;
-var payloadCache = /* @__PURE__ */ new WeakMap();
-var cacheEpoch = 0;
-function cacheStoreRef(env) {
-  const store = getConfigStore(env);
-  if (store === "kv") return env.SETTINGS_KV ?? null;
-  if (store === "attachment-kv") return env.ATTACHMENTS_KV ?? null;
-  if (store === "r2") return env.ATTACHMENTS ?? null;
-  return null;
-}
-async function readStoredPayloadCached(env) {
-  const ref = cacheStoreRef(env);
-  const now = Date.now();
-  if (ref) {
-    const hit = payloadCache.get(ref);
-    if (hit && hit.epoch === cacheEpoch && now - hit.at < CONFIG_CACHE_TTL_MS) return hit.payload;
-  }
-  const payload = await readStoredPayload(env);
-  if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: now });
-  return payload;
-}
-var SYNC_CACHE_TTL_MS = 5e3;
-var syncCache = /* @__PURE__ */ new WeakMap();
-function normalizeSyncState(raw) {
-  const input = asRecord(raw);
-  if (!input) return null;
-  const at = Number(input.at ?? 0);
-  if (!Number.isFinite(at) || at <= 0) return null;
-  const cursors = asRecord(input.cursors);
-  const normalizedCursors = {};
-  if (cursors) {
-    for (const [table, cursor] of Object.entries(cursors)) {
-      if (!Array.isArray(cursor)) continue;
-      const values = cursor.filter(
-        (value) => value === null || ["string", "number", "boolean"].includes(typeof value)
-      );
-      if (values.length === cursor.length && values.length > 0) normalizedCursors[table] = values;
-    }
-  }
-  return {
-    at,
-    complete: input.complete === true,
-    fingerprint: typeof input.fingerprint === "string" && input.fingerprint ? input.fingerprint : void 0,
-    truncated: input.truncated === true,
-    rowsWritten: Number(input.rowsWritten ?? 0) || 0,
-    tables: Number(input.tables ?? 0) || 0,
-    sourceId: typeof input.sourceId === "string" && input.sourceId ? input.sourceId : void 0,
-    cursors: Object.keys(normalizedCursors).length > 0 ? normalizedCursors : void 0,
-    mode: input.mode === "overwrite" ? "overwrite" : input.mode === "merge" ? "merge" : void 0,
-    doneTables: normalizeTableNames(input.doneTables),
-    progress: normalizeRunProgress(input.progress)
-  };
-}
-function normalizeTableNames(raw) {
-  if (!Array.isArray(raw)) return void 0;
-  const names = raw.filter((value) => typeof value === "string" && value.length > 0);
-  return names.length > 0 ? [...new Set(names)] : void 0;
-}
-function normalizeRunProgress(raw) {
-  const input = asRecord(raw);
-  if (!input) return void 0;
-  const startedAt = Number(input.startedAt ?? 0);
-  if (!Number.isFinite(startedAt) || startedAt <= 0) return void 0;
-  const percent = Math.max(0, Math.min(100, Math.round(Number(input.percent ?? 0) || 0)));
-  return {
-    startedAt,
-    percent,
-    done: input.done === true,
-    tablesTotal: Math.max(0, Number(input.tablesTotal ?? 0) || 0),
-    tablesDone: Math.max(0, Number(input.tablesDone ?? 0) || 0),
-    rowsCopied: Math.max(0, Number(input.rowsCopied ?? 0) || 0),
-    rowsEstimate: Math.max(0, Number(input.rowsEstimate ?? 0) || 0)
-  };
-}
-async function readSyncStates(env) {
-  const ref = cacheStoreRef(env);
-  const now = Date.now();
-  if (ref) {
-    const hit = syncCache.get(ref);
-    if (hit && hit.epoch === cacheEpoch && now - hit.at < SYNC_CACHE_TTL_MS) return hit.value;
-  }
-  const raw = await readStoredText(env, SYNC_STATUS_KEYS).catch(() => null);
-  const states = {};
-  if (raw) {
-    try {
-      const parsed = asRecord(JSON.parse(raw));
-      if (parsed) {
-        for (const [id, value] of Object.entries(parsed)) {
-          const state2 = normalizeSyncState(value);
-          if (state2) states[id] = state2;
-        }
-      }
-    } catch {
-      console.warn("[db-config] sync status payload is not valid JSON; ignoring it");
-    }
-  }
-  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: now, value: states });
-  return states;
-}
-async function saveNodeSyncState(env, nodeId, state2) {
-  const current = await readSyncStates(env);
-  const next = { ...current, [nodeId]: state2 };
-  const saved = await writeStoredText(env, SYNC_STATUS_KEYS, JSON.stringify(next));
-  const ref = cacheStoreRef(env);
-  if (saved && ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: next });
-  return saved;
-}
-async function deleteNodeSyncStates(env, ids) {
-  if (ids.length === 0) return;
-  const current = await readSyncStates(env);
-  const next = { ...current };
-  let changed = false;
-  for (const id of ids) {
-    if (!(id in next)) continue;
-    delete next[id];
-    changed = true;
-  }
-  if (!changed) return;
-  await writeStoredText(env, SYNC_STATUS_KEYS, JSON.stringify(next));
-  const ref = cacheStoreRef(env);
-  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: next });
-}
-async function clearSyncStates(env) {
-  await writeStoredText(env, SYNC_STATUS_KEYS, null).catch(() => false);
-  const ref = cacheStoreRef(env);
-  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: {} });
-  await clearClusterWatermark(env);
-}
-async function readClusterWatermark(env) {
-  try {
-    const raw = await readStoredText(env, WATERMARK_KEYS);
-    if (!raw) return null;
-    const parsed = asRecord(JSON.parse(raw));
-    if (!parsed) return null;
-    const writeSeq = Number(parsed.writeSeq);
-    if (!Number.isFinite(writeSeq) || writeSeq <= 0) return null;
-    const nodes = {};
-    const rawNodes = asRecord(parsed.nodes);
-    if (rawNodes) {
-      for (const [id, value] of Object.entries(rawNodes)) {
-        const seq = Number(value);
-        if (Number.isFinite(seq) && seq >= 0) nodes[id] = Math.floor(seq);
-      }
-    }
-    return { writeSeq: Math.floor(writeSeq), nodes };
-  } catch {
-    return null;
-  }
-}
-async function saveClusterWatermark(env, snapshot) {
-  return writeStoredText(env, WATERMARK_KEYS, JSON.stringify(snapshot)).catch(() => false);
-}
-async function clearClusterWatermark(env) {
-  await writeStoredText(env, WATERMARK_KEYS, null).catch(() => false);
-}
-function asRecord(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
-}
-function parsePort(raw, fallback) {
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 && n <= 65535 ? Math.floor(n) : fallback;
-}
-function clampInt(raw, fallback, min, max2) {
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(max2, Math.max(min, Math.floor(n)));
-}
-function normalizePolicy(raw) {
-  const input = asRecord(raw) ?? {};
-  const syncMode = input.syncMode === "write-through" ? "write-through" : "native";
-  return {
-    readSplit: input.readSplit === true,
-    syncMode,
-    // Async only makes sense for an app-level replay; ignore it otherwise so a
-    // stale flag cannot silently downgrade a native pair.
-    syncAsync: syncMode === "write-through" && input.syncAsync === true,
-    failoverEnabled: input.failoverEnabled !== false,
-    failureThreshold: clampInt(
-      input.failureThreshold,
-      DEFAULT_CLUSTER_POLICY.failureThreshold,
-      CLUSTER_LIMITS.minFailureThreshold,
-      CLUSTER_LIMITS.maxFailureThreshold
-    ),
-    cooldownMs: clampInt(
-      input.cooldownMs,
-      DEFAULT_CLUSTER_POLICY.cooldownMs,
-      CLUSTER_LIMITS.minCooldownMs,
-      CLUSTER_LIMITS.maxCooldownMs
-    )
-  };
-}
-function normalizeNode(raw, index) {
-  const input = asRecord(raw);
-  if (!input) return null;
-  const host = String(input.host ?? "").trim();
-  if (!host) return null;
-  const id = String(input.id ?? "").trim() || `node-${index + 1}`;
-  return {
-    id,
-    label: String(input.label ?? "").trim() || (index === 0 ? "\u4E3B\u5E93" : `\u8282\u70B9 ${index + 1}`),
-    role: input.role === "replica" ? "replica" : "primary",
-    priority: clampInt(input.priority, index + 1, 1, 99),
-    enabled: input.enabled !== false,
-    host,
-    port: parsePort(input.port, 3306),
-    user: String(input.user ?? "").trim(),
-    password: typeof input.password === "string" ? input.password : "",
-    database: String(input.database ?? "").trim(),
-    ssl: input.ssl !== false,
-    connectionLimit: clampInt(
-      input.connectionLimit,
-      5,
-      CLUSTER_LIMITS.minConnectionLimit,
-      CLUSTER_LIMITS.maxConnectionLimit
-    )
-  };
-}
-function normalizeRuntimeConfig(raw) {
-  const input = asRecord(raw);
-  if (!input) return null;
-  const rawNodes = Array.isArray(input.nodes) ? input.nodes : [];
-  const nodes = rawNodes.map((node, index) => normalizeNode(node, index)).filter((node) => node !== null).slice(0, CLUSTER_LIMITS.maxNodes);
-  if (nodes.length === 0) {
-    const legacy = normalizeNode(
-      {
-        id: "node-1",
-        label: "\u4E3B\u5E93",
-        role: "primary",
-        priority: 1,
-        enabled: true,
-        host: input.host,
-        port: input.port,
-        user: input.user,
-        password: input.password,
-        database: input.database,
-        ssl: input.ssl,
-        connectionLimit: input.connectionLimit
-      },
-      0
-    );
-    if (!legacy) return null;
-    nodes.push(legacy);
-  }
-  const activePrimaries = nodes.filter((node) => node.role === "primary" && node.enabled);
-  if (activePrimaries.length > 1) {
-    activePrimaries.slice().sort((a, b) => a.priority - b.priority).slice(1).forEach((node) => {
-      node.role = "replica";
-    });
-  }
-  return {
-    version: 2,
-    mode: "mysql",
-    nodes,
-    policy: normalizePolicy(input.policy)
-  };
-}
-async function loadRuntimeConfig(env) {
-  const payload = await readStoredPayloadCached(env);
-  if (!payload) return null;
-  const decrypted = await decryptJson(env, payload);
-  return normalizeRuntimeConfig(decrypted);
-}
-async function saveRuntimeConfig(env, config) {
-  const payload = await encryptJson(env, config);
-  if (!payload) return false;
-  const saved = await writeStoredPayload(env, payload);
-  if (saved) {
-    const ref = cacheStoreRef(env);
-    if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: Date.now() });
-  }
-  return saved;
-}
-async function clearRuntimeConfig(env) {
-  const saved = await writeStoredPayload(env, null);
-  if (saved) {
-    const ref = cacheStoreRef(env);
-    if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload: null, at: Date.now() });
-  }
-  return saved;
-}
-function parseEnvFlag(raw, fallback) {
-  const value = String(raw ?? "").trim().toLowerCase();
-  if (!value) return fallback;
-  return value !== "false" && value !== "0" && value !== "no" && value !== "off";
-}
-function resolveDbConfigFromEnv(env) {
-  const host = (env.DB_HOST || "").trim();
-  if (!host) return null;
-  return {
-    mode: "mysql",
-    source: "env",
-    host,
-    port: parsePort(env.DB_PORT, 3306),
-    user: (env.DB_USER || "").trim(),
-    password: env.DB_PASSWORD || "",
-    database: (env.DB_NAME || "").trim(),
-    ssl: parseEnvFlag(env.DB_SSL, true),
-    connectionLimit: parsePort(env.DB_CONN_LIMIT, 5)
-  };
-}
-function resolveStandbyFromEnv(env) {
-  const primary = resolveDbConfigFromEnv(env);
-  if (!primary) return null;
-  const database = (env.DB_STANDBY_NAME || "").trim();
-  if (!database) return null;
-  const standby = {
-    mode: "mysql",
-    source: "env",
-    host: (env.DB_STANDBY_HOST || "").trim() || primary.host,
-    port: parsePort(env.DB_STANDBY_PORT ?? env.DB_PORT, primary.port),
-    user: (env.DB_STANDBY_USER || "").trim() || primary.user,
-    password: env.DB_STANDBY_PASSWORD || primary.password,
-    database,
-    ssl: parseEnvFlag(env.DB_STANDBY_SSL, primary.ssl),
-    connectionLimit: parsePort(env.DB_STANDBY_CONN_LIMIT, primary.connectionLimit)
-  };
-  if (standby.host === primary.host && standby.port === primary.port && standby.database === primary.database) {
-    console.warn(
-      `[db-config] DB_STANDBY_NAME points at the primary database (${primary.host}:${primary.port}/${primary.database}); ignoring the standby entry`
-    );
-    return null;
-  }
-  return standby;
-}
-function toResolvedNodes(config, syncStates) {
-  const writeThrough = config.policy.syncMode === "write-through";
-  return config.nodes.filter((node) => node.enabled).map((node) => {
-    const recorded = syncStates[node.id];
-    const syncStatus = recorded && recorded.fingerprint && recorded.fingerprint !== nodeFingerprint(node) ? void 0 : recorded;
-    return {
-      ...node,
-      source: "runtime",
-      syncStatus,
-      // In native mode the database replicates itself: whether a standby is
-      // filled is not something the app can judge. In write-through it is, and
-      // a replica that never completed a sync must not become a failover
-      // target (B-4).
-      syncReady: node.role === "primary" || !writeThrough ? void 0 : syncStatus?.complete === true
-    };
-  }).sort((a, b) => {
-    if (a.role !== b.role) return a.role === "primary" ? -1 : 1;
-    return a.priority - b.priority;
-  });
-}
-async function resolveStoredCluster(env) {
-  const runtime2 = await loadRuntimeConfig(env);
-  if (!runtime2) return null;
-  const syncStates = runtime2.policy.syncMode === "write-through" ? await readSyncStates(env) : {};
-  return {
-    mode: "mysql",
-    source: "runtime",
-    nodes: toResolvedNodes(runtime2, syncStates),
-    policy: runtime2.policy
-  };
-}
-async function resolveDbCluster(env) {
-  const fromEnv = resolveDbConfigFromEnv(env);
-  if (fromEnv) {
-    const standby = resolveStandbyFromEnv(env);
-    const nodes = [
-      {
-        id: "env-primary",
-        label: "\u73AF\u5883\u53D8\u91CF\u4E3B\u5E93",
-        role: "primary",
-        priority: 1,
-        enabled: true,
-        host: fromEnv.host,
-        port: fromEnv.port,
-        user: fromEnv.user,
-        password: fromEnv.password,
-        database: fromEnv.database,
-        ssl: fromEnv.ssl,
-        connectionLimit: fromEnv.connectionLimit,
-        source: "env"
-      }
-    ];
-    if (standby) {
-      nodes.push({
-        id: "env-standby",
-        label: "\u73AF\u5883\u53D8\u91CF\u526F\u5E93\uFF08\u624B\u52A8\u540C\u6B65\uFF09",
-        role: "replica",
-        priority: 2,
-        enabled: true,
-        host: standby.host,
-        port: standby.port,
-        user: standby.user,
-        password: standby.password,
-        database: standby.database,
-        ssl: standby.ssl,
-        connectionLimit: standby.connectionLimit,
-        source: "env"
-      });
-    }
-    return {
-      mode: "mysql",
-      source: "env",
-      nodes,
-      policy: standby ? { ...DEFAULT_CLUSTER_POLICY, failoverEnabled: false } : { ...DEFAULT_CLUSTER_POLICY }
-    };
-  }
-  const runtime2 = await loadRuntimeConfig(env);
-  if (runtime2) {
-    const syncStates = runtime2.policy.syncMode === "write-through" ? await readSyncStates(env) : {};
-    const nodes = toResolvedNodes(runtime2, syncStates);
-    if (nodes.length > 0) {
-      return { mode: "mysql", source: "runtime", nodes, policy: runtime2.policy };
-    }
-    return {
-      mode: "d1",
-      source: "d1",
-      nodes: [],
-      policy: runtime2.policy,
-      unavailableReason: runtime2.nodes.length > 0 ? `\u5DF2\u4FDD\u5B58\u7684 MySQL \u96C6\u7FA4\u914D\u7F6E\u4E2D\u6709 ${runtime2.nodes.length} \u4E2A\u8282\u70B9\uFF0C\u4F46\u5168\u90E8\u5904\u4E8E\u300C\u505C\u7528\u300D\u72B6\u6001` : "\u5DF2\u4FDD\u5B58\u7684 MySQL \u96C6\u7FA4\u914D\u7F6E\u91CC\u6CA1\u6709\u4EFB\u4F55\u8282\u70B9"
-    };
-  }
-  return { mode: "d1", source: "d1", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } };
-}
-function primaryNodeOf(cluster) {
-  return cluster.nodes.find((node) => node.role === "primary") ?? cluster.nodes[0] ?? null;
-}
-async function resolveDbConfig(env) {
-  const cluster = await resolveDbCluster(env);
-  const primary = primaryNodeOf(cluster);
-  if (cluster.mode === "mysql" && primary) {
-    return {
-      mode: "mysql",
-      source: cluster.source,
-      host: primary.host,
-      port: primary.port,
-      user: primary.user,
-      password: primary.password,
-      database: primary.database,
-      ssl: primary.ssl,
-      connectionLimit: primary.connectionLimit
-    };
-  }
-  return {
-    mode: "d1",
-    source: "d1",
-    host: "",
-    port: 3306,
-    user: "",
-    password: "",
-    database: "",
-    ssl: false,
-    connectionLimit: 5
-  };
-}
-function maskNode(node) {
-  return {
-    id: node.id,
-    label: node.label,
-    role: node.role,
-    priority: node.priority,
-    enabled: node.enabled,
-    host: node.host,
-    port: node.port,
-    user: node.user,
-    database: node.database,
-    ssl: node.ssl,
-    connectionLimit: node.connectionLimit,
-    passwordSet: !!node.password,
-    syncStatus: node.syncStatus,
-    syncReady: node.syncReady
-  };
-}
-function maskCluster(cluster) {
-  return {
-    mode: cluster.mode,
-    source: cluster.source,
-    nodes: cluster.nodes.map(maskNode),
-    policy: cluster.policy,
-    unavailableReason: cluster.unavailableReason
-  };
-}
-function maskConfig(config) {
-  return {
-    mode: config.mode,
-    source: config.source,
-    host: config.host,
-    port: config.port,
-    user: config.user,
-    database: config.database,
-    ssl: config.ssl,
-    connectionLimit: config.connectionLimit,
-    passwordSet: !!config.password
-  };
-}
-function hasConfigStore(env) {
-  return getConfigStore(env) !== null;
-}
-
 // src/services/db-cluster.ts
 init_sql_hints();
 init_storage_mysql();
@@ -38238,7 +38334,7 @@ async function testMySqlConnection(config, env) {
       errorKind: kind
     };
   } finally {
-    await db.close();
+    await closeQuietly(db, "probe");
   }
 }
 async function handleAdminGetDbConfig(request, env, actorUser) {
@@ -38315,7 +38411,7 @@ async function bootstrapSchemaOnCandidate(config) {
     console.error("[db-config] schema bootstrap on candidate database failed:", initError);
     return { ok: false, error: message };
   } finally {
-    await probe.close();
+    await closeQuietly(probe, "schema bootstrap");
   }
 }
 async function hasUserRows(node) {
@@ -38335,11 +38431,18 @@ async function hasUserRows(node) {
   } catch {
     return null;
   } finally {
-    await db.close();
+    await closeQuietly(db, "probe");
   }
 }
 function clearingWouldLeaveNoDatabase(env) {
   return !resolveDbConfigFromEnv(env) && !env.DB;
+}
+async function closeQuietly(pool, label) {
+  try {
+    await pool.close();
+  } catch (error) {
+    console.warn(`[db-config] closing the ${label} pool failed:`, error);
+  }
 }
 function wantsForce(request) {
   try {
@@ -38519,11 +38622,11 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
   const requestedBudget = Number(body.budgetMs);
   const budgetMs = Number.isFinite(requestedBudget) && requestedBudget > 0 ? Math.min(3e4, Math.max(3e3, Math.round(requestedBudget))) : null;
   const envPrimary = resolveDbConfigFromEnv(env);
-  if (envPrimary && !resolveStandbyFromEnv(env)) {
+  if (envPrimary && resolveStandbysFromEnv(env).length === 0) {
     const stored = await resolveStoredCluster(env);
     const savedStandbys = (stored?.nodes ?? []).filter((node) => node.id !== "env-primary").length;
     return errorResponse(
-      "\u5F53\u524D\u751F\u6548\u7684\u662F\u73AF\u5883\u53D8\u91CF\u91CC\u7684\u90A3\u4E00\u4E2A\u5E93\uFF08\u5355\u8282\u70B9\uFF09\uFF0C\u6CA1\u6709\u53EF\u540C\u6B65\u7684\u76EE\u6807\u5E93\u3002\u8981\u540C\u6B65\u5230\u526F\u5E93\uFF0C\u8BF7\u7ED9\u51FD\u6570\u52A0\u4E0A DB_STANDBY_NAME\uFF08\u526F\u5E93\u7684\u5E93\u540D\uFF09\uFF1B\u540C\u5B9E\u4F8B\u65F6\u5176\u5B83\u53C2\u6570\u4F1A\u6CBF\u7528 DB_HOST / DB_PORT / DB_USER / DB_PASSWORD\u3002" + (savedStandbys > 0 ? `\u540E\u53F0\u5DF2\u4FDD\u5B58\u7684 ${savedStandbys} \u4E2A\u526F\u5E93\u8282\u70B9\u88AB DB_* \u73AF\u5883\u53D8\u91CF\u6321\u4F4F\u4E86\uFF0C\u4E0D\u4F1A\u53C2\u4E0E\u540C\u6B65\u3002` : ""),
+      "\u5F53\u524D\u751F\u6548\u7684\u662F\u73AF\u5883\u53D8\u91CF\u91CC\u7684\u90A3\u4E00\u4E2A\u5E93\uFF08\u5355\u8282\u70B9\uFF09\uFF0C\u6CA1\u6709\u53EF\u540C\u6B65\u7684\u76EE\u6807\u5E93\u3002\u8981\u540C\u6B65\u5230\u526F\u5E93\uFF0C\u8BF7\u7ED9\u51FD\u6570\u52A0\u4E0A DB_STANDBY_NODES\uFF0C\u503C\u662F\u4E00\u4E2A\u526F\u5E93\u6E05\u5355\uFF08\u9017\u53F7\u5206\u9694\uFF0C\u6570\u91CF\u4E0D\u9650\uFF09\uFF1A\u540C\u5B9E\u4F8B\u7684\u5E93\u53EA\u5199\u5E93\u540D\uFF0C\u5982 DB_STANDBY_NODES=\u6863\u6848\u5E93,\u79BB\u7EBF\u5E93\uFF1B\u5728\u53E6\u4E00\u53F0\u670D\u52A1\u5668\u7684\u5E93\u5199\u5B8C\u6574\u8FDE\u63A5\u4E32\uFF0C\u5982 DB_STANDBY_NODES=mysql://user:pass@10.0.0.5:3306/nodewarden_bak\u3002" + (savedStandbys > 0 ? `\u540E\u53F0\u5DF2\u4FDD\u5B58\u7684 ${savedStandbys} \u4E2A\u526F\u5E93\u8282\u70B9\u88AB DB_* \u73AF\u5883\u53D8\u91CF\u6321\u4F4F\u4E86\uFF0C\u4E0D\u4F1A\u53C2\u4E0E\u540C\u6B65\u3002` : ""),
       409
     );
   }
@@ -38728,7 +38831,7 @@ async function probeWritability(node) {
     console.warn("[db-config] could not read the read_only flag:", error);
     return "unknown";
   } finally {
-    await db.close();
+    await closeQuietly(db, "probe");
   }
 }
 async function handleAdminPromoteDbNode(request, env, actorUser) {
@@ -38737,9 +38840,12 @@ async function handleAdminPromoteDbNode(request, env, actorUser) {
   const forced = wantsForce(request) || body.force === true;
   if (!targetId) return errorResponse("\u7F3A\u5C11 nodeId\uFF1A\u8BF7\u6307\u5B9A\u8981\u63D0\u5347\u4E3A\u4E3B\u5E93\u7684\u8282\u70B9\u3002", 400);
   if (resolveDbConfigFromEnv(env)) {
-    const standby = resolveStandbyFromEnv(env);
+    const standbys = resolveStandbysFromEnv(env);
+    const pickedIndex = standbys.findIndex((_, index) => `env-standby-${index + 1}` === targetId);
+    const picked = pickedIndex >= 0 ? standbys[pickedIndex] : null;
+    const onSameServer = picked ? picked.host === resolveDbConfigFromEnv(env)?.host : false;
     return errorResponse(
-      "\u4E3B\u5E93\u7531\u73AF\u5883\u53D8\u91CF\u51B3\u5B9A\uFF0C\u9875\u9762\u4E0A\u7684\u5207\u6362\u4E0D\u4F1A\u751F\u6548\u3002" + (standby ? `\u8981\u5207\u6362\u5230\u526F\u5E93\u300C${standby.database}\u300D\uFF0C\u8BF7\u628A DB_NAME \u6539\u6210\u5B83\u3001\u628A DB_STANDBY_NAME \u6539\u6210\u73B0\u5728\u7684\u5E93\uFF0C\u518D\u91CD\u542F\u3002` : "\u8981\u6362\u4E3B\u5E93\uFF0C\u8BF7\u6539 DB_HOST / DB_NAME \u540E\u91CD\u542F\uFF1B\u60F3\u5148\u6709\u4E00\u4E2A\u53EF\u5207\u6362\u7684\u526F\u5E93\uFF0C\u52A0 DB_STANDBY_NAME\u3002"),
+      "\u4E3B\u5E93\u7531\u73AF\u5883\u53D8\u91CF\u51B3\u5B9A\uFF0C\u9875\u9762\u4E0A\u7684\u5207\u6362\u4E0D\u4F1A\u751F\u6548\u3002" + (picked ? `\u8981\u628A\u5199\u5165\u5207\u5230\u300C${picked.database}\u300D\uFF1A\u628A DB_NAME \u6539\u6210\u5B83\uFF0C\u5E76\u628A\u5B83\u4ECE DB_STANDBY_NODES \u91CC\u5220\u6389` + (onSameServer ? "\uFF1B\u540C\u4E00\u53F0\u670D\u52A1\u5668\u4E0A DB_HOST / DB_PORT \u4E0D\u7528\u52A8" : "\uFF1B\u5B83\u539F\u6765\u5728\u53E6\u4E00\u53F0\u670D\u52A1\u5668\uFF0C\u6240\u4EE5 DB_HOST / DB_PORT / DB_USER / DB_PASSWORD \u4E5F\u8981\u6539\u6210\u5B83\u7684") + "\uFF0C\u91CD\u542F\u5373\u53EF\u3002" : "\u8981\u6362\u4E3B\u5E93\uFF0C\u8BF7\u6539 DB_HOST / DB_NAME \u540E\u91CD\u542F\uFF1B\u60F3\u5148\u6709\u51E0\u4E2A\u53EF\u540C\u6B65\u7684\u526F\u5E93\uFF0C\u52A0 DB_STANDBY_NODES=\u5E93\u540D1,\u5E93\u540D2\u3002"),
       409
     );
   }
@@ -50725,10 +50831,12 @@ function buildNodeEnv() {
     DB_NAME: process.env.DB_NAME,
     DB_SSL: process.env.DB_SSL,
     DB_CONN_LIMIT: process.env.DB_CONN_LIMIT,
-    // Optional env-declared standby. Listed explicitly because this object is a
+    // Optional env-declared standbys. Listed explicitly because this object is a
     // whitelist: a variable that is not copied here does not exist as far as
-    // src/ is concerned, which is exactly how "I set DB_STANDBY_NAME and nothing
-    // happened" would look.
+    // src/ is concerned, which is exactly how "I set DB_STANDBY_NODES and
+    // nothing happened" would look.
+    DB_STANDBY_NODES: process.env.DB_STANDBY_NODES,
+    DB_STANDBYS: process.env.DB_STANDBYS,
     DB_STANDBY_NAME: process.env.DB_STANDBY_NAME,
     DB_STANDBY_HOST: process.env.DB_STANDBY_HOST,
     DB_STANDBY_PORT: process.env.DB_STANDBY_PORT,
@@ -50965,6 +51073,12 @@ server.listen(PORT, () => {
   console.log(`  attachments:    ${runtime.attachmentsDir}`);
   console.log(`  web vault:      ${runtime.distDir}`);
   console.log(`  database:       ${process.env.DB_HOST ? `MySQL ${process.env.DB_HOST}:${process.env.DB_PORT || 3306}/${process.env.DB_NAME || ""}` : "configured via env DB_* or admin UI (/admin/database)"}`);
+  const standbys = resolveStandbysFromEnv(buildNodeEnv());
+  if (standbys.length > 0) {
+    console.log(
+      `  standbys:       ${standbys.length} \xB7 ${standbys.map((node) => `${node.database}@${node.host}:${node.port}`).join(", ")}`
+    );
+  }
   console.log(`  cron:           POST /internal/cron/backup (x-cron-secret)${cronSecret ? "" : " \u2014 CRON_SECRET not set, endpoint disabled"}`);
   if (isDataDirEphemeral(runtime.dataDir)) {
     console.warn(

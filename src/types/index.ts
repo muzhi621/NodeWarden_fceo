@@ -27,10 +27,15 @@ export interface Env {
   DB_NAME?: string;
   DB_SSL?: string;
   DB_CONN_LIMIT?: string;
-  // Optional standby, declared in env instead of the admin UI. Only the schema
-  // name is required: host/port/user/password/ssl fall back to the primary,
-  // which is what a second schema on the same instance needs.
+  // Optional standbys, declared in env instead of the admin UI. The list holds
+  // any number of entries; each one is either a bare schema name (inheriting the
+  // connection below) or a full mysql:// URL for a schema on another server.
+  DB_STANDBY_NODES?: string;
+  /** @deprecated Alias of DB_STANDBY_NODES, still read for older deployments. */
+  DB_STANDBYS?: string;
+  /** @deprecated Singular alias of DB_STANDBY_NODES, still read. */
   DB_STANDBY_NAME?: string;
+  // Defaults inherited by bare entries in the list above.
   DB_STANDBY_HOST?: string;
   DB_STANDBY_PORT?: string;
   DB_STANDBY_USER?: string;

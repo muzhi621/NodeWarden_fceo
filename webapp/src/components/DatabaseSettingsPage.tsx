@@ -606,15 +606,16 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
   /** Everything the page edits is decided by env vars in this mode. */
   const envMode = status?.cluster.source === 'env';
   /**
-   * A standby that exists only because `DB_STANDBY_NAME` is set.
+   * Standbys that exist only because `DB_STANDBY_NODES` is set.
    *
    * `native` normally means "the database replicates itself, the app must not
    * write to the copy", which is why the sync button is hidden outside
-   * write-through. An env-described standby is the opposite: it is a plain
-   * schema that nothing else ever fills, so a manual copy is the only way it can
-   * become a usable backup.
+   * write-through. Env-described standbys are the opposite: plain schemas that
+   * nothing else ever fills, so a manual copy is the only way they can become a
+   * usable backup.
    */
-  const envStandby = envMode && nodes.some((node) => node.role === 'replica');
+  const envStandbyCount = envMode ? nodes.filter((node) => node.role === 'replica').length : 0;
+  const envStandby = envStandbyCount > 0;
   const canManualSync = policy.syncMode === 'write-through' || envStandby;
 
   /**
@@ -719,8 +720,8 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
                 ? `已保存的 ${shadowedStored.nodes.length} 个节点见下方「已保存的集群配置」，配置没有丢失，只是被环境变量挡住了。`
                 : ''}
               {envStandby
-                ? ' 副库已由 DB_STANDBY_NAME 声明，本页可直接「同步数据到副库」。'
-                : ' 只想要一个可同步的副库，不需要删除环境变量：加一个 DB_STANDBY_NAME 即可。'}
+                ? ` 已由 DB_STANDBY_NODES 声明 ${envStandbyCount} 个副库，本页可直接「同步数据到副库」。`
+                : ' 只想要可同步的副库，不需要删除环境变量：加 DB_STANDBY_NODES=库名1,库名2 即可（数量不限）。'}
             </span>
           </p>
         )}
@@ -756,7 +757,9 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
               重启后本页会自动切到这份配置，附件与账号数据都不需要重搬。
               <br />
               只想让副库能同步、并不想改部署方式的话，不用清环境变量：加一个
-              <code>DB_STANDBY_NAME</code>（副库库名）就是这种部署下的双节点模式，其余参数沿用主库。
+              <code>DB_STANDBY_NODES</code>（副库清单，逗号分隔、数量不限）就是这种部署下的多节点模式：
+              <code>DB_STANDBY_NODES=nodewarden-bak,nodewarden-dr</code>，同实例只写库名、其余参数沿用主库；
+              副库在另一台服务器时写成 <code>mysql://用户:密码@主机:端口/库名</code> 混在同一个清单里。
             </p>
             <p className="db-inline-hint">
               在此之前，上方编辑区里的节点是从环境变量还原出来的那一台，
@@ -789,7 +792,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
               type="button"
               className="btn btn-secondary small"
               disabled={occupied || envMode || nodes.length >= (status?.limits?.maxNodes ?? 8)}
-              title={envMode ? '节点由环境变量决定：请添加 DB_STANDBY_NAME 等变量，而不是在这里加节点' : undefined}
+              title={envMode ? '节点由环境变量决定：改 DB_STANDBY_NODES 清单来增删副库，不能在这里加节点' : undefined}
               onClick={addNode}
             >
               <Plus size={14} className="btn-icon" /> 添加节点
@@ -858,7 +861,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
                           disabled={occupied || dirty || !stored || envMode}
                           title={
                             envMode
-                              ? '主库由环境变量决定：把 DB_NAME 与 DB_STANDBY_NAME 互换后重启，才是真正的主副切换'
+                              ? '主库由环境变量决定：要把写入切到某个副库，请把 DB_NAME 改成它、并把它从 DB_STANDBY_NODES 里删掉后重启'
                               : dirty
                                 ? '有未保存的修改：先保存，再做主库切换'
                                 : !stored
@@ -1055,7 +1058,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
                 !canManualSync
                   ? '仅「应用层实时双写」需要手动同步：数据库自身复制由数据库负责'
                   : envStandby
-                    ? '把环境变量主库的数据补到 DB_STANDBY_NAME 指向的副库；默认只插入缺失行，不会覆盖已有数据'
+                    ? `把环境变量主库的数据补到 DB_STANDBY_NODES 里的 ${envStandbyCount} 个副库；默认只插入缺失行，不会覆盖已有数据`
                     : '把源节点的数据补到副库；默认只插入缺失行，不会覆盖已有的更新'
               }
               onClick={() => setConfirmSync(true)}
@@ -1152,7 +1155,7 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
         {envMode && (
           <p className="db-inline-hint">
             当前生效的配置来自环境变量：节点与策略都由环境变量决定，下面这些选项改了也不会生效
-            （在本页保存只会覆盖「已保存的集群配置」）。副库由 <code>DB_STANDBY_NAME</code> 声明时，
+            （在本页保存只会覆盖「已保存的集群配置」）。副库由 <code>DB_STANDBY_NODES</code> 声明时，
             自动切换与读分摊固定关闭——副库只是手动同步出来的备份，主库抖动时不能自动接管。
           </p>
         )}
