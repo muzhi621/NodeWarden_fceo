@@ -112,6 +112,8 @@ export interface ClusterSyncResult {
   rowsEstimate: number;
   /** Tables left alone because an earlier run of the same copy completed them. */
   skipped: string[];
+  /** Tables that did not exist on the target and were created from the source DDL. */
+  createdTables: string[];
 }
 
 export type SyncCopyMode = 'merge' | 'overwrite';
@@ -155,6 +157,15 @@ export interface SyncOptions {
    * explicit; omitting it keeps the old `DATABASE()` behaviour.
    */
   sourceSchema?: string;
+  /**
+   * Schema the *target* tables live in, for the same reason as `sourceSchema`.
+   *
+   * Used by `createMissingTables`: a standby is a plain MySQL schema nothing else
+   * ever maintains, so the tables the application creates lazily at runtime
+   * (`rate_limit_buckets` is the one that bites) simply do not exist there, and
+   * every copy of them fails with 1146 — see `createMissingTables`.
+   */
+  targetSchema?: string;
 }
 
 /**
@@ -234,6 +245,88 @@ export async function countBaseTables(db: SyncDatabase, schema?: string): Promis
   } catch {
     return null;
   }
+}
+
+/**
+ * `SHOW CREATE TABLE` → the exact DDL the source uses, or null when unavailable.
+ *
+ * The column position is not fixed across servers (`Table` / `Create Table`), so
+ * the statement is picked by shape rather than by index.
+ */
+async function readCreateTable(db: SyncDatabase, table: string): Promise<string | null> {
+  try {
+    const result = await db.prepare(`SHOW CREATE TABLE ${quoteIdent(table)}`).all<Record<string, unknown>>();
+    const row = (result.results ?? [])[0];
+    if (!row) return null;
+    for (const value of Object.values(row)) {
+      if (typeof value === 'string' && /^CREATE TABLE/i.test(value.trim())) return value.trim();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export interface MissingTableFix {
+  /** Tables created on the target from the source's own DDL. */
+  created: string[];
+  /** Tables that are missing *and* could not be created, with the reason. */
+  failed: Array<{ table: string; error: string }>;
+}
+
+/**
+ * Create, on the target, every table the source has and the target does not.
+ *
+ * This exists because a standby is not a database the application has ever run
+ * against: the schema is whatever a `CREATE TABLE IF NOT EXISTS` bootstrap made
+ * at the time it was attached, and the application also creates a few tables
+ * *lazily* the first time it needs them (`rate_limit_buckets`). Those exist on
+ * the primary because the app ran there; on the standby nobody ever runs, so the
+ * table is absent forever, every copy of it answers `1146 Table doesn't exist`,
+ * and the run ends "19/20 · 99%" every single time — the standby can never be
+ * finished, and the one table it is missing is never mentioned.
+ *
+ * Building the table from the source's own DDL (rather than from this build's
+ * idea of the schema) keeps the two sides in step even when the source has
+ * columns a newer or older release does not know about. `IF NOT EXISTS` plus a
+ * final `IF NOT EXISTS` in the statement make the whole step idempotent: the
+ * common case costs one `information_schema` query and nothing else.
+ */
+export async function createMissingTables(
+  source: SyncDatabase,
+  target: SyncDatabase,
+  tables: string[],
+  schemas: { sourceSchema?: string; targetSchema?: string } = {}
+): Promise<MissingTableFix> {
+  let targetTables: string[];
+  try {
+    targetTables = await discoverTables(target, schemas.targetSchema);
+  } catch (error) {
+    // Cannot tell what is there, so do not guess: the copy itself will report the
+    // per-table failure, which is more useful than a blind `CREATE`.
+    return { created: [], failed: [] };
+  }
+  const present = new Set(targetTables);
+  const missing = tables.filter((table) => !present.has(table));
+  if (missing.length === 0) return { created: [], failed: [] };
+
+  const created: string[] = [];
+  const failed: Array<{ table: string; error: string }> = [];
+  for (const table of missing) {
+    const ddl = await readCreateTable(source, table);
+    if (!ddl) {
+      failed.push({ table, error: '主库没有返回该表的建表语句（SHOW CREATE TABLE 失败），无法在副库自动建表。' });
+      continue;
+    }
+    const statement = ddl.replace(/^CREATE\s+TABLE\s+/i, 'CREATE TABLE IF NOT EXISTS ');
+    try {
+      await target.prepare(statement).run();
+      created.push(table);
+    } catch (error) {
+      failed.push({ table, error: errorMessage(error) });
+    }
+  }
+  return { created, failed };
 }
 
 /**
@@ -535,6 +628,7 @@ export async function syncDatabase(
       tablesDone: 0,
       rowsEstimate: 0,
       skipped: [],
+      createdTables: [],
     };
   }
 
@@ -570,6 +664,7 @@ export async function syncDatabase(
       tablesDone: 0,
       rowsEstimate: 0,
       skipped: [],
+      createdTables: [],
     };
   }
   // Tables a previous round already finished. Skipping them keeps a chunked run
@@ -578,6 +673,21 @@ export async function syncDatabase(
   const skip = new Set(options.skipTables ?? []);
   const skipped = tables.filter((table) => skip.has(table));
   const pending = tables.filter((table) => !skip.has(table));
+
+  // Before copying anything: a table the standby does not have cannot be written
+  // to, and the run would end on a per-table 1146 that reads like a data problem.
+  // Checked even for skipped tables — the list is what the *run* is meant to
+  // cover, and a missing table is missing whether or not its rows were copied in
+  // an earlier slice.
+  const schemaFix = await createMissingTables(source, target, tables, {
+    sourceSchema: options.sourceSchema,
+    targetSchema: options.targetSchema,
+  });
+  // A table whose creation failed is still attempted: the copy either works
+  // anyway (the table exists with a different definition) or it reports its own,
+  // more specific error. The DDL failure is appended to that error instead of
+  // replacing it, so the operator sees both halves of the story.
+  const createError = new Map(schemaFix.failed.map((entry) => [entry.table, entry.error]));
 
   const results: TableSyncResult[] = [];
   for (const table of pending) {
@@ -597,6 +707,13 @@ export async function syncDatabase(
     const tableResult = await syncTable(source, target, table, { ...options, deadline }, Date.now());
     const estimate = estimates[table];
     if (estimate !== undefined) tableResult.rowsEstimate = estimate;
+    const ddlError = createError.get(table);
+    // Only when the copy failed too: if the rows landed, the table was there
+    // after all (a `CREATE` denied by privileges on an existing table) and the
+    // run must not be reported as broken.
+    if (ddlError && tableResult.error) {
+      tableResult.error = `${tableResult.error}；副库缺少该表且自动建表失败：${ddlError}`;
+    }
     results.push(tableResult);
   }
 
@@ -613,9 +730,30 @@ export async function syncDatabase(
   // done here; re-verifying it would defeat the point of skipping.
   const tablesDone = skipped.length + results.filter((entry) => !entry.truncated && !entry.error).length;
   const rowsEstimate = tables.reduce((sum, table) => sum + (estimates[table] ?? 0), 0);
+  // "Every table was walked to the end, and every row we pushed is there."
+  //
+  // It is deliberately *not* "the two sides have the same number of rows". That
+  // was the old rule, and against a live source it is unattainable: this run
+  // itself writes an audit row on the primary the moment it finishes, and any
+  // sign-in during the copy adds more, so a run that had genuinely finished
+  // reported `complete: false` forever and the page sat at 99% with 20/20
+  // tables. Parity is still measured and reported per table (`countMatches`,
+  // `sourceRows`, `targetRows`).
+  //
+  // What *is* a failure is the opposite gap: the target holding fewer rows than
+  // were pushed to it — that is a silently dropped write, not a source that kept
+  // growing, and it must keep the run unfinished.
+  const droppedRows = results.filter(
+    (entry) =>
+      !entry.truncated &&
+      !entry.error &&
+      entry.targetRows !== undefined &&
+      entry.targetRows < entry.rowsWritten
+  );
+  const complete = ok && results.every((entry) => !entry.truncated) && droppedRows.length === 0;
   return {
     ok,
-    complete: ok && results.every((entry) => !entry.truncated && entry.countMatches !== false),
+    complete,
     tables: results,
     rowsRead,
     rowsWritten,
@@ -627,6 +765,7 @@ export async function syncDatabase(
     tablesDone,
     rowsEstimate,
     skipped,
+    createdTables: schemaFix.created,
   };
 }
 

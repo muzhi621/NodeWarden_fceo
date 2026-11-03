@@ -265,7 +265,7 @@ export interface DbTargetSyncReport {
   id: string;
   label: string;
   ok: boolean;
-  /** Every table finished and the row counts agreed. */
+  /** Every table walked to the end; row counts are reported separately. */
   complete: boolean;
   rowsRead: number;
   rowsWritten: number;
@@ -278,7 +278,11 @@ export interface DbTargetSyncReport {
   failedTables?: Array<{ table: string; error: string }>;
   /** Tables this slice did not reach; the next slice continues with them. */
   pendingTables?: string[];
+  /** Tables the standby was missing and the server created before copying. */
+  createdTables?: string[];
   countsMismatch?: string[];
+  /** Rows on the source that the copy has not reached yet (it kept growing). */
+  behindRows?: number;
   orphanRows?: number;
   /** How far the run got on this node, including earlier chunks. */
   progress?: DbSyncProgress;

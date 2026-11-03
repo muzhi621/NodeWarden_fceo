@@ -869,7 +869,7 @@ interface TargetSyncReport {
   id: string;
   label: string;
   ok: boolean;
-  /** Every table walked to the end and the row counts agreed. */
+  /** Every table walked to the end (row counts are reported separately). */
   complete: boolean;
   rowsRead: number;
   /** Rows pushed to the target (`merge` mode re-sends rows it already has). */
@@ -883,8 +883,12 @@ interface TargetSyncReport {
   failedTables?: Array<{ table: string; error: string }>;
   /** Tables this slice did not reach; the next slice continues with them. */
   pendingTables?: string[];
+  /** Tables missing on the target that were created from the source's DDL. */
+  createdTables?: string[];
   /** Tables whose row count differs between source and target (S1). */
   countsMismatch?: string[];
+  /** Rows present on the source but not (yet) on the target. */
+  behindRows?: number;
   /** Rows present on the target but not on the source (S2). */
   orphanRows?: number;
   /** How far the whole run has got, including previous chunks. */
@@ -1160,12 +1164,35 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       // when the connection has no default database, which used to look like a
       // finished sync of zero tables.
       sourceSchema: cluster.nodes.find((node) => node.id === source.id)?.database || undefined,
+      targetSchema: spec?.database || undefined,
     });
+
+    if (result.createdTables.length > 0) {
+      // A standby that never ran the app is missing the tables it creates lazily
+      // (`rate_limit_buckets`). Creating them is what turns a permanent 19/20
+      // into a finished run, so say it happened.
+      console.info(
+        '[db-config] created tables missing on the standby before copying:',
+        spec?.label ?? target.id,
+        result.createdTables.join(', ')
+      );
+    }
 
     const complete = result.ok && result.complete;
     const countsMismatch = result.tables
       .filter((table) => table.countMatches === false)
       .map((table) => table.table);
+    // A source that is being written to during the copy will always be a few rows
+    // ahead of the copy. That is a snapshot boundary, not a failure, and the page
+    // says so; `behindRows` is what makes the size of the gap concrete.
+    const behindRows = result.tables.reduce(
+      (sum, table) =>
+        sum +
+        (table.sourceRows !== undefined && table.targetRows !== undefined && table.sourceRows > table.targetRows
+          ? table.sourceRows - table.targetRows
+          : 0),
+      0
+    );
     const orphanRows = result.tables.reduce((sum, table) => sum + (table.orphanRows ?? 0), 0);
 
     // Progress is cumulative across the chunks of one run, so the bar keeps its
@@ -1219,7 +1246,9 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       tables: result.tables,
       failedTables: failedTables.length > 0 ? failedTables : undefined,
       pendingTables: pendingTables.length > 0 ? pendingTables : undefined,
+      createdTables: result.createdTables.length > 0 ? result.createdTables : undefined,
       countsMismatch: countsMismatch.length > 0 ? countsMismatch : undefined,
+      behindRows: behindRows > 0 ? behindRows : undefined,
       orphanRows: orphanRows > 0 ? orphanRows : undefined,
       progress,
     });

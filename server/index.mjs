@@ -29997,6 +29997,12 @@ async function resolveDbCluster(env) {
   const fromEnv = resolveDbConfigFromEnv(env);
   if (fromEnv) {
     const standbys = resolveStandbysFromEnv(env);
+    const syncStates = standbys.length > 0 ? await readSyncStates(env) : {};
+    const recordedFor = (node, id) => {
+      const recorded = syncStates[id];
+      if (!recorded) return void 0;
+      return recorded.fingerprint && recorded.fingerprint !== nodeFingerprint(node) ? void 0 : recorded;
+    };
     const nodes = [
       {
         id: "env-primary",
@@ -30016,12 +30022,13 @@ async function resolveDbCluster(env) {
     ];
     if (standbys.length > 0) {
       standbys.forEach((standby, index) => {
-        nodes.push({
+        const id = `env-standby-${index + 1}`;
+        const node = {
           // Positional id: the list order is the operator's failover order, and
           // the per-node fingerprint check discards a sync record whose
           // host/port/schema no longer match, so a reordered list cannot inherit
           // a stale "complete" from a different database.
-          id: `env-standby-${index + 1}`,
+          id,
           label: `\u526F\u5E93 ${index + 1} \xB7 ${standby.database}`,
           role: "replica",
           priority: index + 2,
@@ -30034,7 +30041,8 @@ async function resolveDbCluster(env) {
           ssl: standby.ssl,
           connectionLimit: standby.connectionLimit,
           source: "env"
-        });
+        };
+        nodes.push({ ...node, syncStatus: recordedFor(node, id) });
       });
     }
     return {
@@ -37655,6 +37663,47 @@ async function countBaseTables(db, schema) {
     return null;
   }
 }
+async function readCreateTable(db, table) {
+  try {
+    const result = await db.prepare(`SHOW CREATE TABLE ${quoteIdent(table)}`).all();
+    const row = (result.results ?? [])[0];
+    if (!row) return null;
+    for (const value of Object.values(row)) {
+      if (typeof value === "string" && /^CREATE TABLE/i.test(value.trim())) return value.trim();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+async function createMissingTables(source, target, tables, schemas = {}) {
+  let targetTables;
+  try {
+    targetTables = await discoverTables(target, schemas.targetSchema);
+  } catch (error) {
+    return { created: [], failed: [] };
+  }
+  const present = new Set(targetTables);
+  const missing = tables.filter((table) => !present.has(table));
+  if (missing.length === 0) return { created: [], failed: [] };
+  const created = [];
+  const failed = [];
+  for (const table of missing) {
+    const ddl = await readCreateTable(source, table);
+    if (!ddl) {
+      failed.push({ table, error: "\u4E3B\u5E93\u6CA1\u6709\u8FD4\u56DE\u8BE5\u8868\u7684\u5EFA\u8868\u8BED\u53E5\uFF08SHOW CREATE TABLE \u5931\u8D25\uFF09\uFF0C\u65E0\u6CD5\u5728\u526F\u5E93\u81EA\u52A8\u5EFA\u8868\u3002" });
+      continue;
+    }
+    const statement = ddl.replace(/^CREATE\s+TABLE\s+/i, "CREATE TABLE IF NOT EXISTS ");
+    try {
+      await target.prepare(statement).run();
+      created.push(table);
+    } catch (error) {
+      failed.push({ table, error: errorMessage(error) });
+    }
+  }
+  return { created, failed };
+}
 async function discoverColumns(db, table, schema) {
   const filter = schemaFilter(schema);
   const result = await db.prepare(
@@ -37855,7 +37904,8 @@ async function syncDatabase(source, target, options = {}) {
       tablesTotal: 0,
       tablesDone: 0,
       rowsEstimate: 0,
-      skipped: []
+      skipped: [],
+      createdTables: []
     };
   }
   if (tables.length === 0) {
@@ -37882,12 +37932,18 @@ async function syncDatabase(source, target, options = {}) {
       tablesTotal: 0,
       tablesDone: 0,
       rowsEstimate: 0,
-      skipped: []
+      skipped: [],
+      createdTables: []
     };
   }
   const skip = new Set(options.skipTables ?? []);
   const skipped = tables.filter((table) => skip.has(table));
   const pending = tables.filter((table) => !skip.has(table));
+  const schemaFix = await createMissingTables(source, target, tables, {
+    sourceSchema: options.sourceSchema,
+    targetSchema: options.targetSchema
+  });
+  const createError = new Map(schemaFix.failed.map((entry) => [entry.table, entry.error]));
   const results = [];
   for (const table of pending) {
     if (Date.now() >= deadline) {
@@ -37904,6 +37960,10 @@ async function syncDatabase(source, target, options = {}) {
     const tableResult = await syncTable(source, target, table, { ...options, deadline }, Date.now());
     const estimate = estimates[table];
     if (estimate !== void 0) tableResult.rowsEstimate = estimate;
+    const ddlError = createError.get(table);
+    if (ddlError && tableResult.error) {
+      tableResult.error = `${tableResult.error}\uFF1B\u526F\u5E93\u7F3A\u5C11\u8BE5\u8868\u4E14\u81EA\u52A8\u5EFA\u8868\u5931\u8D25\uFF1A${ddlError}`;
+    }
     results.push(tableResult);
   }
   const rowsRead = results.reduce((sum, entry) => sum + entry.rowsRead, 0);
@@ -37917,9 +37977,13 @@ async function syncDatabase(source, target, options = {}) {
   const ok = results.every((entry) => !entry.error);
   const tablesDone = skipped.length + results.filter((entry) => !entry.truncated && !entry.error).length;
   const rowsEstimate = tables.reduce((sum, table) => sum + (estimates[table] ?? 0), 0);
+  const droppedRows = results.filter(
+    (entry) => !entry.truncated && !entry.error && entry.targetRows !== void 0 && entry.targetRows < entry.rowsWritten
+  );
+  const complete = ok && results.every((entry) => !entry.truncated) && droppedRows.length === 0;
   return {
     ok,
-    complete: ok && results.every((entry) => !entry.truncated && entry.countMatches !== false),
+    complete,
     tables: results,
     rowsRead,
     rowsWritten,
@@ -37930,7 +37994,8 @@ async function syncDatabase(source, target, options = {}) {
     tablesTotal: tables.length,
     tablesDone,
     rowsEstimate,
-    skipped
+    skipped,
+    createdTables: schemaFix.created
   };
 }
 function advanceSyncResume(input) {
@@ -38757,10 +38822,22 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
       // Explicit schema: `information_schema … = DATABASE()` returns nothing
       // when the connection has no default database, which used to look like a
       // finished sync of zero tables.
-      sourceSchema: cluster.nodes.find((node) => node.id === source.id)?.database || void 0
+      sourceSchema: cluster.nodes.find((node) => node.id === source.id)?.database || void 0,
+      targetSchema: spec?.database || void 0
     });
+    if (result.createdTables.length > 0) {
+      console.info(
+        "[db-config] created tables missing on the standby before copying:",
+        spec?.label ?? target.id,
+        result.createdTables.join(", ")
+      );
+    }
     const complete = result.ok && result.complete;
     const countsMismatch = result.tables.filter((table) => table.countMatches === false).map((table) => table.table);
+    const behindRows = result.tables.reduce(
+      (sum, table) => sum + (table.sourceRows !== void 0 && table.targetRows !== void 0 && table.sourceRows > table.targetRows ? table.sourceRows - table.targetRows : 0),
+      0
+    );
     const orphanRows = result.tables.reduce((sum, table) => sum + (table.orphanRows ?? 0), 0);
     const progress = buildSyncProgress({
       startedAt: resuming && previous.progress ? previous.progress.startedAt : Date.now(),
@@ -38804,7 +38881,9 @@ async function handleAdminSyncDbCluster(request, env, actorUser) {
       tables: result.tables,
       failedTables: failedTables.length > 0 ? failedTables : void 0,
       pendingTables: pendingTables.length > 0 ? pendingTables : void 0,
+      createdTables: result.createdTables.length > 0 ? result.createdTables : void 0,
       countsMismatch: countsMismatch.length > 0 ? countsMismatch : void 0,
+      behindRows: behindRows > 0 ? behindRows : void 0,
       orphanRows: orphanRows > 0 ? orphanRows : void 0,
       progress
     });
