@@ -6440,7 +6440,7 @@ var APP_VERSION;
 var init_app_version = __esm({
   "shared/app-version.ts"() {
     "use strict";
-    APP_VERSION = "1.8.12";
+    APP_VERSION = "1.8.13";
   }
 });
 
@@ -36424,6 +36424,9 @@ function decodeUrlPart(value) {
     return value;
   }
 }
+function redactEntry(entry) {
+  return entry.replace(/\/\/([^/@:]*):[^/]*@/, "//$1:***@");
+}
 function parseStandbyUrl(entry, base) {
   let url;
   try {
@@ -36431,7 +36434,7 @@ function parseStandbyUrl(entry, base) {
   } catch {
     reportOnce(
       `malformed:${entry}`,
-      `[db-config] standby entry "${entry}" looks like a URL but does not parse; ignoring it. Percent-encode special characters in the password (for example @ becomes %40).`
+      `[db-config] standby entry "${redactEntry(entry)}" looks like a URL but does not parse; ignoring it. Percent-encode special characters in the password (for example @ becomes %40).`
     );
     return null;
   }
@@ -36439,14 +36442,14 @@ function parseStandbyUrl(entry, base) {
   if (!["mysql", "mysqls", "mariadb", "mariadbs"].includes(protocol)) {
     reportOnce(
       `protocol:${entry}`,
-      `[db-config] standby entry "${entry}" uses protocol "${protocol}"; expected mysql:// . Ignoring it.`
+      `[db-config] standby entry "${redactEntry(entry)}" uses protocol "${protocol}"; expected mysql:// . Ignoring it.`
     );
     return null;
   }
   if (!url.hostname) {
     reportOnce(
       `nohost:${entry}`,
-      `[db-config] standby entry "${entry}" has no host; write the schema name on its own to inherit the primary connection. Ignoring it.`
+      `[db-config] standby entry "${redactEntry(entry)}" has no host; write the schema name on its own to inherit the primary connection. Ignoring it.`
     );
     return null;
   }
@@ -36454,7 +36457,7 @@ function parseStandbyUrl(entry, base) {
   if (!database) {
     reportOnce(
       `nodatabase:${entry}`,
-      `[db-config] standby entry "${entry}" has no database name in the path (mysql://host:3306/DATABASE); ignoring it.`
+      `[db-config] standby entry "${redactEntry(entry)}" has no database name in the path (mysql://host:3306/DATABASE); ignoring it.`
     );
     return null;
   }
@@ -36498,14 +36501,14 @@ function resolveStandbysFromEnv(env) {
     const parsed = entry.includes("://") ? parseStandbyUrl(entry, defaults) : { ...defaults, database: entry };
     if (!parsed) continue;
     if (!parsed.database) {
-      reportOnce(`emptydb:${entry}`, `[db-config] standby entry "${entry}" has no database name; ignoring it.`);
+      reportOnce(`emptydb:${entry}`, `[db-config] standby entry "${redactEntry(entry)}" has no database name; ignoring it.`);
       continue;
     }
     const fingerprint = `${parsed.host}:${parsed.port}/${parsed.database}`;
     if (seen.has(fingerprint)) {
       reportOnce(
         `duplicate:${fingerprint}`,
-        `[db-config] standby entry "${entry}" resolves to ${fingerprint}, which is already in the list (or is the primary); ignoring it.`
+        `[db-config] standby entry "${redactEntry(entry)}" resolves to ${fingerprint}, which is already in the list (or is the primary); ignoring it.`
       );
       continue;
     }

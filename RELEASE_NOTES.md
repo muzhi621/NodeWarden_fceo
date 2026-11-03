@@ -21,6 +21,32 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.13 - Diagnostics That Keep the Password Out of the Log
+
+### Fixed
+
+1. **A standby entry no longer prints its password into the platform log.** A standby may be written as a full `mysql://user:pass@host/database` URL, which carries the database password in plain text — and every message that quoted an entry went to the platform log, readable by anyone with console access. Those messages fire exactly when the variable is being edited: an entry that duplicates the primary, names a missing host, uses the wrong protocol, or has a syntax error. Host, port, schema and account stay readable (they are what makes the message useful); only the password is printed as `***`. Commits: [02efabd](https://github.com/muzhi621/NodeWarden_fceo/commit/02efabd), [024eea8](https://github.com/muzhi621/NodeWarden_fceo/commit/024eea8).
+
+### Improved
+
+1. **The standby list is documented as four concrete cases.** The section explained the syntax but not the decision behind it, so the question that actually comes up — "all my copies have the same schema name, what do I write?" — had no answer in it. It now covers: another schema on the same instance (bare name), another server with the same account, another server with its own account, and several standbys mixed into one value — each with a copy-paste example. Commit: [13ef6e5](https://github.com/muzhi621/NodeWarden_fceo/commit/13ef6e5).
+2. **`?ssl=false` is explained where it is needed.** A URL entry inherits `DB_SSL`, so a standby on a MySQL without TLS fails the handshake unless that entry opts out. The guide now says when to add it, when to add `?ssl=true` instead, and that query parameters apply to that entry only. It also lists which characters must be percent-encoded in a password, and what a mistyped entry actually costs: that one entry, never the whole list. Commit: [13ef6e5](https://github.com/muzhi621/NodeWarden_fceo/commit/13ef6e5).
+
+---
+
+# v1.8.13 - 副库日志不再带出密码
+
+### 修复
+
+1. **副库条目的密码不会再被打进平台日志。** 副库可以用完整连接串 `mysql://用户:密码@主机/库名` 声明，密码是明文写在里面的；而所有会引用条目原文的日志都会进平台日志，有控制台权限就能看到。这些日志恰恰在最容易改错变量的时候触发：条目与主库重复、主机写错、协议写错、语法有误。现在主机、端口、库名与账号都保留（它们才是有用信息），只有密码打印成 `***`。提交：[02efabd](https://github.com/muzhi621/NodeWarden_fceo/commit/02efabd)、[024eea8](https://github.com/muzhi621/NodeWarden_fceo/commit/024eea8)。
+
+### 改进
+
+1. **副库清单按四种实际场景写清了。** 原来只讲语法不讲取舍，于是真正会卡住人的问题——「我的几个副本库名都一样，该怎么写？」——在文档里找不到答案。现在覆盖：同实例另一个库（裸库名）、另一台服务器同账号、另一台服务器另一套账号、多台混写，每种都能直接抄。提交：[13ef6e5](https://github.com/muzhi621/NodeWarden_fceo/commit/13ef6e5)。
+2. **`?ssl=false` 该加的场景写清了。** 连接串条目的 `ssl` 默认跟随 `DB_SSL`，副库那台 MySQL 没开 TLS 时握手会失败，必须由这一条单独退出。文档现在说明什么时候加、什么时候反而要加 `?ssl=true`、以及查询参数只对这一条生效；另外列出密码里必须百分号编码的字符，并说明写错的代价只是跳过那一条，不会拖垮整个清单。提交：[13ef6e5](https://github.com/muzhi621/NodeWarden_fceo/commit/13ef6e5)。
+
+---
+
 # v1.8.12 - A List of Standbys, Not One Guessed Name
 
 ### Added
