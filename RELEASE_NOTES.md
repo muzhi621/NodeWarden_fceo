@@ -21,6 +21,46 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.12 - A List of Standbys, Not One Guessed Name
+
+### Added
+
+1. **`DB_STANDBY_NODES` declares as many standbys as the deployment has.** The previous variable assumed one standby with one particular name, which no product can assume — a deployment may keep two copies, five, or a copy on another server under a different account. The new value is a comma-separated list: an entry is either a bare schema name (inheriting `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_SSL` / `DB_CONN_LIMIT`, i.e. another schema on the same instance) or a full `mysql://user:pass@host:port/database?ssl=&conn=` URL for a copy that lives elsewhere. Both forms mix in one value, so the common case is still a single line. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+2. **Order is the priority, and bad entries do not cost you the good ones.** Standby order becomes node priority; duplicates, entries pointing at the primary, and malformed entries are skipped with a one-shot log line instead of failing the whole list. `DB_STANDBY_NAME` (v1.8.11) and `DB_STANDBYS` are still read and accumulate with the new name, so an existing configuration keeps working without edits. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+3. **The startup log prints what the list resolved to.** A typo, a wrong separator or an entry quietly dropped produced a cluster smaller than intended, and the only other place showing it is the admin page — which needs a working database. Boot now prints `standbys: 3 · nw_bak@host, dr@other-host`. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+
+### Improved
+
+1. **One click syncs every standby, not just the first.** The report lists each target separately, so a copy that failed (missing database, no DDL rights, unreachable host) is named instead of being hidden behind the others. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+2. **Switching primaries describes an operation that matches the new list.** Instead of "swap the two variables", the endpoint and the page now say: set `DB_NAME` to the target standby, remove that entry from the list, restart — and add the host/account changes when the copy lives on another server. Reversible at any time. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+3. **The admin page states how many standbys the environment declares**, and its hints use the list syntax so the next copy can be added by copying the line already there. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+
+### Fixed
+
+1. **An unreachable standby is reported as unreachable, not as a 502.** Closing a probe pool whose connection never opened rethrows the connect error, and it was thrown from a `finally` block — replacing the correct "connection refused" answer with a gateway error. All four probe pools are now closed quietly. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+
+---
+
+# v1.8.12 - 副库是一个清单，不是一个猜出来的名字
+
+### 新增
+
+1. **`DB_STANDBY_NODES` 一次声明所有副库。** 之前的变量假设「只有一个副库、名字恰好是这样」，而这是产品无法假设的：可能有两份副本、五份，也可能有一份在另一台服务器、用另一套账号。新变量是逗号分隔的清单，每个条目要么是**裸库名**（沿用 `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_SSL` / `DB_CONN_LIMIT`，即同实例的另一个库），要么是**完整连接串** `mysql://用户:密码@主机:端口/库名?ssl=&conn=`（副本在别处）。两种写法可在同一个值里混写，所以常见场景仍然只有一行。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+2. **顺序就是优先级，写错的条目不会拖累其他副本。** 清单顺序决定节点优先级；重复条目、指向主库本身的条目、格式错误的条目会被跳过并各打一条日志，而不是让整份配置失效。v1.8.11 的 `DB_STANDBY_NAME` 与 `DB_STANDBYS` 仍然被读取，且与新变量合并累加，所以现有部署不用改。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+3. **启动日志会打印清单实际解析出了什么。** 拼错、分隔符不对、条目被静默丢弃，都会让集群比预期少几台；而唯一能看见它的后台页面本身需要一个能用的数据库。现在启动时会打印 `standbys: 3 · nw_bak@host, dr@other-host`。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+
+### 改进
+
+1. **一次点击同步所有副库，不只第一台。** 报告按目标节点分列，哪一份副本失败（库不存在、没有建表权限、主机连不上）会被点名，而不是被其他节点的成功掩盖。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+2. **换主库的说明改成了与清单一致的操作。** 不再是「互换两个变量」，接口与页面现在说的是：把 `DB_NAME` 改成目标副库、把它从清单里删掉、重启；副本在另一台服务器时再一并改 host 与账号。随时可以改回来。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+3. **后台会写明环境变量声明了几个副库**，提示文案也换成清单语法，加下一份副本时复制现成那一行即可。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+
+### 修复
+
+1. **副库连不上时给出「连不上」，而不是 502。** 探针连接池在连接从未建立的情况下关闭会再次抛出连接错误，而它是在 `finally` 里抛的——于是原本正确的「连接被拒绝」被替换成了网关错误。四处探针连接池现在都安静关闭。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+
+---
+
 # v1.8.11 - A Standby You Can Fill Without Deleting Your Env Vars
 
 ### Added
