@@ -1075,6 +1075,17 @@ export async function resolveDbCluster(env: Env): Promise<ResolvedDbCluster> {
   const fromEnv = resolveDbConfigFromEnv(env);
   if (fromEnv) {
     const standbys = resolveStandbysFromEnv(env);
+    // Sync bookkeeping is written by the manual sync even in `native` mode (an
+    // env-described standby is filled by hand and never replicated by MySQL), so
+    // it has to be read back here too. Without this every env standby showed
+    // "尚未同步（不可接管）" forever, including right after a completed sync — the
+    // page had no way to tell "never copied" from "copied ten seconds ago".
+    const syncStates = standbys.length > 0 ? await readSyncStates(env) : {};
+    const recordedFor = (node: { host: string; port: number; database: string }, id: string) => {
+      const recorded = syncStates[id];
+      if (!recorded) return undefined;
+      return recorded.fingerprint && recorded.fingerprint !== nodeFingerprint(node) ? undefined : recorded;
+    };
     const nodes: ResolvedDbNode[] = [
       {
         id: 'env-primary',
@@ -1094,14 +1105,15 @@ export async function resolveDbCluster(env: Env): Promise<ResolvedDbCluster> {
     ];
     if (standbys.length > 0) {
       standbys.forEach((standby, index) => {
-        nodes.push({
+        const id = `env-standby-${index + 1}`;
+        const node = {
           // Positional id: the list order is the operator's failover order, and
           // the per-node fingerprint check discards a sync record whose
           // host/port/schema no longer match, so a reordered list cannot inherit
           // a stale "complete" from a different database.
-          id: `env-standby-${index + 1}`,
+          id,
           label: `副库 ${index + 1} · ${standby.database}`,
-          role: 'replica',
+          role: 'replica' as const,
           priority: index + 2,
           enabled: true,
           host: standby.host,
@@ -1111,8 +1123,9 @@ export async function resolveDbCluster(env: Env): Promise<ResolvedDbCluster> {
           database: standby.database,
           ssl: standby.ssl,
           connectionLimit: standby.connectionLimit,
-          source: 'env',
-        });
+          source: 'env' as const,
+        };
+        nodes.push({ ...node, syncStatus: recordedFor(node, id) });
       });
     }
     // Automatic failover stays OFF for env-described standbys, and that is a

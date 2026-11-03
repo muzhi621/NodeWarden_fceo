@@ -23,6 +23,8 @@ import type { D1LikeResult, D1LikeStatement } from '../src/services/storage-mysq
 class FakeNode implements SyncDatabase {
   readonly inserts: Array<{ sql: string; params: unknown[] }> = [];
   readonly selects: string[] = [];
+  /** DDL the sync issued to build a table the node was missing. */
+  readonly ddl: string[] = [];
   failOnTable?: string;
   /** When false the inserts are recorded but not applied (count stays 0). */
   applyInserts = true;
@@ -89,6 +91,15 @@ class FakeStatement implements D1LikeStatement {
 
   async run(): Promise<D1LikeResult> {
     await this.node.tick();
+    // DDL: a table the standby never had (`rate_limit_buckets`, created lazily by
+    // the app) is built from the source's own statement. Recorded separately from
+    // `inserts`, which is what the copy assertions count.
+    const created = /^CREATE TABLE IF NOT EXISTS `([^`]+)`/.exec(this.sql)?.[1];
+    if (created) {
+      this.node.ddl.push(created);
+      if (!this.node.tables.includes(created)) this.node.tables.push(created);
+      return { results: [], success: true, meta: { changes: 0, duration: 0 } } as D1LikeResult;
+    }
     const table = /INSERT INTO `([^`]+)`/.exec(this.sql)?.[1] ?? '';
     if (this.node.failOnTable === table) throw new Error('ER_NO_SUCH_TABLE');
     this.node.inserts.push({ sql: this.sql, params: this.params });
@@ -122,6 +133,16 @@ class FakeStatement implements D1LikeStatement {
     const asResult = (rows: unknown[]): D1LikeResult<R> =>
       ({ results: rows as R[], success: true, meta: { changes: 0, last_row_id: 0 } }) as D1LikeResult<R>;
 
+    if (/^SHOW CREATE TABLE/i.test(sql)) {
+      const table = /SHOW CREATE TABLE `([^`]+)`/.exec(sql)?.[1] ?? '';
+      if (!this.node.tables.includes(table)) return asResult([]);
+      return asResult([
+        {
+          Table: table,
+          'Create Table': `CREATE TABLE \`${table}\` (\`id\` varchar(36) NOT NULL, PRIMARY KEY (\`id\`))`,
+        },
+      ]);
+    }
     if (sql.includes('information_schema.TABLES') && sql.includes('COUNT(*)')) {
       return asResult([{ n: this.node.tables.length }]);
     }
@@ -342,6 +363,57 @@ test('C-4: one deadline covers every table in the call', async () => {
   assert.equal(result.tables.every((table) => table.truncated), true);
   assert.equal(result.rowsWritten, 0);
   assert.ok(result.durationMs < 1_000, 'an expired budget must not spin');
+});
+
+test('a table the standby does not have is created from the source DDL', async () => {
+  // A standby is a plain schema that nothing else maintains. The application
+  // creates a few tables *lazily* (`rate_limit_buckets`), so they exist on the
+  // primary and never on the copy; every run then failed that one table with
+  // 1146 and the page sat at "数据表 19/20 · 99%" no matter how often it was
+  // clicked. The table is now built from the primary's own DDL.
+  const source = sourceNode();
+  const target = new FakeNode(['users'], { users: ['id', 'email'] });
+
+  const result = await syncDatabase(source, target, { chunkSize: 10 });
+
+  assert.deepEqual(result.createdTables, ['ciphers']);
+  assert.deepEqual(target.ddl, ['ciphers']);
+  assert.equal(result.complete, true);
+  assert.equal(result.rowsWritten, 6);
+});
+
+test('a source that grew during the copy still finishes', async () => {
+  const source = sourceNode();
+  const target = new FakeNode([], {});
+  // A row inserted *behind* the cursor after the first page was read: the two
+  // sides then differ by one row forever, and completeness used to be gated on
+  // that parity — so a finished run reported "not complete" and the bar stopped
+  // at 99% with every table walked.
+  let fired = false;
+  source.afterFirstPage = () => {
+    if (fired) return;
+    fired = true;
+    source.rows.users.push({ id: 'a0', email: 'older@example.com' });
+  };
+
+  const result = await syncDatabase(source, target, { chunkSize: 2, tables: ['users'] });
+
+  assert.equal(result.complete, true, 'a growing source is not an unfinished copy');
+  assert.equal(result.tables[0].countMatches, false);
+  assert.equal(result.tables[0].rowsWritten, 5);
+});
+
+test('rows that never land keep the run unfinished', async () => {
+  // The opposite gap is a real failure: everything was pushed, nothing is there.
+  const source = sourceNode();
+  const target = new FakeNode([], {});
+  target.applyInserts = false;
+
+  const result = await syncDatabase(source, target, { chunkSize: 10, tables: ['users'] });
+
+  assert.equal(result.complete, false, 'a push that did not land is not a finished copy');
+  assert.equal(result.tables[0].rowsWritten, 5);
+  assert.equal(result.tables[0].targetRows, 0);
 });
 
 test('a failing table does not abort the remaining tables', async () => {
@@ -778,7 +850,11 @@ test('a slice that cannot reach the last table still converges on the next one',
 
   for (;;) {
     rounds += 1;
-    assert.ok(rounds <= 8, 'the run must converge, not loop at 19/20');
+    // The cap is the point of the test (it used to loop at 19/20 forever), so it
+    // is generous but finite: the first slice also builds the 20 missing tables
+    // from the source DDL, and at 4ms per statement that alone eats a good part
+    // of the slice's budget.
+    assert.ok(rounds <= 12, 'the run must converge, not loop at 19/20');
     const slice = await syncDatabase(source, target, {
       mode: 'overwrite',
       maxDurationMs: 250,

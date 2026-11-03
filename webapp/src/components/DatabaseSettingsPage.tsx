@@ -553,6 +553,11 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
       const failed = finished.targets.filter((target) => !target.ok);
       const partial = finished.targets.filter((target) => target.ok && !target.complete);
       const mismatched = finished.targets.flatMap((target) => target.countsMismatch ?? []);
+      // Tables the standby was missing entirely (`rate_limit_buckets` is created
+      // lazily by the app, so a copy-only database never has it). The server now
+      // builds them from the primary's DDL instead of failing that table forever.
+      const createdTables = finished.targets.flatMap((target) => target.createdTables ?? []);
+      const behindRows = finished.targets.reduce((sum, target) => sum + (target.behindRows ?? 0), 0);
       // A table that raised an error is why the run stops; without naming it the
       // page can only say "部分数据表出错", which is not something an operator
       // can act on.
@@ -590,14 +595,24 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
         });
       } else {
         setNotice({
-          kind: mismatched.length > 0 ? 'info' : 'ok',
+          kind: 'ok',
           text:
-            `同步完成：${finished.targets.length} 个副库${syncedRowsText(totals.rowsWritten, totals.rowsInserted)}（${rounds} 次分批，用时 ${formatDuration(Date.now() - startedAt)}），行数校验通过。` +
-            '行数一致只说明没有缺行；如需纠正副库上被改过的旧值，请用「覆盖已有行」再同步一次。' +
+            `同步完成：${finished.targets.length} 个副库${syncedRowsText(totals.rowsWritten, totals.rowsInserted)}` +
+            `（${rounds} 次分批，用时 ${formatDuration(Date.now() - startedAt)}）。` +
+            (createdTables.length > 0
+              ? `副库原先缺少 ${createdTables.length} 张表，已按主库结构自动建好（${createdTables.slice(0, 3).join('、')}${
+                  createdTables.length > 3 ? '…' : ''
+                }）。`
+              : '') +
+            (behindRows > 0
+              ? `副库仍比主库少 ${formatCount(behindRows)} 行：这是同步期间主库的新写入，再点一次即可补齐。`
+              : '全部数据表的行数一致。') +
             (mismatched.length > 0
-              ? ` 仍有 ${mismatched.length} 张表行数不一致（${mismatched.slice(0, 3).join('、')}${mismatched.length > 3 ? '…' : ''}）：` +
-                '多为同步期间的并发写入，可再同步一次；若持续不一致，说明目标端有源端已删除的行。'
-              : ''),
+              ? ` 其中 ${mismatched.length} 张表数量不同（${mismatched.slice(0, 3).join('、')}${
+                  mismatched.length > 3 ? '…' : ''
+                }），多为同步期间主库有新写入；若副库行数反而更多，说明主库已删除了那些行。`
+              : '') +
+            '行数一致只说明没有缺行；如需纠正副库上被改过的旧值，请用「覆盖已有行」再同步一次。',
         });
       }
       await load();
