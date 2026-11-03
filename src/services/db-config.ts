@@ -797,6 +797,13 @@ export async function clearRuntimeConfig(env: Env): Promise<boolean> {
   return saved;
 }
 
+/** Booleans from env: unset means "keep the primary's value", not "true". */
+function parseEnvFlag(raw: unknown, fallback: boolean): boolean {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (!value) return fallback;
+  return value !== 'false' && value !== '0' && value !== 'no' && value !== 'off';
+}
+
 /**
  * env-var driven cluster: a single primary node.
  *
@@ -814,9 +821,184 @@ export function resolveDbConfigFromEnv(env: Env): ResolvedDbConfig | null {
     user: (env.DB_USER || '').trim(),
     password: env.DB_PASSWORD || '',
     database: (env.DB_NAME || '').trim(),
-    ssl: (env.DB_SSL || '').toLowerCase() !== 'false' && (env.DB_SSL || '') !== '0',
+    ssl: parseEnvFlag(env.DB_SSL, true),
     connectionLimit: parsePort(env.DB_CONN_LIMIT, 5),
   };
+}
+
+/**
+ * Variables that carry the standby list, newest name first.
+ *
+ * `DB_STANDBY_NODES` describes a *list*; `DB_STANDBY_NAME` is the singular form
+ * shipped a version earlier and still read so an existing deployment keeps
+ * working. Both accept the same comma/semicolon/space separated entries, so a
+ * rename never invalidates a running configuration.
+ */
+const STANDBY_LIST_VARS = ['DB_STANDBY_NODES', 'DB_STANDBYS', 'DB_STANDBY_NAME'] as const;
+
+/** One-shot log, because resolveDbCluster runs on every request. */
+const reportedStandbyEntries = new Set<string>();
+
+function reportOnce(key: string, message: string): void {
+  if (reportedStandbyEntries.has(key)) return;
+  reportedStandbyEntries.add(key);
+  console.warn(message);
+}
+
+function splitStandbyEntries(raw: string): string[] {
+  return raw
+    .split(/[,;\r\n]+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function decodeUrlPart(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * `mysql://user:pass@host:3306/database?ssl=false&conn=3`, or a bare schema name.
+ *
+ * A bare name inherits *everything* from the standby defaults, which is the
+ * common case (another schema on the same server). A URL additionally allows a
+ * different host, a different account and per-node TLS/pool settings — the
+ * "standby lives on another machine" case, without inventing a variable per
+ * field per node.
+ */
+function parseStandbyUrl(entry: string, base: ResolvedDbConfig): ResolvedDbConfig | null {
+  let url: URL;
+  try {
+    url = new URL(entry);
+  } catch {
+    reportOnce(
+      `malformed:${entry}`,
+      `[db-config] standby entry "${entry}" looks like a URL but does not parse; ignoring it. ` +
+        'Percent-encode special characters in the password (for example @ becomes %40).'
+    );
+    return null;
+  }
+  const protocol = url.protocol.replace(/:$/, '').toLowerCase();
+  if (!['mysql', 'mysqls', 'mariadb', 'mariadbs'].includes(protocol)) {
+    reportOnce(
+      `protocol:${entry}`,
+      `[db-config] standby entry "${entry}" uses protocol "${protocol}"; expected mysql:// . Ignoring it.`
+    );
+    return null;
+  }
+  // A URL entry is for "the copy lives somewhere else". Without a host it is
+  // just a schema name, which the bare form already expresses unambiguously —
+  // accepting it here would make the two forms differ in ways nobody can see.
+  if (!url.hostname) {
+    reportOnce(
+      `nohost:${entry}`,
+      `[db-config] standby entry "${entry}" has no host; write the schema name on its own to inherit the primary connection. Ignoring it.`
+    );
+    return null;
+  }
+  const database = decodeUrlPart(url.pathname.replace(/^\/+/, '')).trim();
+  if (!database) {
+    reportOnce(
+      `nodatabase:${entry}`,
+      `[db-config] standby entry "${entry}" has no database name in the path (mysql://host:3306/DATABASE); ignoring it.`
+    );
+    return null;
+  }
+  // Query parameters are optional overrides; anything absent falls back.
+  const sslParam = url.searchParams.get('ssl') ?? url.searchParams.get('tls');
+  const connParam =
+    url.searchParams.get('conn') ?? url.searchParams.get('connectionLimit') ?? url.searchParams.get('connLimit');
+  return {
+    mode: 'mysql',
+    source: 'env',
+    host: url.hostname || base.host,
+    port: url.port ? parsePort(url.port, base.port) : base.port,
+    user: url.username ? decodeUrlPart(url.username) : base.user,
+    password: url.password ? decodeUrlPart(url.password) : base.password,
+    database,
+    ssl: sslParam === null ? base.ssl : parseEnvFlag(sslParam, base.ssl),
+    connectionLimit: connParam === null ? base.connectionLimit : parsePort(connParam, base.connectionLimit),
+  };
+}
+
+/**
+ * Standbys described entirely by environment variables.
+ *
+ * `DB_*` deployments could not sync at all: the effective cluster was one node,
+ * so "同步数据到副库" had no target, while the admin-saved cluster was shadowed
+ * and its config died with `/tmp` on FC. Operators who keep their credentials in
+ * env vars — the recommended, IaC-friendly setup — therefore had a standby they
+ * could never fill.
+ *
+ * The list is not limited to one entry and not tied to a schema name: both the
+ * number of standbys and their names come from the configuration, and each entry
+ * may point at a different server. Order is preserved (it becomes the node
+ * priority); duplicates and the primary itself are dropped.
+ */
+export function resolveStandbysFromEnv(env: Env): ResolvedDbConfig[] {
+  const primary = resolveDbConfigFromEnv(env);
+  if (!primary) return [];
+
+  const entries: string[] = [];
+  for (const key of STANDBY_LIST_VARS) {
+    const raw = (env as unknown as Record<string, unknown>)[key];
+    if (typeof raw !== 'string' || !raw.trim()) continue;
+    entries.push(...splitStandbyEntries(raw));
+  }
+  if (entries.length === 0) return [];
+
+  // Defaults every bare entry inherits: the primary's connection unless the
+  // legacy DB_STANDBY_* overrides say otherwise.
+  const defaults: ResolvedDbConfig = {
+    ...primary,
+    host: (env.DB_STANDBY_HOST || '').trim() || primary.host,
+    port: parsePort(env.DB_STANDBY_PORT ?? env.DB_PORT, primary.port),
+    user: (env.DB_STANDBY_USER || '').trim() || primary.user,
+    password: env.DB_STANDBY_PASSWORD || primary.password,
+    ssl: parseEnvFlag(env.DB_STANDBY_SSL, primary.ssl),
+    connectionLimit: parsePort(env.DB_STANDBY_CONN_LIMIT, primary.connectionLimit),
+  };
+
+  const standbys: ResolvedDbConfig[] = [];
+  const seen = new Set([`${primary.host}:${primary.port}/${primary.database}`]);
+  const limit = Math.max(1, CLUSTER_LIMITS.maxNodes - 1);
+
+  for (const entry of entries) {
+    const parsed = entry.includes('://') ? parseStandbyUrl(entry, defaults) : { ...defaults, database: entry };
+    if (!parsed) continue;
+    if (!parsed.database) {
+      reportOnce(`emptydb:${entry}`, `[db-config] standby entry "${entry}" has no database name; ignoring it.`);
+      continue;
+    }
+    const fingerprint = `${parsed.host}:${parsed.port}/${parsed.database}`;
+    if (seen.has(fingerprint)) {
+      // Pointing at the primary — or listing the same schema twice — would copy
+      // every row onto itself and report the table as its own target.
+      reportOnce(
+        `duplicate:${fingerprint}`,
+        `[db-config] standby entry "${entry}" resolves to ${fingerprint}, which is already in the list (or is the primary); ignoring it.`
+      );
+      continue;
+    }
+    if (standbys.length >= limit) {
+      reportOnce(
+        `limit:${limit}`,
+        `[db-config] more than ${limit} standby entries configured; only the first ${limit} are used.`
+      );
+      break;
+    }
+    seen.add(fingerprint);
+    standbys.push(parsed);
+  }
+  return standbys;
+}
+
+/** First standby only. Kept for callers that just need "is there anywhere to copy into". */
+export function resolveStandbyFromEnv(env: Env): ResolvedDbConfig | null {
+  return resolveStandbysFromEnv(env)[0] ?? null;
 }
 
 function toResolvedNodes(config: DbRuntimeConfigV2, syncStates: DbSyncStates): ResolvedDbNode[] {
@@ -878,27 +1060,62 @@ export async function resolveStoredCluster(env: Env): Promise<ResolvedDbCluster 
 export async function resolveDbCluster(env: Env): Promise<ResolvedDbCluster> {
   const fromEnv = resolveDbConfigFromEnv(env);
   if (fromEnv) {
+    const standbys = resolveStandbysFromEnv(env);
+    const nodes: ResolvedDbNode[] = [
+      {
+        id: 'env-primary',
+        label: '环境变量主库',
+        role: 'primary',
+        priority: 1,
+        enabled: true,
+        host: fromEnv.host,
+        port: fromEnv.port,
+        user: fromEnv.user,
+        password: fromEnv.password,
+        database: fromEnv.database,
+        ssl: fromEnv.ssl,
+        connectionLimit: fromEnv.connectionLimit,
+        source: 'env',
+      },
+    ];
+    if (standbys.length > 0) {
+      standbys.forEach((standby, index) => {
+        nodes.push({
+          // Positional id: the list order is the operator's failover order, and
+          // the per-node fingerprint check discards a sync record whose
+          // host/port/schema no longer match, so a reordered list cannot inherit
+          // a stale "complete" from a different database.
+          id: `env-standby-${index + 1}`,
+          label: `副库 ${index + 1} · ${standby.database}`,
+          role: 'replica',
+          priority: index + 2,
+          enabled: true,
+          host: standby.host,
+          port: standby.port,
+          user: standby.user,
+          password: standby.password,
+          database: standby.database,
+          ssl: standby.ssl,
+          connectionLimit: standby.connectionLimit,
+          source: 'env',
+        });
+      });
+    }
+    // Automatic failover stays OFF for env-described standbys, and that is a
+    // deliberate safety decision rather than an omission: in `native` mode the
+    // app has no way to tell a replicated standby from an empty schema, so
+    // "primary hiccuped" would silently promote a copy into serving traffic.
+    // For a schema that has never been synced that means everyone is logged out
+    // and nobody can get back in. A manual sync target is filled by a person and
+    // promoted by a person (see the promote endpoint's message).
     return {
       mode: 'mysql',
       source: 'env',
-      nodes: [
-        {
-          id: 'env-primary',
-          label: '环境变量主库',
-          role: 'primary',
-          priority: 1,
-          enabled: true,
-          host: fromEnv.host,
-          port: fromEnv.port,
-          user: fromEnv.user,
-          password: fromEnv.password,
-          database: fromEnv.database,
-          ssl: fromEnv.ssl,
-          connectionLimit: fromEnv.connectionLimit,
-          source: 'env',
-        },
-      ],
-      policy: { ...DEFAULT_CLUSTER_POLICY },
+      nodes,
+      policy:
+        standbys.length > 0
+          ? { ...DEFAULT_CLUSTER_POLICY, failoverEnabled: false }
+          : { ...DEFAULT_CLUSTER_POLICY },
     };
   }
 

@@ -143,6 +143,34 @@ export interface SyncOptions {
   skipTables?: string[];
   /** Compare row counts after each table (default true). */
   verifyCounts?: boolean;
+  /**
+   * Schema the source tables live in.
+   *
+   * Discovery used to ask `information_schema … WHERE TABLE_SCHEMA =
+   * DATABASE()`. When the connection has no default database (an empty
+   * database field on the node, or a driver that connected without one) that
+   * predicate matches nothing, the table list comes back empty, and the run
+   * reported success while copying zero rows — the "sync stuck at 0/?" case.
+   * The caller knows the configured name, so pass it and let the query be
+   * explicit; omitting it keeps the old `DATABASE()` behaviour.
+   */
+  sourceSchema?: string;
+}
+
+/**
+ * `TABLE_SCHEMA` predicate plus its bind parameters.
+ *
+ * Kept as one helper so every `information_schema` lookup agrees on which
+ * schema it is talking about.
+ */
+function schemaFilter(schema?: string): { sql: string; bind: string[] } {
+  const name = (schema ?? '').trim();
+  return name ? { sql: 'TABLE_SCHEMA = ?', bind: [name] } : { sql: 'TABLE_SCHEMA = DATABASE()', bind: [] };
+}
+
+/** Run a statement, binding only when there is something to bind. */
+function bindAll(statement: D1LikeStatement, params: string[]): D1LikeStatement {
+  return params.length > 0 ? statement.bind(...params) : statement;
 }
 
 export const SYNC_DEFAULTS = {
@@ -170,17 +198,42 @@ function isPacketTooLarge(error: unknown): boolean {
   return /max_allowed_packet|Packet for query is too large/i.test(errorMessage(error));
 }
 
-/** Base tables in the connection's own schema. */
-async function discoverTables(db: SyncDatabase): Promise<string[]> {
-  const result = await db
-    .prepare(
+/** Base tables in the connection's own schema (or the one the caller named). */
+async function discoverTables(db: SyncDatabase, schema?: string): Promise<string[]> {
+  const filter = schemaFilter(schema);
+  const result = await bindAll(
+    db.prepare(
       "SELECT TABLE_NAME AS name FROM information_schema.TABLES " +
-        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME"
-    )
-    .all<{ name: string }>();
+        `WHERE ${filter.sql} AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME`
+    ),
+    filter.bind
+  ).all<{ name: string }>();
   return (result.results ?? [])
     .map((row) => String(row.name ?? ''))
     .filter((name) => name.length > 0);
+}
+
+/**
+ * How many base tables a node's schema actually has.
+ *
+ * Used before a copy to tell "the standby was never created" from "the standby
+ * is empty": the first needs a schema bootstrap, the second just needs rows.
+ */
+export async function countBaseTables(db: SyncDatabase, schema?: string): Promise<number | null> {
+  try {
+    const filter = schemaFilter(schema);
+    const row = await bindAll(
+      db.prepare(
+        `SELECT COUNT(*) AS n FROM information_schema.TABLES WHERE ${filter.sql} AND TABLE_TYPE = 'BASE TABLE'`
+      ),
+      filter.bind
+    ).first<{ n: unknown }>();
+    if (!row) return null;
+    const value = Number(row.n);
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -189,14 +242,15 @@ async function discoverTables(db: SyncDatabase): Promise<string[]> {
  * Generated columns are excluded: they are computed by the server, and listing
  * them in an INSERT makes MySQL reject the statement.
  */
-async function discoverColumns(db: SyncDatabase, table: string): Promise<string[]> {
+async function discoverColumns(db: SyncDatabase, table: string, schema?: string): Promise<string[]> {
+  const filter = schemaFilter(schema);
   const result = await db
     .prepare(
       'SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS ' +
-        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND (EXTRA IS NULL OR EXTRA NOT LIKE '%GENERATED%') " +
+        `WHERE ${filter.sql} AND TABLE_NAME = ? AND (EXTRA IS NULL OR EXTRA NOT LIKE '%GENERATED%') ` +
         'ORDER BY ORDINAL_POSITION'
     )
-    .bind(table)
+    .bind(...filter.bind, table)
     .all<{ name: string }>();
   return (result.results ?? []).map((row) => String(row.name ?? '')).filter((name) => name.length > 0);
 }
@@ -208,15 +262,16 @@ async function discoverColumns(db: SyncDatabase, table: string): Promise<string[
  * still copies everything but can miss a row if the source is being written to
  * during the copy.
  */
-async function discoverPrimaryKey(db: SyncDatabase, table: string): Promise<string[]> {
+async function discoverPrimaryKey(db: SyncDatabase, table: string, schema?: string): Promise<string[]> {
   try {
+    const filter = schemaFilter(schema);
     const result = await db
       .prepare(
         'SELECT COLUMN_NAME AS name FROM information_schema.KEY_COLUMN_USAGE ' +
-          "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY' " +
+          `WHERE ${filter.sql} AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY' ` +
           'ORDER BY ORDINAL_POSITION'
       )
-      .bind(table)
+      .bind(...filter.bind, table)
       .all<{ name: string }>();
     return (result.results ?? []).map((row) => String(row.name ?? '')).filter((name) => name.length > 0);
   } catch {
@@ -264,14 +319,16 @@ async function countRows(db: SyncDatabase, table: string): Promise<number | null
  * exact counts in `sourceRows` / `targetRows` stay separate. Returns an empty
  * record when the schema is unreadable — callers fall back to table counts.
  */
-async function readTableEstimates(db: SyncDatabase): Promise<Record<string, number>> {
+async function readTableEstimates(db: SyncDatabase, schema?: string): Promise<Record<string, number>> {
   try {
-    const result = await db
-      .prepare(
+    const filter = schemaFilter(schema);
+    const result = await bindAll(
+      db.prepare(
         'SELECT TABLE_NAME AS name, TABLE_ROWS AS row_count FROM information_schema.TABLES ' +
-          "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'"
-      )
-      .all<{ name: string; row_count: unknown }>();
+          `WHERE ${filter.sql} AND TABLE_TYPE = 'BASE TABLE'`
+      ),
+      filter.bind
+    ).all<{ name: string; row_count: unknown }>();
     const estimates: Record<string, number> = {};
     for (const row of result.results ?? []) {
       const name = String(row.name ?? '');
@@ -313,14 +370,14 @@ export async function syncTable(
   let targetRowsBefore: number | null = null;
 
   try {
-    const columns = await discoverColumns(source, table);
+    const columns = await discoverColumns(source, table, options.sourceSchema);
     if (columns.length === 0) {
-      result.error = 'no readable columns (table missing on the source?)';
+      result.error = `no readable columns (table missing on the source${options.sourceSchema ? ` ${options.sourceSchema}` : ''}?)`;
       return result;
     }
     result.columns = columns.length;
 
-    const keys = await discoverPrimaryKey(source, table);
+    const keys = await discoverPrimaryKey(source, table, options.sourceSchema);
     if (keys.length === 0) result.paging = 'offset';
 
     const selectList = columns.map(quoteIdent).join(', ');
@@ -452,8 +509,8 @@ export async function syncDatabase(
   let tables: string[];
   let estimates: Record<string, number>;
   try {
-    tables = options.tables ?? (await discoverTables(source));
-    estimates = await readTableEstimates(source);
+    tables = options.tables ?? (await discoverTables(source, options.sourceSchema));
+    estimates = await readTableEstimates(source, options.sourceSchema);
   } catch (error) {
     return {
       ok: false,
@@ -481,6 +538,40 @@ export async function syncDatabase(
     };
   }
 
+  // An empty table list is not a completed sync. It used to fall through to the
+  // loop below, where "every table succeeded" is vacuously true for zero
+  // tables: the run reported `ok`/`complete` with 0 rows while the UI sat at
+  // "数据表 0/?" forever. Whatever the cause (wrong schema name, a standby
+  // picked as the source, a schema with no tables yet), say it out loud.
+  if (tables.length === 0) {
+    const label = options.sourceSchema ? `源库「${options.sourceSchema}」` : '源库';
+    return {
+      ok: false,
+      complete: false,
+      tables: [
+        {
+          table: '*',
+          columns: 0,
+          rowsRead: 0,
+          rowsWritten: 0,
+          truncated: false,
+          paging: 'keyset',
+          error:
+            `${label}里没有任何基础表（Base Table），没有可复制的内容：` +
+            '请确认节点配置里的库名是否正确、该库是否已经建表。副库为空时，先在后台保存一次集群配置让系统建表。',
+        },
+      ],
+      rowsRead: 0,
+      rowsWritten: 0,
+      truncated: false,
+      durationMs: Date.now() - startedAt,
+      cursors: {},
+      tablesTotal: 0,
+      tablesDone: 0,
+      rowsEstimate: 0,
+      skipped: [],
+    };
+  }
   // Tables a previous round already finished. Skipping them keeps a chunked run
   // linear: without this every round re-reads every table from its first row,
   // which is both slow and makes a progress bar meaningless (it would restart).

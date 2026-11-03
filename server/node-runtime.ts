@@ -107,6 +107,17 @@ function isInsideDirectory(child: string, parent: string): boolean {
   return !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
+/**
+ * True when the data directory lives on a volume that dies with the instance.
+ *
+ * `SETTINGS_KV` is a file in `DATA_DIR`, so an admin-saved database cluster
+ * stored under `/tmp` disappears the moment the platform recycles the
+ * container — and with it the only database the app has, if `DB_*` was removed.
+ */
+export function isDataDirEphemeral(dataDir: string): boolean {
+  return isInsideDirectory(dataDir, os.tmpdir());
+}
+
 function resolveState(options: NodeRuntimeOptions): RuntimeState {
   const assets = options.assets || 'disk';
   let dataDir = path.resolve(
@@ -386,6 +397,19 @@ export function buildNodeEnv(): Env {
     DB_NAME: process.env.DB_NAME,
     DB_SSL: process.env.DB_SSL,
     DB_CONN_LIMIT: process.env.DB_CONN_LIMIT,
+    // Optional env-declared standbys. Listed explicitly because this object is a
+    // whitelist: a variable that is not copied here does not exist as far as
+    // src/ is concerned, which is exactly how "I set DB_STANDBY_NODES and
+    // nothing happened" would look.
+    DB_STANDBY_NODES: process.env.DB_STANDBY_NODES,
+    DB_STANDBYS: process.env.DB_STANDBYS,
+    DB_STANDBY_NAME: process.env.DB_STANDBY_NAME,
+    DB_STANDBY_HOST: process.env.DB_STANDBY_HOST,
+    DB_STANDBY_PORT: process.env.DB_STANDBY_PORT,
+    DB_STANDBY_USER: process.env.DB_STANDBY_USER,
+    DB_STANDBY_PASSWORD: process.env.DB_STANDBY_PASSWORD,
+    DB_STANDBY_SSL: process.env.DB_STANDBY_SSL,
+    DB_STANDBY_CONN_LIMIT: process.env.DB_STANDBY_CONN_LIMIT,
     DB_CONFIG_KEY: process.env.DB_CONFIG_KEY,
   };
   sharedEnv = env as unknown as Env;

@@ -21,6 +21,116 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.12 - A List of Standbys, Not One Guessed Name
+
+### Added
+
+1. **`DB_STANDBY_NODES` declares as many standbys as the deployment has.** The previous variable assumed one standby with one particular name, which no product can assume — a deployment may keep two copies, five, or a copy on another server under a different account. The new value is a comma-separated list: an entry is either a bare schema name (inheriting `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_SSL` / `DB_CONN_LIMIT`, i.e. another schema on the same instance) or a full `mysql://user:pass@host:port/database?ssl=&conn=` URL for a copy that lives elsewhere. Both forms mix in one value, so the common case is still a single line. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+2. **Order is the priority, and bad entries do not cost you the good ones.** Standby order becomes node priority; duplicates, entries pointing at the primary, and malformed entries are skipped with a one-shot log line instead of failing the whole list. `DB_STANDBY_NAME` (v1.8.11) and `DB_STANDBYS` are still read and accumulate with the new name, so an existing configuration keeps working without edits. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+3. **The startup log prints what the list resolved to.** A typo, a wrong separator or an entry quietly dropped produced a cluster smaller than intended, and the only other place showing it is the admin page — which needs a working database. Boot now prints `standbys: 3 · nw_bak@host, dr@other-host`. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+
+### Improved
+
+1. **One click syncs every standby, not just the first.** The report lists each target separately, so a copy that failed (missing database, no DDL rights, unreachable host) is named instead of being hidden behind the others. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+2. **Switching primaries describes an operation that matches the new list.** Instead of "swap the two variables", the endpoint and the page now say: set `DB_NAME` to the target standby, remove that entry from the list, restart — and add the host/account changes when the copy lives on another server. Reversible at any time. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+3. **The admin page states how many standbys the environment declares**, and its hints use the list syntax so the next copy can be added by copying the line already there. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+
+### Fixed
+
+1. **An unreachable standby is reported as unreachable, not as a 502.** Closing a probe pool whose connection never opened rethrows the connect error, and it was thrown from a `finally` block — replacing the correct "connection refused" answer with a gateway error. All four probe pools are now closed quietly. Commit: [6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2).
+
+---
+
+# v1.8.12 - 副库是一个清单，不是一个猜出来的名字
+
+### 新增
+
+1. **`DB_STANDBY_NODES` 一次声明所有副库。** 之前的变量假设「只有一个副库、名字恰好是这样」，而这是产品无法假设的：可能有两份副本、五份，也可能有一份在另一台服务器、用另一套账号。新变量是逗号分隔的清单，每个条目要么是**裸库名**（沿用 `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_SSL` / `DB_CONN_LIMIT`，即同实例的另一个库），要么是**完整连接串** `mysql://用户:密码@主机:端口/库名?ssl=&conn=`（副本在别处）。两种写法可在同一个值里混写，所以常见场景仍然只有一行。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+2. **顺序就是优先级，写错的条目不会拖累其他副本。** 清单顺序决定节点优先级；重复条目、指向主库本身的条目、格式错误的条目会被跳过并各打一条日志，而不是让整份配置失效。v1.8.11 的 `DB_STANDBY_NAME` 与 `DB_STANDBYS` 仍然被读取，且与新变量合并累加，所以现有部署不用改。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+3. **启动日志会打印清单实际解析出了什么。** 拼错、分隔符不对、条目被静默丢弃，都会让集群比预期少几台；而唯一能看见它的后台页面本身需要一个能用的数据库。现在启动时会打印 `standbys: 3 · nw_bak@host, dr@other-host`。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+
+### 改进
+
+1. **一次点击同步所有副库，不只第一台。** 报告按目标节点分列，哪一份副本失败（库不存在、没有建表权限、主机连不上）会被点名，而不是被其他节点的成功掩盖。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+2. **换主库的说明改成了与清单一致的操作。** 不再是「互换两个变量」，接口与页面现在说的是：把 `DB_NAME` 改成目标副库、把它从清单里删掉、重启；副本在另一台服务器时再一并改 host 与账号。随时可以改回来。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+3. **后台会写明环境变量声明了几个副库**，提示文案也换成清单语法，加下一份副本时复制现成那一行即可。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+
+### 修复
+
+1. **副库连不上时给出「连不上」，而不是 502。** 探针连接池在连接从未建立的情况下关闭会再次抛出连接错误，而它是在 `finally` 里抛的——于是原本正确的「连接被拒绝」被替换成了网关错误。四处探针连接池现在都安静关闭。提交：[6dd31f2](https://github.com/muzhi621/NodeWarden_fceo/commit/6dd31f2)。
+
+---
+
+# v1.8.11 - A Standby You Can Fill Without Deleting Your Env Vars
+
+### Added
+
+1. **`DB_STANDBY_NAME` declares a standby directly in environment variables.** A `DB_*` deployment used to be a single node, so "sync data to the standby" had no target, while the cluster saved in the admin page was shadowed by those same variables and — on a serverless host — lived in `/tmp`. Setting `DB_STANDBY_NAME` now makes the environment itself describe two nodes; host, port, user, password, TLS and pool size all fall back to the primary, so two schemas on one MySQL instance need a single new line and no NAS. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+2. **The env standby is a manual copy, and the app treats it that way.** Automatic failover and read splitting are switched off whenever the standby comes from environment variables. In `native` mode nothing lets the app tell a synced copy from an empty schema, and promoting an empty one after a brief primary hiccup would log everyone out with no way back in. Normal reads and writes keep going to the primary only; the standby is written to solely by the sync button. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+
+### Improved
+
+1. **The sync button now explains how to get a target instead of telling you to delete your configuration.** When no standby is configured the endpoint names `DB_STANDBY_NAME` as the fix, instead of asking an operator to remove the `DB_*` variables they deliberately set. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+2. **Switching primaries in env mode describes the actual procedure.** "Promote" is refused by design when environment variables decide the primary, and the message now says what to do instead: swap `DB_NAME` with `DB_STANDBY_NAME` and restart — data untouched, reversible at any time. The page greys the button out and says the same thing up front. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+3. **The admin page stops offering edits that cannot take effect.** With `DB_*` in charge, the policy controls and "add node" are disabled with a short explanation, so a change is not silently overwritten the next time the page is saved. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+
+### Fixed
+
+1. **A standby whose database does not exist is reported as a missing database.** The bootstrap step used to answer "schema creation failed", which reads as a permissions problem. It now says the database itself is absent and prints the `CREATE DATABASE` that fixes it. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+2. **"Trying the next node" is no longer logged when there is no next node.** A single-node cluster printed that line on every failed read, which sends whoever is debugging a failover looking for a failover that cannot happen. Commit: [9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3).
+
+---
+
+# v1.8.11 - 不用删环境变量，也能有一个能同步的副库
+
+### 新增
+
+1. **`DB_STANDBY_NAME` 直接用环境变量声明副库。** 以前 `DB_*` 部署就是单节点，「同步数据到副库」没有目标；后台保存的集群又被同一批变量挡住，而且在函数计算上那份配置存在 `/tmp`。现在只要设 `DB_STANDBY_NAME`，环境变量本身就描述了主库 + 副库两台：host、端口、账号、密码、TLS、连接池全部沿用主库，所以「同一台 MySQL 上的两个库」只需要加一行、也不用挂 NAS。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+2. **环境变量副库是「手动同步的副本」，程序就按这个定位处理它。** 只要副库来自环境变量，自动故障切换与读分摊就固定关闭：`native` 模式下应用无法区分「同步完成的副本」和「空库」，主库稍微抖一下就自动切到空库，代价是所有人被登出且没有入口再切回来。正常读和写都只走主库，副库只在点「同步数据到副库」时被写入。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+
+### 改进
+
+1. **没有目标可同步时，同步按钮告诉你该怎么加一个，而不是让你删配置。** 以前会提示「请先删除 DB_HOST 等环境变量」，等于让用户拆掉自己有意保留的部署方式。现在直接指出 `DB_STANDBY_NAME`。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+2. **环境变量模式下点「切换主库」会告诉你真正的切换方法。** 主库由环境变量决定时这个操作按设计会被拒绝，提示改成可执行的步骤：把 `DB_NAME` 与 `DB_STANDBY_NAME` 互换后重启，数据不动、随时可换回。页面上按钮直接置灰并写明同样的原因。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+3. **后台不再提供点了也不会生效的编辑。** 环境变量生效期间，策略选项与「添加节点」置灰并给出说明，避免改了之后一保存就把「已保存的集群配置」覆盖掉。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+
+### 修复
+
+1. **副库的库本身不存在时，会明确说「数据库不存在」。** 自动建表失败以前统一报「建表失败」，看起来像权限问题。现在直接说库不存在，并给出该执行的 `CREATE DATABASE`。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+2. **只有一台库时不再打印「正在尝试下一个节点」。** 单节点集群每次读失败都打这一行，会让排障的人去找一个根本不存在的切换。提交：[9991af3](https://github.com/muzhi621/NodeWarden_fceo/commit/9991af3)。
+
+---
+
+# v1.8.10 - A Stuck Sync Now Says Why
+
+### Fixed
+
+1. **"Syncing to the standby" no longer sits at `0/?` with no explanation.** A run that found zero tables used to count as a finished sync — "every table succeeded" is vacuously true when there are no tables — so a copy that moved nothing reported success while the progress bar never moved. It is now reported as a failure that names the schema, and the admin page prints it. Commit: [54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d).
+2. **A standby with no schema is created before the copy instead of failing row by row.** Copying into a database that was never bootstrapped answered `1146 table doesn't exist` for every table, which read as "sync failed" with no hint that the fix was "create the tables". The sync endpoint now runs the same idempotent schema step the save path uses, and reports the missing DDL grants when that is what blocks it. Commit: [54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d).
+3. **Table discovery no longer depends on the connection's default database.** `information_schema … WHERE TABLE_SCHEMA = DATABASE()` matches nothing when a node connects without a default schema, which is how a misconfigured entry turned into "0 tables, done". Every lookup now binds the database name from the node configuration. Commit: [54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d).
+
+### Improved
+
+1. **The sync button names the real blocker when environment variables are in charge.** With `DB_*` set, the effective cluster is a single node, and the endpoint used to answer "replication is the database's job" or "no target to sync into" — describing a cluster the operator never configured. It now says the saved cluster is shadowed by environment variables and which ones to remove. Commit: [54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d).
+2. **Boot warns when the data directory dies with the instance.** The cluster saved in the admin page lives in `$DATA_DIR/kv-store.json`; on a serverless host that is `/tmp`, so the config — the app's only database once `DB_*` is removed — disappears when the instance is recycled. The startup log now prints a warning, which is the difference between a survivable restart and a deployment nobody can log into. Commit: [54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d).
+
+---
+
+# v1.8.10 - 同步卡住时，页面会说出原因
+
+### 修复
+
+1. **「同步数据到副库」不再停在 `0/?` 什么也不说。** 一次没找到任何表的同步，以前会被当成"已完成"——没有表时"每张表都成功"是空真——于是一行数据都没搬的运行反倒报告成功，进度条却永远不动。现在它是一条明确失败，并且报出是哪台库，后台页面会原样显示。提交：[54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d)。
+2. **副库没建过表时，先建表再搬数据，而不是逐表报错。** 往一个从没初始化过的库复制，每张表都会回 `1146 表不存在`，读起来像"同步失败"，却看不出真正要做的是"建表"。同步接口现在会先跑一次和保存路径完全相同的幂等建表；如果是账号缺 DDL 权限，也会直接说出来。提交：[54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d)。
+3. **表名探测不再依赖连接的默认库。** 连接没有默认库时，`information_schema … WHERE TABLE_SCHEMA = DATABASE()` 匹配不到任何行，这就是"库名填错"被显示成"0 张表、同步完成"的原因。现在所有查询都用节点配置里的库名做绑定。提交：[54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d)。
+
+### 改进
+
+1. **环境变量接管时，同步按钮会说清真正的拦路原因。** 设了 `DB_*` 之后生效的集群只有一台，以前接口会回「数据库自身复制」或「没有可同步的目标节点」——描述的是一种用户从未配置过的状态。现在它直接说：后台保存的集群被环境变量挡住，并点名要删哪几个变量。提交：[54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d)。
+2. **数据目录随实例消失时，启动日志会警告。** 后台保存的集群配置存在 `$DATA_DIR/kv-store.json`；在函数计算这类平台上它是 `/tmp`，一旦实例回收，这份配置——删掉 `DB_*` 之后就是应用唯一的数据库——也随之消失。启动日志现在会打一条 WARNING，这就是"重启还能进"和"谁都登不进去"之间的差别。提交：[54827b9](https://github.com/muzhi621/NodeWarden_fceo/commit/54827b9a3e96387495c1d0f11420d482f7667f4d)。
+
+---
+
 # v1.8.9 - Refresh Tokens That Stopped Expiring in 1970
 
 ### Fixed

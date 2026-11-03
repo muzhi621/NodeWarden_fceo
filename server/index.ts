@@ -20,11 +20,13 @@ import type { ReadableStream as NodeWebReadableStream } from 'node:stream/web';
 import { createLimitedBody } from './body-stream';
 
 import { jsonResponse } from '../src/utils/response';
+import { resolveStandbysFromEnv } from '../src/services/db-config';
 import {
   buildNodeEnv,
   configureNodeRuntime,
   getCronSecret,
   handleCronTick,
+  isDataDirEphemeral,
   pipeline,
 } from './node-runtime';
 
@@ -212,5 +214,29 @@ server.listen(PORT, () => {
   console.log(`  attachments:    ${runtime.attachmentsDir}`);
   console.log(`  web vault:      ${runtime.distDir}`);
   console.log(`  database:       ${process.env.DB_HOST ? `MySQL ${process.env.DB_HOST}:${process.env.DB_PORT || 3306}/${process.env.DB_NAME || ''}` : 'configured via env DB_* or admin UI (/admin/database)'}`);
+  // The standby list is a free-form value: a typo, a wrong separator or an entry
+  // pointing at the primary silently yields fewer standbys than intended, and
+  // the only other place that shows it is the admin page (which needs a working
+  // database). Echo what was actually understood, at boot.
+  const standbys = resolveStandbysFromEnv(buildNodeEnv());
+  if (standbys.length > 0) {
+    console.log(
+      `  standbys:       ${standbys.length} · ${standbys
+        .map((node) => `${node.database}@${node.host}:${node.port}`)
+        .join(', ')}`
+    );
+  }
   console.log(`  cron:           POST /internal/cron/backup (x-cron-secret)${cronSecret ? '' : ' — CRON_SECRET not set, endpoint disabled'}`);
+  // The admin-saved MySQL cluster lives in SETTINGS_KV = $DATA_DIR/kv-store.json.
+  // On a serverless host /tmp is per-instance and dies with it, so a deployment
+  // that relies on the admin config (no DB_* variables) silently loses its only
+  // database on the next recycle — every request then returns 503 and the admin
+  // page that could fix it needs a working database. Say it once, loudly, at boot.
+  if (isDataDirEphemeral(runtime.dataDir)) {
+    console.warn(
+      `  WARNING:        data dir ${runtime.dataDir} is inside the temporary directory. A database cluster ` +
+        'saved in the admin page, node sync records and write watermarks are lost when the instance is ' +
+        'recycled. Mount NAS (or set DATA_DIR to a persistent path) before removing the DB_* variables.'
+    );
+  }
 });

@@ -29,6 +29,8 @@ import {
   resolveDbCluster,
   resolveDbConfig,
   resolveDbConfigFromEnv,
+  resolveStandbyFromEnv,
+  resolveStandbysFromEnv,
   resolveStoredCluster,
   saveRuntimeConfig,
   readSyncStates,
@@ -44,7 +46,7 @@ import {
 } from '../services/db-config';
 import { resetDatabaseCache, getDatabase, peekClusterHealth } from '../services/storage-factory';
 import { isMySqlClusterDatabase } from '../services/db-cluster';
-import { syncDatabase, type ClusterSyncResult } from '../services/db-cluster-sync';
+import { countBaseTables, syncDatabase, type ClusterSyncResult } from '../services/db-cluster-sync';
 import { resetDbLifecycle } from '../services/db-lifecycle';
 import { MySqlDatabase } from '../services/storage-mysql';
 import { StorageService } from '../services/storage';
@@ -498,7 +500,7 @@ async function testMySqlConnection(
       errorKind: kind,
     };
   } finally {
-    await db.close();
+    await closeQuietly(db, 'probe');
   }
 }
 
@@ -607,7 +609,7 @@ async function bootstrapSchemaOnCandidate(config: DbNodeConfig): Promise<{ ok: b
     console.error('[db-config] schema bootstrap on candidate database failed:', initError);
     return { ok: false, error: message };
   } finally {
-    await probe.close();
+    await closeQuietly(probe, 'schema bootstrap');
   }
 }
 
@@ -638,13 +640,30 @@ async function hasUserRows(node: DbNodeConfig): Promise<boolean | null> {
     // above already reported the real problem.
     return null;
   } finally {
-    await db.close();
+    await closeQuietly(db, 'probe');
   }
 }
 
 /** Clearing the runtime config falls back to env config or D1 — neither may exist here. */
 function clearingWouldLeaveNoDatabase(env: Env): boolean {
   return !resolveDbConfigFromEnv(env) && !env.DB;
+}
+
+/**
+ * Close a probe pool without letting it fail the request.
+ *
+ * When the server is unreachable the pool has no connection to close and
+ * `close()` rethrows the original connect error — from a `finally` block, which
+ * replaces the (already correct) "could not connect" answer with a 502. Every
+ * caller here has already decided what to report; closing is cleanup, not a step
+ * whose result anybody reads.
+ */
+async function closeQuietly(pool: { close: () => Promise<void> }, label: string): Promise<void> {
+  try {
+    await pool.close();
+  } catch (error) {
+    console.warn(`[db-config] closing the ${label} pool failed:`, error);
+  }
 }
 
 function wantsForce(request: Request): boolean {
@@ -950,11 +969,37 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
       ? Math.min(30_000, Math.max(3_000, Math.round(requestedBudget)))
       : null;
 
+  // A cluster described by DB_* env vars is normally a single node, and then
+  // there is nothing to copy into: the saved cluster is shadowed, so its
+  // standbys never reach the effective config. Say that plainly *and* name the
+  // one variable that fixes it — an env-only deployment is the recommended
+  // setup, and it can have sync targets now (see resolveStandbysFromEnv).
+  const envPrimary = resolveDbConfigFromEnv(env);
+  if (envPrimary && resolveStandbysFromEnv(env).length === 0) {
+    const stored = await resolveStoredCluster(env);
+    const savedStandbys = (stored?.nodes ?? []).filter((node) => node.id !== 'env-primary').length;
+    return errorResponse(
+      '当前生效的是环境变量里的那一个库（单节点），没有可同步的目标库。' +
+        '要同步到副库，请给函数加上 DB_STANDBY_NODES，值是一个副库清单（逗号分隔，数量不限）：' +
+        '同实例的库只写库名，如 DB_STANDBY_NODES=档案库,离线库；' +
+        '在另一台服务器的库写完整连接串，如 DB_STANDBY_NODES=mysql://user:pass@10.0.0.5:3306/nodewarden_bak。' +
+        (savedStandbys > 0
+          ? `后台已保存的 ${savedStandbys} 个副库节点被 DB_* 环境变量挡住了，不会参与同步。`
+          : ''),
+      409
+    );
+  }
+
   const cluster = await resolveDbCluster(env);
   if (cluster.mode !== 'mysql' || cluster.nodes.length === 0) {
     return errorResponse('当前没有配置外接 MySQL 节点，无需同步。', 400);
   }
-  if (cluster.policy.syncMode !== 'write-through') {
+  // `native` means the database replicates on its own — except for an
+  // env-described standby, which is by definition not part of any replication
+  // setup: it is a plain schema that only this endpoint ever fills. Refusing to
+  // sync it would leave that deployment with no way to make a copy at all.
+  const manualEnvStandby = cluster.source === 'env' && cluster.nodes.length > 1;
+  if (cluster.policy.syncMode !== 'write-through' && !manualEnvStandby) {
     return errorResponse(
       '当前副库同步方式是「数据库自身复制」，数据由数据库负责，应用层不需要也不应该写入副库。' +
         '如需应用层双写，请先切换到「应用层实时双写」并保存。',
@@ -1056,12 +1101,53 @@ export async function handleAdminSyncDbCluster(request: Request, env: Env, actor
     // Tables an earlier chunk already finished are not re-read: without this,
     // every round starts over at table one and the bar would reset with it.
     const skipTables = resuming && mode === 'merge' ? previous.doneTables : undefined;
+
+    // A standby whose schema was never created answers every INSERT with 1146,
+    // so the run reports one identical error per table and nothing is copied.
+    // Create the schema first — the same idempotent step the save path runs —
+    // and say so plainly when the account has no DDL rights.
+    //
+    // `null` counts too: it means the probe itself failed (the database does not
+    // exist, or the account cannot read information_schema), which is exactly
+    // the case where bootstrapping either fixes it or produces the real error.
+    const targetTableCount = await countBaseTables(target.db, spec?.database);
+    if ((targetTableCount === 0 || targetTableCount === null) && spec) {
+      const bootstrap = await bootstrapSchemaOnCandidate(spec);
+      if (!bootstrap.ok) {
+        const detail = bootstrap.error ?? 'unknown error';
+        const missingDatabase = /unknown database|1049/i.test(detail);
+        reports.push({
+          id: target.id,
+          label: spec.label,
+          ok: false,
+          complete: false,
+          rowsRead: 0,
+          rowsWritten: 0,
+          truncated: false,
+          durationMs: 0,
+          tables: [],
+          error: missingDatabase
+            ? `副库「${spec.label}」指向的数据库「${spec.database}」在服务器上不存在（${detail}）。` +
+              `请先执行 CREATE DATABASE \`${spec.database}\`（字符集建议 utf8mb4），` +
+              '表结构会在下一次点「同步数据到副库」时自动建好。'
+            : `副库「${spec.label}」里没有任何数据表，自动建表也失败了（${detail}）。` +
+              '请给该库账号授予 CREATE/ALTER/INDEX 权限，或手动导入表结构后重试。',
+        });
+        continue;
+      }
+      console.info('[db-config] created the missing schema on standby before syncing:', spec.label);
+    }
+
     const result = await syncDatabase(source.db, target.db, {
       maxDurationMs: Math.min(perTargetMs, remaining),
       deadline,
       mode,
       cursors,
       skipTables,
+      // Explicit schema: `information_schema … = DATABASE()` returns nothing
+      // when the connection has no default database, which used to look like a
+      // finished sync of zero tables.
+      sourceSchema: cluster.nodes.find((node) => node.id === source.id)?.database || undefined,
     });
 
     const complete = result.ok && result.complete;
@@ -1189,7 +1275,7 @@ async function probeWritability(node: DbNodeConfig): Promise<'writable' | 'read-
     console.warn('[db-config] could not read the read_only flag:', error);
     return 'unknown';
   } finally {
-    await db.close();
+    await closeQuietly(db, 'probe');
   }
 }
 
@@ -1237,8 +1323,19 @@ export async function handleAdminPromoteDbNode(
   if (!targetId) return errorResponse('缺少 nodeId：请指定要提升为主库的节点。', 400);
 
   if (resolveDbConfigFromEnv(env)) {
+    const standbys = resolveStandbysFromEnv(env);
+    const pickedIndex = standbys.findIndex((_, index) => `env-standby-${index + 1}` === targetId);
+    const picked = pickedIndex >= 0 ? standbys[pickedIndex] : null;
+    const onSameServer = picked ? picked.host === resolveDbConfigFromEnv(env)?.host : false;
     return errorResponse(
-      'DB_* 环境变量优先于运行时配置：主库由环境变量决定，页面上的切换不会生效。请修改环境变量后重启。',
+      '主库由环境变量决定，页面上的切换不会生效。' +
+        (picked
+          ? `要把写入切到「${picked.database}」：把 DB_NAME 改成它，并把它从 DB_STANDBY_NODES 里删掉` +
+            (onSameServer
+              ? '；同一台服务器上 DB_HOST / DB_PORT 不用动'
+              : '；它原来在另一台服务器，所以 DB_HOST / DB_PORT / DB_USER / DB_PASSWORD 也要改成它的') +
+            '，重启即可。'
+          : '要换主库，请改 DB_HOST / DB_NAME 后重启；想先有几个可同步的副库，加 DB_STANDBY_NODES=库名1,库名2。'),
       409
     );
   }
