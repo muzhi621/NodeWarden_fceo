@@ -51095,6 +51095,23 @@ function isPrivateHost(hostname) {
   }
   return isPrivateIpv4Literal(host);
 }
+function isPlatformInternalHost(hostname) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return host === "qcloudteo.com" || host.endsWith(".qcloudteo.com") || isPrivateHost(host);
+}
+function resolvePublicOrigin(context) {
+  const raw = String(context?.env?.PUBLIC_ORIGIN ?? process.env.PUBLIC_ORIGIN ?? "").trim();
+  if (!raw) return null;
+  try {
+    const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+    const url = new URL(candidate);
+    if (url.protocol !== "https:" && url.protocol !== "http:" || !url.hostname) return null;
+    if (url.pathname !== "/" || url.search || url.hash || url.username || url.password) return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
 function splitAuthority(authority) {
   const value = authority.trim();
   if (value.startsWith("[")) {
@@ -51124,21 +51141,39 @@ function adaptRequest(incoming, context) {
     url = null;
   }
   if (url) {
-    const forwardedHost = headers.get("x-forwarded-host") || "";
-    const hostHeader = headers.get("host") || "";
-    const hostTarget = forwardedHost || hostHeader;
-    if (isPrivateHost(url.hostname) && hostTarget && url.host !== hostTarget) {
-      const [hostname, port] = splitAuthority(hostTarget);
-      if (hostname) {
-        url.hostname = hostname;
-        url.port = port;
+    const publicOrigin = resolvePublicOrigin(context);
+    if (publicOrigin) {
+      if (url.protocol !== publicOrigin.protocol) {
+        url.protocol = publicOrigin.protocol;
         changed = true;
       }
-    }
-    const proto = headers.get("x-forwarded-proto") || "";
-    if ((proto === "https" || proto === "http") && url.protocol !== `${proto}:`) {
-      url.protocol = `${proto}:`;
-      changed = true;
+      if (url.hostname !== publicOrigin.hostname) {
+        url.hostname = publicOrigin.hostname;
+        changed = true;
+      }
+      if (url.port !== publicOrigin.port) {
+        url.port = publicOrigin.port;
+        changed = true;
+      }
+    } else {
+      const forwardedHost = headers.get("x-forwarded-host") || "";
+      const hostHeader = headers.get("host") || "";
+      const [hostName] = splitAuthority(hostHeader);
+      const hostIsInternal = !hostName || isPlatformInternalHost(hostName);
+      const hostTarget = hostIsInternal ? forwardedHost || hostHeader : hostHeader;
+      if (isPlatformInternalHost(url.hostname) && hostTarget && url.host !== hostTarget) {
+        const [hostname, port] = splitAuthority(hostTarget);
+        if (hostname) {
+          url.hostname = hostname;
+          url.port = port;
+          changed = true;
+        }
+      }
+      const proto = headers.get("x-forwarded-proto") || "";
+      if ((proto === "https" || proto === "http") && url.protocol !== `${proto}:`) {
+        url.protocol = `${proto}:`;
+        changed = true;
+      }
     }
   }
   if (!changed) return incoming;
@@ -51188,7 +51223,7 @@ async function handleEdgeOneRequest(context) {
 function onRequest(context) {
   return handleEdgeOneRequest(context);
 }
-var __testing = { isPrivateHost, adaptRequest };
+var __testing = { isPrivateHost, isPlatformInternalHost, resolvePublicOrigin, adaptRequest };
 export {
   __testing,
   onRequest as default,

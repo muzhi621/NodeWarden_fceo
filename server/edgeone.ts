@@ -64,6 +64,44 @@ function isPrivateHost(hostname: string): boolean {
 }
 
 /**
+ * EdgeOne Pages hands Node Functions an internal back-reference URL such as
+ * `http://pages-pro-62-4038.pages-scf-sg-pro.qcloudteo.com/...`. That is a
+ * *public-looking* hostname, so `isPrivateHost()` alone used to conclude the
+ * platform had already built the correct public URL and ignore every forwarding
+ * header. The browser's `Origin` is the custom domain, so
+ * `isSameOriginWriteRequest()` then rejected every registration with 403
+ * "Forbidden origin" (seen on a deployment whose `/api/config` reported the
+ * qcloudteo.com vault URL). `*.qcloudteo.com` is Tencent-internal and can never
+ * be a customer's site, so it is safe to treat as an internal shape alongside
+ * private IPs.
+ */
+function isPlatformInternalHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return host === 'qcloudteo.com' || host.endsWith('.qcloudteo.com') || isPrivateHost(host);
+}
+
+/**
+ * Optional, explicit public origin, e.g. `PUBLIC_ORIGIN=https://k.example.com`.
+ * Server-side configuration is the only source that cannot be influenced by
+ * request headers, so it is the reliable fix when a CDN rewrites Host or when
+ * http vs https is ambiguous. Only a bare origin is accepted: a path/query here
+ * would silently change routing. A host without a scheme defaults to https.
+ */
+function resolvePublicOrigin(context: EdgeOneContext): URL | null {
+  const raw = String(context?.env?.PUBLIC_ORIGIN ?? process.env.PUBLIC_ORIGIN ?? '').trim();
+  if (!raw) return null;
+  try {
+    const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+    const url = new URL(candidate);
+    if ((url.protocol !== 'https:' && url.protocol !== 'http:') || !url.hostname) return null;
+    if (url.pathname !== '/' || url.search || url.hash || url.username || url.password) return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Split `host[:port]` (IPv6 literals keep their brackets).
  *
  * Needed because the URL `host` setter keeps the *previous* port when the new
@@ -121,31 +159,58 @@ function adaptRequest(incoming: Request, context: EdgeOneContext): Request {
   }
 
   if (url) {
-    // Adopt the forwarded host ONLY when the function is reached through an
-    // internal origin shape (loopback / private / CGNAT / ULA). With a public
-    // request.url the platform already built the correct public URL, and a
-    // client-supplied X-Forwarded-Host must not be able to forge the origin
-    // that isSameOriginWriteRequest() compares the Origin header against
-    // (the CSRF gate for registration and password hints).
-    const forwardedHost = headers.get('x-forwarded-host') || '';
-    const hostHeader = headers.get('host') || '';
-    const hostTarget = forwardedHost || hostHeader;
-    if (isPrivateHost(url.hostname) && hostTarget && url.host !== hostTarget) {
-      const [hostname, port] = splitAuthority(hostTarget);
-      if (hostname) {
-        url.hostname = hostname;
-        url.port = port;
+    // A configured PUBLIC_ORIGIN wins: it cannot be influenced by request
+    // headers, and it also settles http vs https when the platform hands the
+    // function a plain-http back-reference URL.
+    const publicOrigin = resolvePublicOrigin(context);
+    if (publicOrigin) {
+      if (url.protocol !== publicOrigin.protocol) {
+        url.protocol = publicOrigin.protocol;
         changed = true;
       }
-    }
-    // Even when the host is already public, the platform may hand the function
-    // an http:// URL for an https:// site (internal back-reference). The
-    // protocol follows x-forwarded-proto unconditionally: a spoofed value can
-    // only produce an origin *mismatch* (403), never a bypass.
-    const proto = headers.get('x-forwarded-proto') || '';
-    if ((proto === 'https' || proto === 'http') && url.protocol !== `${proto}:`) {
-      url.protocol = `${proto}:`;
-      changed = true;
+      if (url.hostname !== publicOrigin.hostname) {
+        url.hostname = publicOrigin.hostname;
+        changed = true;
+      }
+      // Assign the port separately: the URL `host` setter keeps the previous
+      // port when the new authority has none (see splitAuthority).
+      if (url.port !== publicOrigin.port) {
+        url.port = publicOrigin.port;
+        changed = true;
+      }
+    } else {
+      // Adopt the forwarded host ONLY when the function is reached through an
+      // internal origin shape (loopback / private / CGNAT / ULA / EdgeOne's
+      // qcloudteo.com back-reference). With a genuinely public request.url the
+      // platform already built the correct public URL, and a client-supplied
+      // X-Forwarded-Host must not be able to forge the origin that
+      // isSameOriginWriteRequest() compares the Origin header against (the CSRF
+      // gate for registration and password hints).
+      const forwardedHost = headers.get('x-forwarded-host') || '';
+      const hostHeader = headers.get('host') || '';
+      // `Host` is a forbidden header in browsers; `x-forwarded-host` can be
+      // supplied by a client. Prefer Host unless it still describes an internal
+      // shape, in which case the forwarding header is the only hint left.
+      const [hostName] = splitAuthority(hostHeader);
+      const hostIsInternal = !hostName || isPlatformInternalHost(hostName);
+      const hostTarget = hostIsInternal ? forwardedHost || hostHeader : hostHeader;
+      if (isPlatformInternalHost(url.hostname) && hostTarget && url.host !== hostTarget) {
+        const [hostname, port] = splitAuthority(hostTarget);
+        if (hostname) {
+          url.hostname = hostname;
+          url.port = port;
+          changed = true;
+        }
+      }
+      // Even when the host is already public, the platform may hand the
+      // function an http:// URL for an https:// site (internal back-reference).
+      // The protocol follows x-forwarded-proto: a spoofed value can only
+      // produce an origin *mismatch* (403), never a bypass.
+      const proto = headers.get('x-forwarded-proto') || '';
+      if ((proto === 'https' || proto === 'http') && url.protocol !== `${proto}:`) {
+        url.protocol = `${proto}:`;
+        changed = true;
+      }
     }
   }
 
@@ -230,4 +295,4 @@ export default function onRequest(context: EdgeOneContext): Promise<Response> {
 export { getRuntimeInfo } from './node-runtime';
 
 /** Test surface for the smoke test: pure adapters, no secrets involved. */
-export const __testing = { isPrivateHost, adaptRequest };
+export const __testing = { isPrivateHost, isPlatformInternalHost, resolvePublicOrigin, adaptRequest };

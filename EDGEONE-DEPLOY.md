@@ -134,6 +134,7 @@ EdgeOne 按 `node-functions/` 的目录结构生成路由。因为后端路径�
 | `DB_SSL` | — | TiDB 必须 `true`；自建无 TLS 时 `false` |
 | `DB_CONN_LIMIT` | — | 连接池上限，默认 5，函数环境不建议调大 |
 | `CRON_SECRET` | 计划备份时 | 见第六节 |
+| `PUBLIC_ORIGIN` | 自定义域名时建议 | 站点完整 origin，如 `https://k.1008618.xyz`；修正平台内部回源 URL 导致的 `403 Forbidden origin`，见下方 |
 | `MAX_BODY_MB` | — | **建议设 `5`**（平台请求体上限 6 MB，设大了也用不上） |
 | `HIDE_WEB_VAULT` / `WEBAUTHN_*` / `YUBICO_VALIDATION_URLS` | — | 与 Workers / FC 版一致 |
 
@@ -144,6 +145,18 @@ EdgeOne 按 `node-functions/` 的目录结构生成路由。因为后端路径�
 > 自签库请用 `DB_SSL_INSECURE=1`，TiDB 的公信 CA 无需配置。
 > ⚠️ `INPROCESS_CRON` **不要开**：多实例会各跑一遍备份，而且会让实例无法休眠。
 
+> ⚠️ **`PUBLIC_ORIGIN` 与 `403 Forbidden origin`**：EdgeOne Pages 把请求交给 Node Functions 时，
+> `request.url` 可能是平台内部回源地址（形如 `http://pages-pro-xxx.pages-scf-sg-pro.qcloudteo.com/...`），
+> 而浏览器发的 `Origin` 是你自己的域名。注册、密码提示等写接口会做同源校验，两者不等就返回
+> `403 Forbidden origin`（`/healthz` 仍是全绿，很容易误判成数据库或前端问题）。
+> 本分支已能自动识别这种 `*.qcloudteo.com` 回源地址，并采纳 `Host` / `X-Forwarded-Host`、
+> 按 `X-Forwarded-Proto` 修正协议；但**最可靠的是显式配置 `PUBLIC_ORIGIN`**——它是服务端配置，
+> 请求头伪造不了，还能确定 http / https。值必须与浏览器地址栏的 origin **逐字一致**（含协议、
+> 含端口，无路径）。若站点同时能用 http 和 https，先开启强制 HTTPS，再统一填 `https://...`。
+>
+> 诊断命令：`curl -s https://<你的域名>/api/config | jq -r .environment.vault`
+> —— 返回的应该是你的域名；若还是 `*.qcloudteo.com` 或协议不符，就是这个问题。
+
 **存储相关（本平台没有可配置项，知道结论就行）**
 
 | 想持久化的东西 | 本平台能不能 | 说明 |
@@ -151,7 +164,12 @@ EdgeOne 按 `node-functions/` 的目录结构生成路由。因为后端路径�
 | 附件 / Send 文件 | ❌ | 落在 `/tmp/nodewarden/attachments`，实例回收即丢；平台无对象存储绑定 |
 | 后台保存的数据库配置 | ❌ | 同上，存在 `/tmp`；所以数据库连接**必须**走 `DB_*` 环境变量 |
 | 节点同步记录 / 写入水位 | ❌ | 同上；多节点主副库在本平台也不可用（见第五节） |
+| 控制台「KV 存储」命名空间 / Blob 存储 | ❌ 无需创建 | 本项目跑在 **Node Functions**，平台只给 Edge Functions 提供 KV 绑定；代码用 `/tmp` 上的文件 shim 提供 `SETTINGS_KV`，业务数据全在 MySQL |
 
+> 控制台「存储 → KV 存储」显示「暂无数据」是**正常的，不用点「绑定命名空间」**：
+> `server/edgeone.ts` 顶部注释与 `server/node-runtime.ts` 的 `createFileKv()` 说明了本运行时不读平台 KV，
+> 创建了也不会被读取。Blob 存储同理。
+>
 > 唯一能持久的是**数据库里的业务数据**。附件重度使用请以 FC 为主力（NAS 挂载见
 > [DEPLOY.md 3.2](DEPLOY.md#32-阿里云-fc挂-nas-才能持久化附件)），本平台只当入口。
 
@@ -174,6 +192,9 @@ Bitwarden 客户端用该地址登录、保存/同步一条密码。
 ```bash
 curl https://<你的域名>/healthz
 # 期望：{"ok":true,"db":"up","mode":"mysql","source":"env","runtime":"node"}
+
+curl -s https://<你的域名>/api/config | jq -r .environment.vault
+# 期望：https://<你的域名>   ← 若回显 *.qcloudteo.com 或协议不符，注册会 403 Forbidden origin
 ```
 
 - `runtime:"node"` 表示请求确实进了 Node Functions（不是静态资源）；
@@ -275,7 +296,7 @@ npm run check:edgeone      # CI/本地校验：提交的 bundle 是否与源码�
 | `/healthz` 502/超时 | 函数起来了但连不上库 | 检查 `DB_*`、`DB_SSL`；函数出口是公网，自建库别只监听内网 |
 | 全站 500 `Database not initialized` | 建表失败 | 看 Pages → 函数日志；常见是账号没有 CREATE 权限、或 `DB_NAME` 写错 |
 | 浏览器刷新子页面出现 404 白屏 | 静态层没有回退到 index.html，且 `dist/404.html` 也丢了 | 确认构建命令是 `npm run build:edgeone:pages`（会产出 `404.html`）；**不要**用 `rewrites: /* → /index.html` 硬修，那条规则会连 `/assets/*` 一起重写 |
-| 注册报 `403 Forbidden origin` | 请求的 `Origin` 与服务器识别的站点域名不一致 | 本分支会：①仅在**内网回源**形态下采纳 `x-forwarded-host`（公网 URL 不再信任该头，防伪造）；②按 `x-forwarded-proto` 无条件修正协议；③host+port 整体赋值避免内部端口泄漏。若仍报，检查是否套了一层 CDN/反代改了 Host |
+| 注册报 `403 Forbidden origin` | 平台交给函数的 `request.url` 是内部回源域名（如 `*.pages-scf-*.qcloudteo.com`），与浏览器 `Origin` 不同源 | ①环境变量加 `PUBLIC_ORIGIN=<地址栏完整 origin>`（推荐，最可靠，且确定 http/https）；②本分支也会自动识别 `*.qcloudteo.com` 内部回源地址、采纳 `Host` / `X-Forwarded-Host` 并按 `X-Forwarded-Proto` 修正协议。用 `GET /api/config` 看 `environment.vault` 是否已变成你的域名；改完**重新部署** |
 | 注册/登录报 `403 Client IP is required` | 平台没把客户端 IP 传进来 | 本分支已用 `context.clientIp` 补 `X-Forwarded-For`；若仍报，说明平台字段变了，需同步适配 |
 | 上传附件失败 | 超过 6 MB 平台上限 | 换小文件或用 FC |
 | 修改环境变量后没变化 | 平台规则：只对新部署生效 | 改完重新部署一次 |

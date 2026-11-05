@@ -22,6 +22,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const withDb = process.argv.includes('--db');
+// The adapter falls back to process.env.PUBLIC_ORIGIN; keep the smoke test
+// deterministic even when the developer's shell happens to define it.
+delete process.env.PUBLIC_ORIGIN;
 const results = [];
 
 const PUBLIC_HOST = 'nodewarden-test.edgeone.app';
@@ -351,6 +354,78 @@ async function run() {
     assert.ok(!__testing.isPrivateHost('8.8.8.8'));
     assert.ok(!__testing.isPrivateHost('203.0.113.9'));
   });
+
+  // ---------------------------------------------------------------------
+  // 2b. EdgeOne internal back-reference URLs (403 "Forbidden origin")
+  // ---------------------------------------------------------------------
+  const INTERNAL_EDGEONE_HOST = 'pages-pro-62-4038.pages-scf-sg-pro.qcloudteo.com';
+
+  check('qcloudteo.com back-reference hosts count as internal', () => {
+    assert.ok(__testing.isPlatformInternalHost(INTERNAL_EDGEONE_HOST));
+    assert.ok(__testing.isPlatformInternalHost('10.0.0.7'));
+    assert.ok(!__testing.isPlatformInternalHost(PUBLIC_HOST));
+    assert.ok(!__testing.isPlatformInternalHost('evil.example'));
+  });
+
+  check('internal back-reference URL adopts the forwarded public host', () => {
+    // Regression: the real platform handed over
+    // http://pages-pro-...qcloudteo.com/api/... while the browser sent
+    // Origin: https://<custom domain>, so registration returned 403.
+    const adapted = __testing.adaptRequest(
+      new Request(`http://${INTERNAL_EDGEONE_HOST}/api/accounts/register`, {
+        method: 'POST',
+        headers: { 'x-forwarded-host': PUBLIC_HOST },
+      }),
+      { clientIp: '203.0.113.7' }
+    );
+    assert.equal(new URL(adapted.url).origin, `http://${PUBLIC_HOST}`);
+    assert.equal(new URL(adapted.url).pathname, '/api/accounts/register');
+  });
+
+  check('Host is preferred over a spoofed X-Forwarded-Host on internal URLs', () => {
+    const adapted = __testing.adaptRequest(
+      new Request(`http://${INTERNAL_EDGEONE_HOST}/api/config`, {
+        headers: { host: PUBLIC_HOST, 'x-forwarded-host': 'evil.example' },
+      }),
+      { clientIp: '203.0.113.7' }
+    );
+    assert.equal(new URL(adapted.url).origin, `http://${PUBLIC_HOST}`);
+  });
+
+  check('PUBLIC_ORIGIN pins the origin and ignores all forwarding headers', () => {
+    const adapted = __testing.adaptRequest(
+      new Request(`http://${INTERNAL_EDGEONE_HOST}/api/config`, {
+        headers: { 'x-forwarded-host': 'evil.example', 'x-forwarded-proto': 'http' },
+      }),
+      { clientIp: '203.0.113.7', env: { PUBLIC_ORIGIN: `https://${PUBLIC_HOST}` } }
+    );
+    assert.equal(new URL(adapted.url).origin, `https://${PUBLIC_HOST}`);
+    assert.equal(new URL(adapted.url).pathname, '/api/config');
+  });
+
+  check('PUBLIC_ORIGIN rejects paths and non-http schemes', () => {
+    for (const bad of [`https://${PUBLIC_HOST}/vault`, 'ftp://x.example', 'javascript:alert(1)']) {
+      assert.equal(__testing.resolvePublicOrigin({ env: { PUBLIC_ORIGIN: bad } }), null, bad);
+    }
+  });
+
+  if (withDb) {
+    // Without a database the shared pipeline answers the DB gate (503) before
+    // any route runs, so the end-to-end config response is only observable
+    // in the --db run. The adapter-level checks above cover the no-DB case.
+    check('/api/config reports the public origin after an internal back-reference', async () => {
+      const res = await handleEdgeOneRequest({
+        request: new Request(`http://${INTERNAL_EDGEONE_HOST}/api/config`, {
+          headers: { 'x-forwarded-host': PUBLIC_HOST, 'x-forwarded-proto': 'https' },
+        }),
+        clientIp: '203.0.113.7',
+        env: {},
+      });
+      const body = await res.text();
+      assert.equal(res.status, 200, body);
+      assert.equal(JSON.parse(body).environment.vault, `https://${PUBLIC_HOST}`);
+    });
+  }
 
   check('variables arrive through context.env (EdgeOne injection path)', async () => {
     const res = await handleEdgeOneRequest({
