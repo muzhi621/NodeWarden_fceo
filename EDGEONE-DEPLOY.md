@@ -100,7 +100,7 @@ EdgeOne 按 `node-functions/` 的目录结构生成路由。因为后端路径�
 
 ### 1. 建项目
 1. 打开 [EdgeOne Pages 控制台](https://console.cloud.tencent.com/edgeone/pages) → 新建项目 → **导入 Git 仓库**；
-2. 选 `muzhi621/NodeWarden_fceo`，分支 **`edgeone`**；
+2. 选 `muzhi621/NodeWarden_fceo`，分支 **`edgeone`**（该分支已与 `main` 同步，同为 v1.8.15；直接选 `main` 也可以）；
 3. 构建配置由仓库根的 `edgeone.json` 决定，无需手填（控制台里也应显示）：
 
    | 项 | 值 |
@@ -108,7 +108,18 @@ EdgeOne 按 `node-functions/` 的目录结构生成路由。因为后端路径�
    | 安装命令 | `npm install --no-audit --no-fund` |
    | 构建命令 | `npm run build:edgeone:pages`（= Vite 构建 + 产出 `404.html`） |
    | 输出目录 | `dist` |
-   | Node 版本（构建） | `22.11.0` |
+   | Node 版本（构建） | **`22.21.1`** |
+
+> ⚠️ **Node 版本不能低于 `22.12.0`**：Vite 8.3.3 与全部 `@rolldown/binding-*` 的 `engines` 都是
+> `^20.19.0 || >=22.12.0`，且 Vite 8 依赖 Node 22.12 起默认开启的 `require(esm)`。用平台默认的
+> `22.11.0` 会同时踩两个坑：npm 把 `@rolldown/binding-linux-x64-gnu` 判为「平台不适用」而跳过 →
+> `Cannot find native binding`；以及 `@prefresh/vite` 报 `ERR_REQUIRE_ESM`。
+> **控制台「Node.js 版本」也要选 `22.21.1`**（下拉里还有 `22.17.1` / `24.18.0` 等 ≥22.12.0 的值可用），
+> 与 `edgeone.json` 保持一致，改完重新部署才生效。不要只补装 rolldown 的 binding 包，
+> `require(esm)` 那一半问题仍在。
+>
+> `npm install` 可能打印 `EBADENGINE` 警告：`package.json` 声明 `^22.23.4+`，而平台 22 系列最高到
+> `22.21.1`。npm 默认不强制 `engines`，**该警告不影响构建**，不要因此改 `package.json` 的 `engines`。
 
 > `node-functions/_nodewarden/runtime.mjs` 是**已提交的打包产物**，构建阶段不需要跑 esbuild，
 > 因此构建命令只有前端 Vite 构建（外加一个零依赖的 404 页复制）。若你改了 `src/` 或 `server/`，
@@ -268,7 +279,8 @@ npm run check:edgeone      # CI/本地校验：提交的 bundle 是否与源码�
 | 注册/登录报 `403 Client IP is required` | 平台没把客户端 IP 传进来 | 本分支已用 `context.clientIp` 补 `X-Forwarded-For`；若仍报，说明平台字段变了，需同步适配 |
 | 上传附件失败 | 超过 6 MB 平台上限 | 换小文件或用 FC |
 | 修改环境变量后没变化 | 平台规则：只对新部署生效 | 改完重新部署一次 |
-| 构建失败提示 Node 版本 | `edgeone.json` 的 `nodeVersion` 与环境不匹配 | 改成控制台默认，或换成 `20.18.0` / `22.11.0` |
+| 构建报 `Cannot find native binding` / `ERR_REQUIRE_ESM` / `Vite requires Node.js version 20.19+ or 22.12+` | 构建机 Node 是平台默认的 `22.11.0`，低于 Vite 8 / rolldown 的 `>=22.12.0` 门槛 | 把控制台「Node.js 版本」与 `edgeone.json` 的 `nodeVersion` 都改成 `22.21.1` 后重新部署；**不要**只补装 `@rolldown/binding-*`，`require(esm)` 那一半问题仍在 |
+| 构建失败提示 Node 版本不可用 | 填了平台未预装的版本号（如 `22.23.4`） | 只用下拉列表里的值：`22.21.1` / `22.17.1` / `24.18.0` / `20.18.0` 等；手填其它版本可能直接部署失败 |
 
 ---
 

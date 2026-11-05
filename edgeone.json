@@ -2,7 +2,7 @@
   "installCommand": "npm install --no-audit --no-fund",
   "buildCommand": "npm run build:edgeone:pages",
   "outputDirectory": "dist",
-  "nodeVersion": "22.11.0",
+  "nodeVersion": "22.21.1",
   "headers": [
     {
       "source": "/assets/*",
@@ -21,9 +21,7 @@
     }
   ],
   "cloudFunctions": {
-    "nodejs": {
-      "maxDuration": 120,
-      "externalNodeModules": ["mysql2"]
-    }
+    "maxDuration": 120,
+    "externalNodeModules": ["mysql2"]
   }
 }
