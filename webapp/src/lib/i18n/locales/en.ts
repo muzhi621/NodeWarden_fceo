@@ -1440,6 +1440,7 @@ const en: Record<string, string> = {
   "txt_log_reason_bad_password": "Bad password",
   "txt_log_reason_device_missing": "Device missing",
   "txt_log_reason_device_session_mismatch": "Device session mismatch",
+  "txt_log_reason_missing_token": "Request carried no refresh token (the browser did not keep or send the cookie)",
   "txt_log_reason_token_not_found_or_expired": "Token missing or expired",
   "txt_log_reason_user_inactive": "User inactive",
   "txt_log_reason_user_missing": "User missing",

@@ -5,7 +5,7 @@ import { t } from '@/lib/i18n';
 import type { CustomEquivalentDomain, DomainRules } from '@/lib/types';
 import { normalizeEquivalentDomain } from '@shared/domain-normalize';
 
-const CUSTOM_GLOBAL_DOMAINS_PR_URL = 'https://github.com/shuaiplus/nodewarden/edit/main/src/static/global_domains.custom.json';
+const CUSTOM_GLOBAL_DOMAINS_PR_URL = 'https://github.com/muzhi621/NodeWarden_fceo/edit/main/src/static/global_domains.custom.json';
 
 interface DomainRulesPageProps {
   rules: DomainRules | null;

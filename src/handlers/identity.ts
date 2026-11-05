@@ -916,12 +916,31 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
       unofficialServer: true,
     });
   } else if (grantType === 'refresh_token') {
-    const refreshToken = String(body.refresh_token || '').trim() || (
-      shouldUseWebSession(request)
-        ? parseCookieValue(request, WEB_REFRESH_COOKIE)
-        : null
-    );
+    const webSession = shouldUseWebSession(request);
+    const cookieToken = webSession ? parseCookieValue(request, WEB_REFRESH_COOKIE) : null;
+    const refreshToken = String(body.refresh_token || '').trim() || cookieToken || '';
     if (!refreshToken) {
+      // This used to return silently, which hid the most common cause of a
+      // "the page logs me out when I reload it" report: the browser simply did
+      // not send the cookie back, so nothing ever reached token validation and
+      // nothing was logged. Record what actually arrived — the presence of a
+      // Cookie header at all, and of the cookie under its expected name —
+      // because "no cookies for this origin" and "a cookie but not this one"
+      // have completely different fixes.
+      await safeWriteAuditEvent(env, {
+        action: 'auth.refresh.failed.missing_token',
+        category: 'auth',
+        level: 'warn',
+        targetType: 'refreshToken',
+        metadata: {
+          grantType,
+          reason: 'missing_token',
+          webSession,
+          cookieHeader: String(request.headers.get('Cookie') || '').trim() ? 'present' : 'absent',
+          webCookie: cookieToken ? 'present' : 'absent',
+          ...auditRequestMetadata(request),
+        },
+      });
       return identityErrorResponse('Refresh token is required', 'invalid_request', 400);
     }
 
@@ -1002,6 +1021,9 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
         metadata: {
           grantType,
           reason: result.reason,
+          stage: result.stage,
+          tokenRows: result.tokenRows,
+          newestTokenAt: result.newestTokenAt,
           webSession: shouldUseWebSession(request),
           ...auditRequestMetadata(request),
         },

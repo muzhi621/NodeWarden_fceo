@@ -1,0 +1,6 @@
+# Generated bundles are consumed as-is (FC `node server/index.mjs`, EdgeOne Node
+# Functions) and `npm run check:edgeone` compares them against a fresh build.
+# Pin LF so a Windows checkout with core.autocrlf=true does not make the
+# committed artifact differ from what esbuild emits.
+server/index.mjs text eol=lf
+node-functions/**/*.mjs text eol=lf

@@ -1,15 +1,41 @@
-import { useCallback, useEffect, useState } from 'preact/hooks';
-import { Database, Loader2, PlugZap, RefreshCw, Save, Trash2 } from 'lucide-preact';
+import { useCallback, useEffect, useMemo, useState } from 'preact/hooks';
+import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Database,
+  HardDrive,
+  Loader2,
+  Pencil,
+  PlugZap,
+  Plus,
+  RefreshCw,
+  Save,
+  Trash2,
+  X,
+} from 'lucide-preact';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import LoadingState from '@/components/LoadingState';
 import type { AuthedFetch } from '@/lib/api/shared';
 import {
+  DEFAULT_CLUSTER_POLICY,
   clearDbConfig,
   getDbConfigStatus,
+  probeDbNodes,
+  promoteDbNode,
   saveDbConfig,
-  testDbConfig,
-  type DbConfigInput,
+  syncDbCluster,
+  testDbNode,
+  type DbClusterPolicy,
   type DbConfigStatus,
-  type DbConfigTestResult,
+  type DbNodeInput,
+  type DbNodeRole,
+  type DbSyncCopyMode,
+  type DbSyncProgress,
+  type DbSyncResult,
+  type MaskedDbNode,
+  type NodeHealthSnapshot,
+  type NodeProbeResult,
 } from '@/lib/api/db-config';
 
 interface DatabaseSettingsPageProps {
@@ -18,25 +44,206 @@ interface DatabaseSettingsPageProps {
   onMobileBack?: () => void;
 }
 
-// Standalone admin page for the BYO-DB (external MySQL) configuration.
-// Strings are intentionally hardcoded (fork feature) to avoid churn across
-// the 10 locale bundles.
+/**
+ * Editable draft of a node.
+ *
+ * Numbers are kept as strings so a half-typed value ("33" on the way to 3306)
+ * does not get coerced to NaN and thrown away mid-edit. The password is never
+ * echoed back: empty means "keep the stored one", and clearing it is an
+ * explicit checkbox.
+ */
+interface NodeDraft {
+  id: string;
+  label: string;
+  role: DbNodeRole;
+  priority: number;
+  enabled: boolean;
+  host: string;
+  port: string;
+  user: string;
+  password: string;
+  hasStoredPassword: boolean;
+  clearPassword: boolean;
+  database: string;
+  ssl: boolean;
+  connectionLimit: string;
+  isNew?: boolean;
+}
+
+type Notice = { kind: 'ok' | 'error' | 'info'; text: string };
+
+function newDraft(index: number): NodeDraft {
+  return {
+    id: `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+    label: `节点 ${index + 1}`,
+    role: 'replica',
+    priority: index + 1,
+    enabled: true,
+    host: '',
+    port: '3306',
+    user: '',
+    password: '',
+    hasStoredPassword: false,
+    clearPassword: false,
+    database: '',
+    ssl: true,
+    connectionLimit: '5',
+    isNew: true,
+  };
+}
+
+function toDraft(node: MaskedDbNode): NodeDraft {
+  return {
+    id: node.id,
+    label: node.label,
+    role: node.role,
+    priority: node.priority,
+    enabled: node.enabled,
+    host: node.host,
+    port: String(node.port || 3306),
+    user: node.user,
+    password: '',
+    hasStoredPassword: node.passwordSet,
+    clearPassword: false,
+    database: node.database,
+    ssl: node.ssl !== false,
+    connectionLimit: String(node.connectionLimit || 5),
+  };
+}
+
+function toInput(draft: NodeDraft): DbNodeInput {
+  return {
+    id: draft.isNew ? undefined : draft.id,
+    label: draft.label.trim(),
+    role: draft.role,
+    priority: draft.priority,
+    enabled: draft.enabled,
+    host: draft.host.trim(),
+    port: Number(draft.port) || 3306,
+    user: draft.user.trim(),
+    database: draft.database.trim(),
+    ssl: draft.ssl,
+    connectionLimit: Number(draft.connectionLimit) || 5,
+    ...(draft.password ? { password: draft.password } : {}),
+    // The backend treats an empty password field as "keep the stored one";
+    // clearing it must be explicit or an empty MySQL password is impossible.
+    ...(draft.clearPassword && !draft.password ? { clearPassword: true } : {}),
+  };
+}
+
+/** Keep priorities dense (1..n) so the failover order is unambiguous. */
+function reindex(list: NodeDraft[]): NodeDraft[] {
+  return list.map((node, index) => ({ ...node, priority: index + 1 }));
+}
+
+function statusTone(draft: NodeDraft, probe?: NodeProbeResult, health?: NodeHealthSnapshot): { tone: string; text: string } {
+  if (!draft.enabled) return { tone: 'muted', text: '已停用' };
+  if (probe) {
+    if (probe.ok) return { tone: 'ok', text: `${probe.latencyMs}ms · ${probe.version || 'MySQL'}` };
+    return { tone: 'error', text: probe.error || '连接失败' };
+  }
+  if (health?.writeBlocked) return { tone: 'warn', text: '只读节点（不参与写入）' };
+  if (health?.downUntil && health.downUntil > Date.now()) return { tone: 'error', text: '已熔断（自动切换中）' };
+  if (health?.needsFullSync) return { tone: 'error', text: '落后过多，需要完整同步' };
+  if (health?.lastError) return { tone: 'warn', text: '近期失败' };
+  if (health?.lastOkAt) return { tone: 'ok', text: '运行中' };
+  return { tone: 'idle', text: '未测试' };
+}
+
+/** Human-readable sync state of a node: "never synced" must be loud (B-4). */
+function syncTone(node: MaskedDbNode, health?: NodeHealthSnapshot): { tone: string; text: string } | null {
+  if (node.role === 'primary') return null;
+  const status = node.syncStatus;
+  if (!status) return { tone: 'warn', text: '尚未同步（不可接管）' };
+  const when = new Date(status.at).toLocaleString();
+  if (health?.needsFullSync) return { tone: 'error', text: '落后过多，需要完整同步' };
+  if (health?.lag) return { tone: 'warn', text: `落后 ${health.lag} 条写入（正在补齐）` };
+  if (status.truncated) return { tone: 'warn', text: `上次同步未完成（${when}），可再次同步继续` };
+  if (!status.complete) return { tone: 'warn', text: `上次同步未完成（${when}）` };
+  return { tone: 'ok', text: `已同步 ${when} · ${status.tables} 张表` };
+}
+
+const SYNC_MODE_LABEL: Record<string, string> = {
+  native: '由数据库自身复制（只读副库 + 故障接管）',
+  'write-through': '应用层实时双写（把每次写入同步到副库）',
+};
+
+/**
+ * "Written" and "added" are different numbers in merge mode: the copy re-sends
+ * rows the target already has. Saying "已写入 12 万行" for a copy that added 3
+ * makes the operator think a second sync is pointless, so the inserted count is
+ * reported separately whenever it was measured.
+ */
+function syncedRowsText(rowsWritten: number, rowsInserted?: number): string {
+  if (rowsInserted === undefined) return `处理 ${rowsWritten} 行`;
+  const skipped = Math.max(0, rowsWritten - rowsInserted);
+  return skipped > 0
+    ? `新增 ${rowsInserted} 行（另 ${skipped} 行已存在，未覆盖）`
+    : `新增 ${rowsInserted} 行`;
+}
+
+/**
+ * One click of "sync" is a series of short requests, not one long one.
+ *
+ * A single call could only report "done" or "still going", and the platform
+ * kills anything over ~120s. Asking for a ~12s slice instead lets the page draw
+ * the progress after every slice, and a resumed slice skips the tables the
+ * previous one finished, so the bar only ever moves forward.
+ */
+const SYNC_BUDGET_MS = 12_000;
+/** Wall-clock ceiling for one click, so a huge table cannot loop forever. */
+const SYNC_MAX_MS = 5 * 60_000;
+/** Hard cap on slices, in case a slice keeps making progress but never ends. */
+const SYNC_MAX_ROUNDS = 40;
+
+const COUNT_FMT = new Intl.NumberFormat('zh-CN');
+
+/** "1.2 万" reads better than "12,345" in a running counter. */
+function formatCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 10_000).toFixed(0)} 万`;
+  return COUNT_FMT.format(value);
+}
+
+function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  if (total < 60) return `${total} 秒`;
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return seconds === 0 ? `${minutes} 分` : `${minutes} 分 ${seconds} 秒`;
+}
+
 export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
   const [status, setStatus] = useState<DbConfigStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [notice, setNotice] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
-  const [testResult, setTestResult] = useState<DbConfigTestResult | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [nodes, setNodes] = useState<NodeDraft[]>([]);
+  const [policy, setPolicy] = useState<DbClusterPolicy>(DEFAULT_CLUSTER_POLICY);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [probes, setProbes] = useState<Record<string, NodeProbeResult>>({});
+  const [dirty, setDirty] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmSync, setConfirmSync] = useState(false);
+  // Node waiting for the "switch the writer" confirmation, plus whether the
+  // operator chose to override the safety gate (unsynced / read-only standby).
+  const [promoteId, setPromoteId] = useState<string | null>(null);
+  const [promoteForce, setPromoteForce] = useState(false);
+  // Which node the rows are read from. The primary is the wrong source the
+  // moment a failover happened, so this is explicit rather than implied.
+  const [syncSourceId, setSyncSourceId] = useState('');
+  const [syncMode, setSyncMode] = useState<DbSyncCopyMode>('merge');
+  /** Live progress of the run in flight (or the last slice of it). */
+  const [syncProgress, setSyncProgress] = useState<DbSyncProgress | null>(null);
+  /** Only used to force a re-render, so the elapsed time keeps counting. */
+  const [, bumpTick] = useState(0);
 
-  const [host, setHost] = useState('');
-  const [port, setPort] = useState('3306');
-  const [user, setUser] = useState('');
-  const [password, setPassword] = useState('');
-  const [database, setDatabase] = useState('');
-  const [ssl, setSsl] = useState(true);
-  const [connectionLimit, setConnectionLimit] = useState('5');
-  const [clearPassword, setClearPassword] = useState(false);
+  const healthById = useMemo(() => {
+    const map: Record<string, NodeHealthSnapshot> = {};
+    (status?.health ?? []).forEach((entry) => {
+      map[entry.id] = entry;
+    });
+    return map;
+  }, [status]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -44,13 +251,11 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
     try {
       const next = await getDbConfigStatus(props.authedFetch);
       setStatus(next);
-      setHost(next.config.host || '');
-      setPort(String(next.config.port || 3306));
-      setUser(next.config.user || '');
-      setDatabase(next.config.database || '');
-      setSsl(next.config.ssl !== false);
-      setConnectionLimit(String(next.config.connectionLimit || 5));
-      setPassword('');
+      setNodes(next.cluster.nodes.map(toDraft));
+      setPolicy(next.cluster.policy ?? next.defaultPolicy ?? DEFAULT_CLUSTER_POLICY);
+      setProbes({});
+      setDirty(false);
+      setEditingId(null);
     } catch (error) {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -62,54 +267,166 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
     void load();
   }, [load]);
 
-  const collectInput = (): DbConfigInput => ({
-    mode: 'mysql',
-    host: host.trim(),
-    port: Number(port) || 3306,
-    user: user.trim(),
-    database: database.trim(),
-    ssl,
-    connectionLimit: Number(connectionLimit) || 5,
-    ...(password ? { password } : {}),
-    // The backend treats an empty password field as "keep the stored one";
-    // clearing it must be explicit or an empty MySQL password is impossible.
-    ...(clearPassword && !password ? { clearPassword: true } : {}),
-  });
+  // Elapsed time in the progress block; only runs while a sync is in flight.
+  useEffect(() => {
+    if (busy !== 'sync') return;
+    const timer = setInterval(() => bumpTick((value) => value + 1), 1000);
+    return () => clearInterval(timer);
+  }, [busy]);
 
-  const onTest = async () => {
-    setTesting(true);
+  const updateNode = (id: string, patch: Partial<NodeDraft>) => {
+    setNodes((current) => current.map((node) => (node.id === id ? { ...node, ...patch } : node)));
+    setDirty(true);
+  };
+
+  const addNode = () => {
+    const draft = newDraft(nodes.length);
+    setNodes((current) => reindex([...current, draft]));
+    setEditingId(draft.id);
+    setDirty(true);
+  };
+
+  const removeNode = (id: string) => {
+    setNodes((current) => {
+      const next = reindex(current.filter((node) => node.id !== id));
+      // Never leave the cluster without a writer: promote the first remaining
+      // node when the removed one was the primary.
+      if (!next.some((node) => node.role === 'primary') && next.length > 0) {
+        next[0] = { ...next[0], role: 'primary' };
+      }
+      return next;
+    });
+    setProbes((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    if (editingId === id) setEditingId(null);
+    setDirty(true);
+  };
+
+  const makePrimary = (id: string) => {
+    setNodes((current) =>
+      current.map((node) => ({ ...node, role: node.id === id ? 'primary' : node.role === 'primary' ? 'replica' : node.role }))
+    );
+    setDirty(true);
+  };
+
+  const moveNode = (id: string, direction: -1 | 1) => {
+    setNodes((current) => {
+      const index = current.findIndex((node) => node.id === id);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= current.length) return current;
+      const next = [...current];
+      [next[index], next[target]] = [next[target], next[index]];
+      return reindex(next);
+    });
+    setDirty(true);
+  };
+
+  const updatePolicy = (patch: Partial<DbClusterPolicy>) => {
+    setPolicy((current) => ({ ...current, ...patch }));
+    setDirty(true);
+  };
+
+  const onTestNode = async (draft: NodeDraft) => {
+    setBusy(`test:${draft.id}`);
     setNotice(null);
-    setTestResult(null);
     try {
-      const result = await testDbConfig(props.authedFetch, collectInput());
-      setTestResult(result);
+      const result = await testDbNode(props.authedFetch, toInput(draft));
+      setProbes((current) => ({ ...current, [draft.id]: result }));
       setNotice({
         kind: result.ok ? 'ok' : 'error',
         text: result.ok
-          ? `连接成功 · ${result.version || 'unknown'} · ${result.latencyMs}ms · schema: ${result.schemaState || 'unknown'}`
-          : `连接失败：${result.error || 'unknown error'}`,
+          ? `「${draft.label}」连接成功 · ${result.version || 'MySQL'} · ${result.latencyMs}ms · 数据表 ${
+              result.schemaState === 'ready' ? '已就绪' : result.schemaState === 'empty' ? '为空（保存时自动建表）' : '未知'
+            }`
+          : `「${draft.label}」连接失败：${result.error || 'unknown error'}`,
       });
     } catch (error) {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
     } finally {
-      setTesting(false);
+      setBusy(null);
+    }
+  };
+
+  const onTestAll = async () => {
+    const enabled = nodes.filter((node) => node.enabled);
+    if (enabled.length === 0) {
+      setNotice({ kind: 'error', text: '没有启用的节点可测试。' });
+      return;
+    }
+    setBusy('test-all');
+    setNotice(null);
+    try {
+      const result = await probeDbNodes(props.authedFetch, enabled.map(toInput));
+      const map: Record<string, NodeProbeResult> = {};
+      result.results.forEach((entry) => {
+        map[entry.id] = entry;
+      });
+      setProbes((current) => ({ ...current, ...map }));
+      const failed = result.results.filter((entry) => !entry.ok);
+      setNotice(
+        failed.length === 0
+          ? { kind: 'ok', text: `全部 ${result.results.length} 个节点连接正常。` }
+          : {
+              kind: 'error',
+              text: `${failed.length}/${result.results.length} 个节点异常：${failed.map((entry) => entry.label).join('、')}`,
+            }
+      );
+    } catch (error) {
+      setNotice({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
     }
   };
 
   const onSave = async () => {
-    setSaving(true);
+    const enabled = nodes.filter((node) => node.enabled);
+    if (enabled.length === 0) {
+      setNotice({ kind: 'error', text: '至少需要启用一个数据库节点。' });
+      return;
+    }
+    if (enabled.filter((node) => node.role === 'primary').length !== 1) {
+      setNotice({ kind: 'error', text: '必须且只能有一个主库（primary）。' });
+      return;
+    }
+    const incomplete = enabled.find((node) => !node.host.trim() || !node.user.trim() || !node.database.trim());
+    if (incomplete) {
+      setNotice({ kind: 'error', text: `「${incomplete.label}」缺少 host / 用户名 / 数据库名。` });
+      return;
+    }
+    if (enabled.length > 1 && policy.syncMode === 'write-through' && !policy.failoverEnabled) {
+      setNotice({
+        kind: 'info',
+        text: '已开启应用层双写但关闭了自动切换：副库会保持同步，但主库故障时不会自动接管。',
+      });
+    }
+
+    setBusy('save');
     setNotice(null);
     try {
-      const result = await saveDbConfig(props.authedFetch, collectInput());
+      const result = await saveDbConfig(props.authedFetch, {
+        mode: 'mysql',
+        nodes: nodes.map(toInput),
+        policy,
+      });
+      if (result.nodes) {
+        const map: Record<string, NodeProbeResult> = {};
+        result.nodes.forEach((entry) => {
+          map[entry.id] = entry;
+        });
+        setProbes((current) => ({ ...current, ...map }));
+      }
       if (result.ok) {
-        if (result.warning) {
-          setNotice({ kind: 'error', text: result.warning });
-        } else {
-          setNotice({
-            kind: 'ok',
-            text: `已保存并生效（${result.version || 'MySQL'}，${result.latencyMs ?? 0}ms）。配置已加密存储，密码不再回显。`,
-          });
-        }
+        setNotice({
+          // An empty native standby is not a style warning: it will take over
+          // with no accounts the day the primary fails.
+          kind: (result.emptyStandbys?.length ?? 0) > 0 ? 'error' : result.warning ? 'info' : 'ok',
+          text:
+            result.warning ??
+            `已保存并生效：${enabled.length} 个节点，主库 ${result.version || 'MySQL'}，${result.latencyMs ?? 0}ms。配置已加密存储，密码不再回显。`,
+        });
         await load();
       } else {
         setNotice({
@@ -120,12 +437,13 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
     } catch (error) {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
     } finally {
-      setSaving(false);
+      setBusy(null);
     }
   };
 
   const onClear = async () => {
-    setSaving(true);
+    setConfirmClear(false);
+    setBusy('clear');
     setNotice(null);
     try {
       await clearDbConfig(props.authedFetch);
@@ -134,18 +452,252 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
     } catch (error) {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
     } finally {
-      setSaving(false);
+      setBusy(null);
+    }
+  };
+
+  const onPromote = async (nodeId: string, force: boolean) => {
+    setPromoteId(null);
+    setPromoteForce(false);
+    setBusy('promote');
+    setNotice(null);
+    try {
+      const result = await promoteDbNode(props.authedFetch, nodeId, force);
+      const header = result.demoted
+        ? `已切换：主库现在是「${result.promoted?.label ?? nodeId}」，原主库「${result.demoted.label}」降为副库。`
+        : `已切换：主库现在是「${result.promoted?.label ?? nodeId}」。`;
+      setNotice({ kind: result.warning ? 'info' : 'ok', text: `${header}${result.warning ?? ''}` });
+      await load();
+    } catch (error) {
+      // The server's message names what is missing ("落后 12 条写入", "只读副本")
+      // — that is what makes the force option an informed decision.
+      setNotice({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onSync = async (restart = false) => {
+    setConfirmSync(false);
+    setBusy('sync');
+    setNotice(null);
+    const startedAt = Date.now();
+    // Seed the bar immediately: the first slice takes ~12s, and a click that
+    // shows nothing at all for that long reads as "it didn't work".
+    setSyncProgress({
+      startedAt,
+      percent: 0,
+      done: false,
+      tablesTotal: 0,
+      tablesDone: 0,
+      rowsCopied: 0,
+      rowsEstimate: 0,
+    });
+    try {
+      // "Start over" applies to the first slice only. Sending it on every slice
+      // would discard the resume point this very run has just built, and the
+      // loop could never finish.
+      let firstSlice = true;
+      const request = () => {
+        const startOver = restart && firstSlice;
+        firstSlice = false;
+        return syncDbCluster(props.authedFetch, {
+          sourceId: syncSourceId || undefined,
+          mode: syncMode,
+          budgetMs: SYNC_BUDGET_MS,
+          restart: startOver,
+        });
+      };
+
+      // Each request copies for ~12s and reports where it got to; the next one
+      // resumes from there and skips the tables already finished. So the bar is
+      // driven by the server's cumulative numbers, not by the client guessing.
+      let result: DbSyncResult | null = null;
+      let rounds = 0;
+      let rowsWritten = 0;
+      let rowsInserted = 0;
+      let insertedUnknown = false;
+      let stalled = false;
+      let lastRowsCopied = -1;
+      for (;;) {
+        const slice = await request();
+        rounds += 1;
+        result = slice;
+        rowsWritten += slice.rowsWritten;
+        if (slice.rowsInserted === undefined) insertedUnknown = true;
+        else rowsInserted += slice.rowsInserted;
+        setSyncProgress(slice.progress ?? null);
+        if (!slice.truncated || slice.complete) break;
+        if (!slice.targets.every((target) => target.ok)) break;
+        if (rounds >= SYNC_MAX_ROUNDS) break;
+        if (Date.now() - startedAt > SYNC_MAX_MS) break;
+        // No forward movement (the cumulative counter did not grow) means the
+        // remaining tables fail every time: stop instead of hammering the source.
+        const copiedSoFar = slice.progress?.rowsCopied ?? 0;
+        if (copiedSoFar <= lastRowsCopied) {
+          stalled = true;
+          break;
+        }
+        lastRowsCopied = copiedSoFar;
+        setNotice({
+          kind: 'info',
+          text:
+            `已完成 ${slice.progress?.percent ?? 0}%（表 ${slice.progress?.tablesDone ?? 0}/${slice.progress?.tablesTotal ?? 0}），` +
+            `本节点已处理 ${formatCount(rowsWritten)} 行，正在接着同步…`,
+        });
+      }
+
+      const finished = result;
+      if (!finished) return;
+      const totals = { rowsWritten, rowsInserted: insertedUnknown ? undefined : rowsInserted };
+      const failed = finished.targets.filter((target) => !target.ok);
+      const partial = finished.targets.filter((target) => target.ok && !target.complete);
+      const mismatched = finished.targets.flatMap((target) => target.countsMismatch ?? []);
+      // Tables the standby was missing entirely (`rate_limit_buckets` is created
+      // lazily by the app, so a copy-only database never has it). The server now
+      // builds them from the primary's DDL instead of failing that table forever.
+      const createdTables = finished.targets.flatMap((target) => target.createdTables ?? []);
+      const behindRows = finished.targets.reduce((sum, target) => sum + (target.behindRows ?? 0), 0);
+      // A table that raised an error is why the run stops; without naming it the
+      // page can only say "部分数据表出错", which is not something an operator
+      // can act on.
+      const failedDetail = finished.targets.flatMap((target) =>
+        (target.failedTables ?? []).map((entry) => `${entry.table}（${entry.error}）`)
+      );
+      const pendingDetail = finished.targets.flatMap((target) => target.pendingTables ?? []);
+      if (failed.length > 0) {
+        setNotice({
+          kind: 'error',
+          text:
+            `${failed.length}/${finished.targets.length} 个副库同步失败：` +
+            failed.map((target) => `${target.label}（${target.error ?? '部分数据表出错'}）`).join('、') +
+            (failedDetail.length > 0 ? ` 出错的数据表：${failedDetail.slice(0, 3).join('、')}` : ''),
+        });
+      } else if (partial.length > 0) {
+        setNotice({
+          kind: failedDetail.length > 0 ? 'error' : 'info',
+          text: stalled
+            ? `同步停住了：还有 ${partial.map((target) => target.label).join('、')} 没有同步完，且这一轮没有读到任何新行。` +
+              (failedDetail.length > 0
+                ? `出错的数据表：${failedDetail.slice(0, 3).join('、')}。`
+                : '') +
+              '请处理后再点一次。'
+            : `已处理 ${formatCount(totals.rowsWritten)} 行，` +
+              `但 ${partial.length} 个副库还没同步完（${partial.map((target) => target.label).join('、')}）。` +
+              `当前进度 ${finished.progress?.percent ?? 0}%` +
+              (pendingDetail.length > 0
+                ? `，剩下 ${pendingDetail.length} 张表本次没来得及处理（${pendingDetail.slice(0, 3).join('、')}${
+                    pendingDetail.length > 3 ? '…' : ''
+                  }）`
+                : '') +
+              '。再点一次会接着同步，已完成的表不会重扫。' +
+              (failedDetail.length > 0 ? ` 出错的数据表：${failedDetail.slice(0, 3).join('、')}。` : ''),
+        });
+      } else {
+        setNotice({
+          kind: 'ok',
+          text:
+            `同步完成：${finished.targets.length} 个副库${syncedRowsText(totals.rowsWritten, totals.rowsInserted)}` +
+            `（${rounds} 次分批，用时 ${formatDuration(Date.now() - startedAt)}）。` +
+            (createdTables.length > 0
+              ? `副库原先缺少 ${createdTables.length} 张表，已按主库结构自动建好（${createdTables.slice(0, 3).join('、')}${
+                  createdTables.length > 3 ? '…' : ''
+                }）。`
+              : '') +
+            (behindRows > 0
+              ? `副库仍比主库少 ${formatCount(behindRows)} 行：这是同步期间主库的新写入，再点一次即可补齐。`
+              : '全部数据表的行数一致。') +
+            (mismatched.length > 0
+              ? ` 其中 ${mismatched.length} 张表数量不同（${mismatched.slice(0, 3).join('、')}${
+                  mismatched.length > 3 ? '…' : ''
+                }），多为同步期间主库有新写入；若副库行数反而更多，说明主库已删除了那些行。`
+              : '') +
+            '行数一致只说明没有缺行；如需纠正副库上被改过的旧值，请用「覆盖已有行」再同步一次。',
+        });
+      }
+      await load();
+    } catch (error) {
+      setNotice({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
     }
   };
 
   if (loading && !status) {
-    return <LoadingState card lines={5} />;
+    return <LoadingState card lines={6} />;
   }
 
-  const mode = status?.config.mode || 'd1';
+  const mode = status?.cluster.mode ?? status?.config.mode ?? 'd1';
+  const sourceLabel =
+    status?.cluster.source === 'env' ? '环境变量' : status?.cluster.source === 'runtime' ? '运行时（加密存储）' : '默认 D1';
+  const enabledCount = nodes.filter((node) => node.enabled).length;
+  const saving = busy === 'save';
+  const occupied = busy !== null;
+
+  /**
+   * A saved cluster that `DB_*` environment variables are shadowing.
+   *
+   * The page used to render only the effective cluster, so the moment one env
+   * variable existed the saved nodes vanished and looked deleted. They are still
+   * in the config store — this is what keeps that visible.
+   */
+  const shadowedStored =
+    status?.storedCluster && status.storedClusterActive === false ? status.storedCluster : null;
+
+  /** Everything the page edits is decided by env vars in this mode. */
+  const envMode = status?.cluster.source === 'env';
+  /**
+   * Standbys that exist only because `DB_STANDBY_NODES` is set.
+   *
+   * `native` normally means "the database replicates itself, the app must not
+   * write to the copy", which is why the sync button is hidden outside
+   * write-through. Env-described standbys are the opposite: plain schemas that
+   * nothing else ever fills, so a manual copy is the only way they can become a
+   * usable backup.
+   */
+  const envStandbyCount = envMode ? nodes.filter((node) => node.role === 'replica').length : 0;
+  const envStandby = envStandbyCount > 0;
+  const canManualSync = policy.syncMode === 'write-through' || envStandby;
+
+  /**
+   * Position of a sync that stopped short, read back from the stored state.
+   *
+   * A chunked run keeps its cursors and its table list server-side, so an
+   * interrupted click (a reload, a closed tab, the 5-minute ceiling) still shows
+   * where it ended instead of reverting to a bare button.
+   */
+  const storedSyncProgress = useMemo(() => {
+    const entries = (status?.cluster.nodes ?? [])
+      .map((node) => (node.syncStatus?.truncated ? node.syncStatus.progress : undefined))
+      .filter((entry): entry is DbSyncProgress => !!entry);
+    if (entries.length === 0) return null;
+    // The slowest node is the honest answer to "is the cluster caught up".
+    return entries.reduce((slowest, entry) => (entry.percent < slowest.percent ? entry : slowest));
+  }, [status]);
+
+  const shownProgress = syncProgress ?? (busy === 'sync' ? null : storedSyncProgress);
+
+  const promotableStored = promoteId ? status?.cluster.nodes.find((node) => node.id === promoteId) ?? null : null;
+  const promotableHealth = promoteId ? healthById[promoteId] : undefined;
+  /**
+   * The same gates the server applies, shown before the click so "force" is a
+   * decision rather than a surprise. The server is still the authority: this
+   * list only mirrors what the page can see (a node that is behind, unsynced or
+   * read-only), it cannot see the target's `@@read_only` flag.
+   */
+  const promoteRisks = (() => {
+    if (!promotableStored) return [] as string[];
+    const risks: string[] = [];
+    const sync = promotableStored.syncStatus;
+    if (policy.syncMode === 'write-through' && (!sync || !sync.complete)) risks.push('该节点从未完成过一次数据同步');
+    if (promotableHealth?.lag) risks.push(`落后 ${promotableHealth.lag} 条写入`);
+    if (promotableHealth?.needsFullSync) risks.push('补写日志已不覆盖缺口');
+    if (promotableHealth?.writeBlocked) risks.push('数据库把它报告为只读');
+    return risks;
+  })();
 
   return (
-    <div className="stack">
+    <div className="stack db-cluster-page">
       {props.mobileLayout && props.onMobileBack && (
         <div className="mobile-settings-subhead">
           <button type="button" className="btn btn-secondary small mobile-settings-back" onClick={props.onMobileBack}>
@@ -156,103 +708,720 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
       )}
 
       {!!notice && (
-        <div className={notice.kind === 'error' ? 'local-error' : 'local-ok'}>
+        <div className={notice.kind === 'error' ? 'local-error' : notice.kind === 'ok' ? 'local-ok' : 'db-callout'}>
           <span>{notice.text}</span>
         </div>
       )}
 
+      {/* ── Overview ─────────────────────────────────────────────── */}
       <section className="card">
         <div className="section-head">
-          <h3><Database size={16} className="btn-icon" /> 数据库设置（外接 MySQL / BYO DB）</h3>
-          <button type="button" className="btn btn-secondary small" disabled={loading} onClick={() => void load()}>
-            <RefreshCw size={14} className="btn-icon" /> 刷新
-          </button>
+          <h3><Database size={16} className="btn-icon" /> 数据库设置（外接 MySQL / 多节点）</h3>
+          <div className="actions">
+            <button type="button" className="btn btn-secondary small" disabled={loading || occupied} onClick={() => void load()}>
+              <RefreshCw size={14} className="btn-icon" /> 刷新
+            </button>
+          </div>
         </div>
 
-        <div className="stack">
-          <p>
-            当前模式：<strong>{mode === 'mysql' ? '外接 MySQL' : 'D1（平台内置）'}</strong>
-            {' · '}配置来源：<strong>{status?.config.source === 'env' ? '环境变量' : status?.config.source === 'runtime' ? '运行时（加密存储）' : '默认 D1'}</strong>
-          </p>
-          {status?.envOverrideActive && (
-            <p className="local-error"><span>检测到 DB_HOST 环境变量，环境变量优先于下方保存的配置。</span></p>
-          )}
-          {!status?.configStoreAvailable && (
-            <p className="local-error"><span>未绑定 SETTINGS_KV/ATTACHMENTS 配置存储：可测试连接，但保存需要配置存储（或改用 DB_* 环境变量）。</span></p>
-          )}
+        <div className="db-status-strip">
+          <div className="db-status-item">
+            <span className="db-status-label">当前模式</span>
+            <strong>
+              {mode === 'mysql' ? '外接 MySQL' : status?.cluster.unavailableReason ? '无可用数据库' : 'D1（平台内置）'}
+            </strong>
+          </div>
+          <div className="db-status-item">
+            <span className="db-status-label">配置来源</span>
+            <strong>{sourceLabel}</strong>
+          </div>
+          <div className="db-status-item">
+            <span className="db-status-label">节点</span>
+            <strong>{mode === 'mysql' ? `${enabledCount} 启用 / ${nodes.length} 配置` : '—'}</strong>
+          </div>
+          <div className="db-status-item">
+            <span className="db-status-label">同步方式</span>
+            <strong>{mode === 'mysql' ? SYNC_MODE_LABEL[policy.syncMode]?.split('（')[0] : '—'}</strong>
+          </div>
+        </div>
 
-          <div className="form-grid">
-            <label className="field">
-              <span>主机 host</span>
-              <input value={host} onInput={(e) => setHost((e.target as HTMLInputElement).value)} placeholder="gz-xxx.tidbcloud.com 或 1.2.3.4" />
-            </label>
-            <label className="field">
-              <span>端口 port</span>
-              <input value={port} onInput={(e) => setPort((e.target as HTMLInputElement).value)} placeholder="3306 / 4000" />
-            </label>
-            <label className="field">
-              <span>用户名 user</span>
-              <input value={user} onInput={(e) => setUser((e.target as HTMLInputElement).value)} placeholder="nodewarden" />
-            </label>
-            <label className="field">
-              <span>密码 password</span>
-              <input type="password" value={password} onInput={(e) => setPassword((e.target as HTMLInputElement).value)} placeholder={status?.config.passwordSet ? '已保存（留空则不修改）' : '必填'} autocomplete="new-password" />
-            </label>
-            <label className="field">
-              <span>数据库名 database</span>
-              <input value={database} onInput={(e) => setDatabase((e.target as HTMLInputElement).value)} placeholder="nodewarden" />
-            </label>
-            <label className="field">
-              <span>连接池上限</span>
-              <input value={connectionLimit} onInput={(e) => setConnectionLimit((e.target as HTMLInputElement).value)} placeholder="5" />
-            </label>
-            <label className="field checkbox-field">
-              <input type="checkbox" checked={ssl} onChange={(e) => setSsl((e.target as HTMLInputElement).checked)} />
-              <span>启用 TLS（TiDB Serverless 必须开启）</span>
-            </label>
-            {status?.config.passwordSet && (
-              <label className="field checkbox-field">
-                <input
-                  type="checkbox"
-                  checked={clearPassword}
-                  disabled={!!password}
-                  onChange={(e) => setClearPassword((e.target as HTMLInputElement).checked)}
-                />
-                <span>清除已保存的密码（保存时把密码置为空；输入新密码时无效）</span>
-              </label>
+        {status?.cluster.unavailableReason && (
+          <p className="local-error">
+            <span>
+              {status.cluster.unavailableReason}：应用当前<b>没有任何可用的数据库</b>，除本页外的请求都会返回 503。
+              请在下方至少启用一个节点并保存，或清除配置回退到内置数据库。
+            </span>
+          </p>
+        )}
+        {status?.envOverrideActive && (
+          <p className="local-error">
+            <span>
+              检测到 DB_HOST 环境变量：环境变量优先，下方保存的集群配置不会生效。
+              {shadowedStored && shadowedStored.nodes.length > 0
+                ? `已保存的 ${shadowedStored.nodes.length} 个节点见下方「已保存的集群配置」，配置没有丢失，只是被环境变量挡住了。`
+                : ''}
+              {envStandby
+                ? ` 已由 DB_STANDBY_NODES 声明 ${envStandbyCount} 个副库，本页可直接「同步数据到副库」。`
+                : ' 只想要可同步的副库，不需要删除环境变量：加 DB_STANDBY_NODES=库名1,库名2 即可（数量不限）。'}
+            </span>
+          </p>
+        )}
+        {shadowedStored && (
+          <div className="db-saved-cluster">
+            <div className="db-saved-cluster-head">
+              <HardDrive size={14} className="btn-icon" />
+              <strong>已保存的集群配置（{shadowedStored.nodes.length} 个节点，当前未生效）</strong>
+            </div>
+            {shadowedStored.nodes.length > 0 ? (
+              <ul className="db-saved-nodes">
+                {shadowedStored.nodes.map((node) => (
+                  <li key={node.id}>
+                    <span className={`db-node-badge ${node.role === 'primary' ? 'is-primary' : 'is-replica'}`}>
+                      {node.role === 'primary' ? '主库' : '副库'}
+                    </span>
+                    <strong>{node.label || '未命名节点'}</strong>
+                    <span className="db-saved-dsn">
+                      {node.host}:{node.port} / {node.database}
+                    </span>
+                    <span className="db-saved-meta">
+                      优先级 {node.priority} · {node.enabled ? '启用' : '停用'} · 连接池 {node.connectionLimit}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="db-inline-hint">这份配置里的节点全部处于停用状态，因此没有任何节点可以接管。</p>
+            )}
+            <p className="db-inline-hint">
+              让它生效的办法是清掉环境变量：删除函数/容器上的 <code>DB_HOST</code>、<code>DB_USER</code>、
+              <code>DB_PASSWORD</code>、<code>DB_NAME</code>（以及 <code>DB_PORT</code>、<code>DB_SSL</code>，如果设过）后重启；
+              重启后本页会自动切到这份配置，附件与账号数据都不需要重搬。
+              <br />
+              只想让副库能同步、并不想改部署方式的话，不用清环境变量：加一个
+              <code>DB_STANDBY_NODES</code>（副库清单，逗号分隔、数量不限）就是这种部署下的多节点模式：
+              <code>DB_STANDBY_NODES=nodewarden-bak,nodewarden-dr</code>，同实例只写库名、其余参数沿用主库；
+              副库在另一台服务器时写成 <code>mysql://用户:密码@主机:端口/库名</code> 混在同一个清单里。
+            </p>
+            <p className="db-inline-hint">
+              在此之前，上方编辑区里的节点是从环境变量还原出来的那一台，
+              <b>在那里点「保存」会用编辑区的内容替换掉这份已保存的配置</b>。
+              想继续增删节点，请先删环境变量再改。
+            </p>
+            <p className="db-inline-hint">
+              同步方式：{SYNC_MODE_LABEL[shadowedStored.policy.syncMode] ?? shadowedStored.policy.syncMode}
+            </p>
+          </div>
+        )}
+        {!status?.configStoreAvailable && (
+          <p className="local-error">
+            <span>未绑定 SETTINGS_KV / ATTACHMENTS 配置存储：可以测试连接，但保存集群需要配置存储（或改用 DB_* 环境变量）。</span>
+          </p>
+        )}
+        {dirty && <p className="db-inline-hint">有未保存的修改。</p>}
+      </section>
+
+      {/* ── Nodes ────────────────────────────────────────────────── */}
+      <section className="card">
+        <div className="section-head">
+          <h3>连接节点（{nodes.length}）</h3>
+          <div className="actions">
+            <button type="button" className="btn btn-secondary small" disabled={occupied} onClick={() => void onTestAll()}>
+              {busy === 'test-all' ? <Loader2 size={14} className="btn-icon spin" /> : <PlugZap size={14} className="btn-icon" />}
+              测试全部
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary small"
+              disabled={occupied || envMode || nodes.length >= (status?.limits?.maxNodes ?? 8)}
+              title={envMode ? '节点由环境变量决定：改 DB_STANDBY_NODES 清单来增删副库，不能在这里加节点' : undefined}
+              onClick={addNode}
+            >
+              <Plus size={14} className="btn-icon" /> 添加节点
+            </button>
+          </div>
+        </div>
+
+        {nodes.length === 0 ? (
+          <p className="db-empty">还没有配置外接数据库。点击「添加节点」开始，或继续使用平台内置 D1。</p>
+        ) : (
+          <div className="db-node-list">
+            {nodes.map((node, index) => {
+              const probe = probes[node.id];
+              const health = healthById[node.id];
+              const tone = statusTone(node, probe, health);
+              const stored = status?.cluster.nodes.find((entry) => entry.id === node.id);
+              const sync = stored && node.enabled ? syncTone(stored, health) : null;
+              const editing = editingId === node.id;
+              const testing = busy === `test:${node.id}`;
+              return (
+                <article
+                  key={node.id}
+                  className={[
+                    'db-node-card',
+                    node.role === 'primary' ? 'is-primary' : '',
+                    node.enabled ? '' : 'is-disabled',
+                    tone.tone === 'error' ? 'is-down' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                >
+                  <div className="db-node-head">
+                    <div className="db-node-title">
+                      <span className={`db-node-badge ${node.role === 'primary' ? 'is-primary' : 'is-replica'}`}>
+                        {node.role === 'primary' ? '主库' : '副库'}
+                      </span>
+                      <strong>{node.label || '未命名节点'}</strong>
+                      <span className={`db-node-status is-${tone.tone}`}>{tone.text}</span>
+                      {!node.enabled && <span className="db-node-status is-muted">不参与路由</span>}
+                    </div>
+                    <div className="db-node-actions">
+                      <button
+                        type="button"
+                        className="icon-btn"
+                        title="上移（更早接管）"
+                        aria-label="上移"
+                        disabled={occupied || index === 0}
+                        onClick={() => moveNode(node.id, -1)}
+                      >
+                        <ChevronUp size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-btn"
+                        title="下移"
+                        aria-label="下移"
+                        disabled={occupied || index === nodes.length - 1}
+                        onClick={() => moveNode(node.id, 1)}
+                      >
+                        <ChevronDown size={15} />
+                      </button>
+                      {node.role !== 'primary' && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary small"
+                          disabled={occupied || dirty || !stored || envMode}
+                          title={
+                            envMode
+                              ? '主库由环境变量决定：要把写入切到某个副库，请把 DB_NAME 改成它、并把它从 DB_STANDBY_NODES 里删掉后重启'
+                              : dirty
+                                ? '有未保存的修改：先保存，再做主库切换'
+                                : !stored
+                                  ? '新节点需要先保存一次，才能接管写入'
+                                  : '立即把写入切到该节点（校验连通性、只读状态与同步进度）'
+                          }
+                          onClick={() => {
+                            setPromoteForce(false);
+                            setPromoteId(node.id);
+                          }}
+                        >
+                          <Check size={13} className="btn-icon" /> 切换主库
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn btn-secondary small"
+                        disabled={occupied}
+                        onClick={() => void onTestNode(node)}
+                      >
+                        {testing ? <Loader2 size={13} className="btn-icon spin" /> : <PlugZap size={13} className="btn-icon" />}
+                        测试
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary small"
+                        disabled={occupied}
+                        onClick={() => setEditingId(editing ? null : node.id)}
+                      >
+                        {editing ? <X size={13} className="btn-icon" /> : <Pencil size={13} className="btn-icon" />}
+                        {editing ? '收起' : '编辑'}
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-btn danger"
+                        title="删除节点"
+                        aria-label="删除节点"
+                        disabled={occupied}
+                        onClick={() => removeNode(node.id)}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="db-node-meta">
+                    <span className="db-node-addr">{node.host ? `${node.host}:${node.port}` : '未填写主机'}{node.database ? ` / ${node.database}` : ''}</span>
+                    <span>{node.user || '未填写用户'}</span>
+                    <span>连接池 {node.connectionLimit}</span>
+                    <span>{node.ssl ? 'TLS 开启' : 'TLS 关闭'}</span>
+                    <span>优先级 {node.priority}</span>
+                    {probe?.ok && probe.schemaState && (
+                      <span>{probe.schemaState === 'ready' ? '数据表已就绪' : probe.schemaState === 'empty' ? '空库（保存时建表）' : '数据表未知'}</span>
+                    )}
+                    {healthById[node.id]?.syncErrors ? (
+                      <span className="db-node-warn">同步失败 {healthById[node.id].syncErrors} 次</span>
+                    ) : null}
+                    {sync ? <span className={sync.tone === 'ok' ? 'db-node-ok' : 'db-node-warn'}>{sync.text}</span> : null}
+                  </div>
+
+                  {editing && (
+                    <div className="db-node-form">
+                      <div className="db-grid">
+                        <label className="field">
+                          <span>名称</span>
+                          <input
+                            className="input"
+                            value={node.label}
+                            placeholder="主库 / 华东备用"
+                            onInput={(e) => updateNode(node.id, { label: (e.target as HTMLInputElement).value })}
+                          />
+                        </label>
+                        <label className="field">
+                          <span>角色</span>
+                          <select
+                            className="input"
+                            value={node.role}
+                            onChange={(e) => {
+                              const role = (e.target as HTMLSelectElement).value as DbNodeRole;
+                              if (role === 'primary') makePrimary(node.id);
+                              else updateNode(node.id, { role });
+                            }}
+                          >
+                            <option value="primary">主库（读写）</option>
+                            <option value="replica">副库（备用 / 只读）</option>
+                          </select>
+                        </label>
+                        <label className="field">
+                          <span>主机 host</span>
+                          <input
+                            className="input"
+                            value={node.host}
+                            placeholder="gz-xxx.tidbcloud.com 或 1.2.3.4"
+                            onInput={(e) => updateNode(node.id, { host: (e.target as HTMLInputElement).value })}
+                          />
+                        </label>
+                        <label className="field">
+                          <span>端口 port</span>
+                          <input
+                            className="input"
+                            value={node.port}
+                            placeholder="3306 / 4000"
+                            onInput={(e) => updateNode(node.id, { port: (e.target as HTMLInputElement).value })}
+                          />
+                        </label>
+                        <label className="field">
+                          <span>用户名 user</span>
+                          <input
+                            className="input"
+                            value={node.user}
+                            placeholder="nodewarden"
+                            onInput={(e) => updateNode(node.id, { user: (e.target as HTMLInputElement).value })}
+                          />
+                        </label>
+                        <label className="field">
+                          <span>密码 password</span>
+                          <input
+                            className="input"
+                            type="password"
+                            value={node.password}
+                            autocomplete="new-password"
+                            placeholder={node.hasStoredPassword ? '已保存（留空则不修改）' : '必填'}
+                            onInput={(e) => updateNode(node.id, { password: (e.target as HTMLInputElement).value })}
+                          />
+                        </label>
+                        <label className="field">
+                          <span>数据库名 database</span>
+                          <input
+                            className="input"
+                            value={node.database}
+                            placeholder="nodewarden"
+                            onInput={(e) => updateNode(node.id, { database: (e.target as HTMLInputElement).value })}
+                          />
+                        </label>
+                        <label className="field">
+                          <span>连接池上限</span>
+                          <input
+                            className="input"
+                            value={node.connectionLimit}
+                            placeholder="5"
+                            onInput={(e) => updateNode(node.id, { connectionLimit: (e.target as HTMLInputElement).value })}
+                          />
+                        </label>
+                      </div>
+
+                      <div className="db-node-toggles">
+                        <label className="checkbox-field">
+                          <input
+                            type="checkbox"
+                            checked={node.ssl}
+                            onChange={(e) => updateNode(node.id, { ssl: (e.target as HTMLInputElement).checked })}
+                          />
+                          <span>启用 TLS（TiDB Serverless 等云库必须开启）</span>
+                        </label>
+                        <label className="checkbox-field">
+                          <input
+                            type="checkbox"
+                            checked={node.enabled}
+                            onChange={(e) => updateNode(node.id, { enabled: (e.target as HTMLInputElement).checked })}
+                          />
+                          <span>启用该节点（停用后不参与读写与故障切换）</span>
+                        </label>
+                        {node.hasStoredPassword && (
+                          <label className="checkbox-field">
+                            <input
+                              type="checkbox"
+                              checked={node.clearPassword}
+                              disabled={!!node.password}
+                              onChange={(e) => updateNode(node.id, { clearPassword: (e.target as HTMLInputElement).checked })}
+                            />
+                            <span>清除已保存的密码（输入新密码时无效）</span>
+                          </label>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* ── High availability policy ─────────────────────────────── */}
+      <section className="card">
+        <div className="section-head">
+          <h3>高可用与同步策略</h3>
+          <div className="actions">
+            <button
+              type="button"
+              className="btn btn-secondary small"
+              disabled={occupied || !canManualSync || nodes.filter((node) => node.enabled && node.role === 'replica').length === 0}
+              title={
+                !canManualSync
+                  ? '仅「应用层实时双写」需要手动同步：数据库自身复制由数据库负责'
+                  : envStandby
+                    ? `把环境变量主库的数据补到 DB_STANDBY_NODES 里的 ${envStandbyCount} 个副库；默认只插入缺失行，不会覆盖已有数据`
+                    : '把源节点的数据补到副库；默认只插入缺失行，不会覆盖已有的更新'
+              }
+              onClick={() => setConfirmSync(true)}
+            >
+              {busy === 'sync' ? <Loader2 size={14} className="btn-icon spin" /> : <RefreshCw size={14} className="btn-icon" />}
+              同步数据到副库
+            </button>
+          </div>
+        </div>
+
+        {shownProgress && (
+          <div className="db-sync-progress">
+            <div className="db-sync-progress-head">
+              <span>
+                {busy === 'sync'
+                  ? '正在同步到副库…'
+                  : shownProgress.percent >= 100
+                    ? '上次同步已完成'
+                    : '上次同步未完成，点「同步数据到副库」会从这里继续'}
+              </span>
+              <strong>{shownProgress.tablesTotal > 0 ? `${shownProgress.percent}%` : '—'}</strong>
+            </div>
+            {shownProgress.tablesTotal > 0 ? (
+              <div
+                className="db-sync-bar"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={shownProgress.percent}
+                aria-label="同步进度"
+              >
+                <div className="db-sync-bar-fill" style={{ width: `${shownProgress.percent}%` }} />
+              </div>
+            ) : (
+              <div className="db-sync-bar" role="progressbar" aria-label="同步进度（正在统计数据表）">
+                <div className="db-sync-bar-fill is-indeterminate" />
+              </div>
+            )}
+            <div className="db-sync-progress-meta">
+              <span>
+                数据表 <b>{shownProgress.tablesDone}/{shownProgress.tablesTotal || '?'}</b>
+              </span>
+              <span>
+                已处理 <b>{formatCount(shownProgress.rowsCopied)}</b> 行
+                {/* The estimate comes from `information_schema.TABLE_ROWS`, which
+                    is 0 for a table InnoDB has never analysed. Printing "估算共
+                    388 行" next to "已处理 2,040 行" reads as a bug, so only show
+                    it while it is still ahead of the real count. */}
+                {shownProgress.rowsEstimate > shownProgress.rowsCopied
+                  ? `（估算共 ${formatCount(shownProgress.rowsEstimate)} 行）`
+                  : ''}
+              </span>
+              {busy === 'sync' && (
+                <span>
+                  用时 <b>{formatDuration(Date.now() - shownProgress.startedAt)}</b>
+                </span>
+              )}
+            </div>
+            {shownProgress.rowsEstimate === 0 && shownProgress.tablesTotal > 0 && (
+              <p className="db-inline-hint">
+                数据库没有提供行数估算（<code>information_schema.TABLE_ROWS</code> 为 0），百分比按「已完成的数据表」计算。
+              </p>
+            )}
+            {shownProgress.rowsEstimate > 0 && shownProgress.rowsCopied > shownProgress.rowsEstimate && (
+              <p className="db-inline-hint">
+                行数估算（<code>information_schema.TABLE_ROWS</code>）比实际少，百分比按「已完成的数据表」计算。
+              </p>
+            )}
+            {busy !== 'sync' && shownProgress.percent < 100 && (
+              <p className="db-inline-hint">
+                再次同步会从上次停下的位置继续，已完成的表不会重扫。如果源库的数据在这期间被改过或删过，
+                <button
+                  type="button"
+                  className="db-inline-action"
+                  disabled={occupied}
+                  onClick={() => void onSync(true)}
+                >
+                  从第一张表重新开始
+                </button>
+                。
+              </p>
             )}
           </div>
+        )}
 
-          <div className="row-actions">
-            <button type="button" className="btn btn-secondary" disabled={testing || saving} onClick={() => void onTest()}>
-              {testing ? <Loader2 size={14} className="btn-icon spin" /> : <PlugZap size={14} className="btn-icon" />}
-              测试连接
-            </button>
-            <button type="button" className="btn btn-primary" disabled={testing || saving} onClick={() => void onSave()}>
-              {saving ? <Loader2 size={14} className="btn-icon spin" /> : <Save size={14} className="btn-icon" />}
-              保存并应用
-            </button>
-            <button type="button" className="btn btn-secondary" disabled={testing || saving} onClick={() => void onClear()}>
-              <Trash2 size={14} className="btn-icon" />
-              清除配置（回退 D1）
-            </button>
+        {canManualSync && (
+          <div className="db-grid">
+            <label className="field">
+              <span>同步源（从哪个节点读数据）</span>
+              <select
+                className="input"
+                value={syncSourceId}
+                onChange={(e) => setSyncSourceId((e.target as HTMLSelectElement).value)}
+              >
+                <option value="">主库（默认）</option>
+                {nodes
+                  .filter((node) => node.enabled)
+                  .map((node) => (
+                    <option key={node.id} value={node.id}>
+                      {node.label}（{node.role === 'primary' ? '主库' : '副库'}）
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>写入方式</span>
+              <select
+                className="input"
+                value={syncMode}
+                onChange={(e) => setSyncMode((e.target as HTMLSelectElement).value as DbSyncCopyMode)}
+              >
+                <option value="merge">只补缺失行（安全，不覆盖已有数据）</option>
+                <option value="overwrite">覆盖已有行（修复不一致）</option>
+              </select>
+            </label>
           </div>
+        )}
 
-          {testResult && (
-            <p>
-              测试结果：{testResult.ok ? '成功' : '失败'}
-              {testResult.version ? ` · MySQL ${testResult.version}` : ''}
-              {typeof testResult.latencyMs === 'number' ? ` · ${testResult.latencyMs}ms` : ''}
-              {testResult.schemaState ? ` · 数据表：${testResult.schemaState === 'ready' ? '已就绪' : testResult.schemaState === 'empty' ? '空（保存时自动建表）' : '未知'}` : ''}
-            </p>
-          )}
-
-          <p>
-            说明：配置使用 AES-256-GCM 加密后保存（主密钥来自 DB_CONFIG_KEY 环境变量）；密码永不回显。
-            保存后将自动在目标库创建全部数据表。切换/清除配置即时生效，无需重启。
+        {envMode && (
+          <p className="db-inline-hint">
+            当前生效的配置来自环境变量：节点与策略都由环境变量决定，下面这些选项改了也不会生效
+            （在本页保存只会覆盖「已保存的集群配置」）。副库由 <code>DB_STANDBY_NODES</code> 声明时，
+            自动切换与读分摊固定关闭——副库只是手动同步出来的备份，主库抖动时不能自动接管。
           </p>
+        )}
+
+        <div className="db-grid">
+          <label className="field">
+            <span>副库同步方式</span>
+            <select
+              className="input"
+              value={policy.syncMode}
+              disabled={envMode}
+              onChange={(e) => updatePolicy({ syncMode: (e.target as HTMLSelectElement).value as DbClusterPolicy['syncMode'] })}
+            >
+              <option value="native">数据库自身复制（推荐）</option>
+              <option value="write-through">应用层实时双写</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>连续失败阈值</span>
+            <input
+              className="input"
+              value={String(policy.failureThreshold)}
+              placeholder="3"
+              disabled={envMode}
+              onInput={(e) => updatePolicy({ failureThreshold: Number((e.target as HTMLInputElement).value) || 3 })}
+            />
+          </label>
+          <label className="field">
+            <span>熔断冷却（秒）</span>
+            <input
+              className="input"
+              value={String(Math.round(policy.cooldownMs / 1000))}
+              placeholder="30"
+              disabled={envMode}
+              onInput={(e) => updatePolicy({ cooldownMs: (Number((e.target as HTMLInputElement).value) || 30) * 1000 })}
+            />
+          </label>
+        </div>
+
+        <div className="db-node-toggles">
+          <label className="checkbox-field">
+            <input
+              type="checkbox"
+              checked={policy.failoverEnabled}
+              disabled={envMode}
+              onChange={(e) => updatePolicy({ failoverEnabled: (e.target as HTMLInputElement).checked })}
+            />
+            <span>主库连接失败时自动切换到下一个健康节点（按优先级）</span>
+          </label>
+          <label className="checkbox-field">
+            <input
+              type="checkbox"
+              checked={policy.readSplit}
+              disabled={envMode}
+              onChange={(e) => updatePolicy({ readSplit: (e.target as HTMLInputElement).checked })}
+            />
+            <span>读请求分摊到副库（写请求仍然只走主库）</span>
+          </label>
+          {policy.syncMode === 'write-through' && (
+            <label className="checkbox-field">
+              <input
+                type="checkbox"
+                checked={policy.syncAsync}
+                disabled={envMode}
+                onChange={(e) => updatePolicy({ syncAsync: (e.target as HTMLInputElement).checked })}
+              />
+              <span>双写异步执行（请求更快，但副库失败只会在本页告警）</span>
+            </label>
+          )}
+        </div>
+
+        <div className="db-callout">
+          <strong>同步方式怎么选</strong>
+          <ul>
+            <li>
+              <b>数据库自身复制</b>：副库由 MySQL 主从 / 云厂商只读副本维护。应用不双写，只在主库不可用时切换。数据一致性由数据库保证，
+              <b>推荐用于生产</b>。
+              <br />
+              ⚠️ 前提是副库真的接入了复制。如果它只是另一台独立的 MySQL，这个选项会让主库故障时切换到一个
+              <b>空库</b>——保存时若检测到副库一条账号数据都没有，页面会给出警告。
+            </li>
+            <li>
+              <b>应用层实时双写</b>：每次写入成功后立即在其他节点重放，适合“两台互不相关、想互为备份”的场景。
+              跨库写入<b>不是原子操作</b>：主库已提交但副库失败时，以主库为准，失败会记录在节点状态里，需要人工重新同步。
+              不要与数据库自身的复制同时开启，否则重复写入会触发主键冲突。
+            </li>
+            <li>
+              应用层双写只覆盖<b>配置生效之后</b>的写入。给已有数据的部署新增副库时，保存后请点一次
+              <b>「同步数据到副库」</b>，把历史数据补齐；<b>未同步完成的副库不会被用于读取，也不会在故障时接管</b>，
+              避免空库上线后账号全丢。
+            </li>
+            <li>
+              同步默认<b>只补缺失行</b>，不会覆盖副库上已有的数据；需要纠正不一致时才选「覆盖已有行」。
+              点一次会被拆成若干段短请求连续跑（每段约 12 秒），进度条按「已完成的数据表」和
+              <code>information_schema</code> 的行数估算显示；<b>已经同步完的表不会在下一次重扫</b>。
+              中途停下（关掉页面、超过 5 分钟上限）就再点一次，会从上次停下的位置继续。
+              结果里的「新增 N 行」是目标库真正多出来的行数，「另 M 行已存在」是被跳过的行——
+              两者相加才是这次扫描的行数。
+              <br />
+              「行数校验通过」只说明两边<b>没有缺行</b>，不代表行内容一致：被改过的旧值要靠「覆盖已有行」才会被纠正。
+            </li>
+            <li>
+              主库故障期间写入落在副库，主库恢复后<b>不会立刻收回写权</b>：先把落后的写入补上再切回，
+              落后过多（超出内存补写日志范围）时该节点会被标红并要求完整同步。
+            </li>
+            <li>
+              切换主库请用副库卡片上的<b>「切换主库」</b>：它会先验证该节点连得上、数据库自己报告为可写
+              （只读副本会被当场挡下，因为切过去后所有写入都会失败），以及是否已经同步到位。
+              任一项不满足时会列出缺口，<b>确认可以放弃那部分数据</b>后才能强制切换。
+              原主库降为副库、数据保留，切换后请尽快以它为源同步一次新主库。
+            </li>
+            <li>
+              故障切换只针对<b>连接级失败</b>（拒绝连接、超时、连接被重置等）。SQL 语法错误、唯一键冲突不会切换节点，否则同一条语句会被执行两次。
+              写入报「无法确认是否已提交」时不会自动重放——那正是避免重复写入的保护。
+            </li>
+            <li>
+              节点健康与补写日志保存在当前进程内：多实例部署时每个实例各自判断，建议只让一个实例承担写入（或改用数据库自身复制）。
+              不过每个节点是否落后会<b>持久化</b>：进程重启后落后的副库仍然要求完整同步，不会因为重启就被当成已追平。
+            </li>
+          </ul>
         </div>
       </section>
+
+      {/* ── Actions ──────────────────────────────────────────────── */}
+      <div className="db-actions-bar">
+        <button type="button" className="btn btn-primary" disabled={occupied} onClick={() => void onSave()}>
+          {saving ? <Loader2 size={14} className="btn-icon spin" /> : <Save size={14} className="btn-icon" />}
+          保存并应用
+        </button>
+        <button type="button" className="btn btn-secondary" disabled={occupied} onClick={() => setConfirmClear(true)}>
+          <Trash2 size={14} className="btn-icon" />
+          清除配置（回退 D1）
+        </button>
+        <span className="db-inline-hint">
+          配置使用 AES-256-GCM 加密存储（主密钥来自 DB_CONFIG_KEY）；密码永不回显。保存时会对每个启用节点做连接测试并自动建表，全部通过才生效。
+        </span>
+      </div>
+
+      <ConfirmDialog
+        open={confirmSync}
+        variant="warning"
+        title="把源节点的数据同步到副库？"
+        message={
+          (syncMode === 'overwrite'
+            ? '将逐表读取源节点并覆盖副库中主键相同的行——副库上更新的数据会被改回源节点的版本。'
+            : '将逐表读取源节点，只把副库缺少的行插入（不会覆盖副库已有的数据）。') +
+          '数据量大时会分批进行，未跑完可再次点击，从上次的位置继续。此操作只写副库，不影响源节点。'
+        }
+        confirmText="开始同步"
+        cancelText="取消"
+        onConfirm={() => void onSync()}
+        onCancel={() => setConfirmSync(false)}
+      />
+
+      <ConfirmDialog
+        open={promoteId !== null}
+        variant="warning"
+        title="切换主库？"
+        message={
+          (promoteRisks.length > 0
+            ? `「${promotableStored?.label ?? ''}」还不满足无损切换的条件：${promoteRisks.join('；')}。\n\n` +
+              '此时切换，这部分数据只留在原主库上，新主库看不到它们。正确做法是先点「同步数据到副库」，再切换。\n\n'
+            : '') +
+          `切换后，写入立即转到「${promotableStored?.label ?? ''}」，原主库自动降为副库（数据保留，可继续承接读请求或故障接管）。` +
+          '约 1 秒内的请求可能落在旧连接上，无需重启服务。'
+        }
+        confirmText={promoteForce ? '强制切换' : '切换主库'}
+        cancelText="取消"
+        danger={promoteForce}
+        onConfirm={() => {
+          if (promoteId) void onPromote(promoteId, promoteForce);
+        }}
+        onCancel={() => {
+          setPromoteId(null);
+          setPromoteForce(false);
+        }}
+      >
+        {promoteRisks.length > 0 && (
+          <label className="checkbox-field">
+            <input
+              type="checkbox"
+              checked={promoteForce}
+              onChange={(e) => setPromoteForce((e.target as HTMLInputElement).checked)}
+            />
+            <span>我知道上述缺口会丢失，仍然强制切换</span>
+          </label>
+        )}
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={confirmClear}
+        variant="warning"
+        title="清除外接数据库配置？"
+        message="将删除已保存的集群配置并回退到 D1 或 DB_* 环境变量。如果当前运行环境没有任何内置数据库，此操作会被拒绝。"
+        confirmText="清除配置"
+        cancelText="取消"
+        danger
+        onConfirm={() => void onClear()}
+        onCancel={() => setConfirmClear(false)}
+      />
     </div>
   );
 }

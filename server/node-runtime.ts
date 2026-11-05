@@ -23,12 +23,12 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import { handleRequest } from '../src/router';
-import { ensureDatabaseInitialized, getDbInitError } from '../src/services/db-lifecycle';
+import { ensureDatabaseInitialized, getDbInitError, getDbInitFailure } from '../src/services/db-lifecycle';
 import { getDatabaseStatus } from '../src/services/storage-factory';
+import { getLastSchemaRepair } from '../src/services/storage-schema';
 import { clearDbConfigCache } from '../src/services/db-config';
 import { applyCors, jsonResponse } from '../src/utils/response';
 import { isBackendRequestPath, isWebVaultHidden, webVaultNotFoundResponse } from '../src/web-vault-visibility';
@@ -38,6 +38,14 @@ import {
   createLocalNotificationsHubNamespace,
   installDurableObjectGlobals,
 } from './local-durable-objects';
+// The filesystem-backed attachment bucket lives in its own module so it can be
+// unit-tested without booting the whole runtime.
+import { createFsR2 } from './fs-r2';
+import {
+  describeAttachmentsProblem,
+  probeAttachmentsDir,
+  type AttachmentsProbeResult,
+} from './attachments-probe';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -61,11 +69,15 @@ interface RuntimeState {
   assets: AssetsMode;
   dataDir: string;
   attachmentsDir: string;
+  /** True when ATTACHMENTS_DIR came from the environment (so a mount is expected). */
+  attachmentsFromEnv: boolean;
   distDir: string;
 }
 
 let state: RuntimeState | null = null;
 let sharedEnv: Env | null = null;
+let attachmentsProbe: AttachmentsProbeResult | null = null;
+let attachmentsProbeRun: Promise<AttachmentsProbeResult> | null = null;
 
 // ---------------------------------------------------------------------------
 // Environment plumbing
@@ -95,6 +107,17 @@ function isInsideDirectory(child: string, parent: string): boolean {
   return !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
+/**
+ * True when the data directory lives on a volume that dies with the instance.
+ *
+ * `SETTINGS_KV` is a file in `DATA_DIR`, so an admin-saved database cluster
+ * stored under `/tmp` disappears the moment the platform recycles the
+ * container — and with it the only database the app has, if `DB_*` was removed.
+ */
+export function isDataDirEphemeral(dataDir: string): boolean {
+  return isInsideDirectory(dataDir, os.tmpdir());
+}
+
 function resolveState(options: NodeRuntimeOptions): RuntimeState {
   const assets = options.assets || 'disk';
   let dataDir = path.resolve(
@@ -107,10 +130,18 @@ function resolveState(options: NodeRuntimeOptions): RuntimeState {
     // the stored config on the next cold start, so stub mode forces /tmp.
     dataDir = path.join(os.tmpdir(), 'nodewarden');
   }
+  const defaultAttachments = path.join(dataDir, 'attachments');
+  const configuredAttachments = process.env.ATTACHMENTS_DIR;
+  // A mount is only expected when the operator pointed somewhere *else*:
+  // fc-entry.mjs always exports ATTACHMENTS_DIR, but to the default path, and
+  // warning about it on every boot on FC would train people to ignore the log.
+  const attachmentsFromEnv =
+    !!configuredAttachments && path.resolve(configuredAttachments) !== path.resolve(defaultAttachments);
   return {
     assets,
     dataDir,
-    attachmentsDir: path.resolve(process.env.ATTACHMENTS_DIR || path.join(dataDir, 'attachments')),
+    attachmentsDir: path.resolve(configuredAttachments || defaultAttachments),
+    attachmentsFromEnv,
     distDir: path.resolve(process.env.DIST_DIR || path.join(__dirname, '..', 'dist')),
   };
 }
@@ -152,6 +183,37 @@ export function configureNodeRuntime(options: NodeRuntimeOptions = {}): RuntimeS
   (globalThis as { caches?: unknown }).caches = cachesShim;
   installDurableObjectGlobals();
   return state;
+}
+
+/**
+ * Verify the attachment disk once per process, waiting briefly for a mount that
+ * comes up just after the container starts.
+ *
+ * Without this the "bucket mount is missing" case is indistinguishable from a
+ * healthy install: uploads succeed, land on the container disk, and vanish on
+ * the next redeploy. The result is logged once and reported by /healthz.
+ */
+export async function ensureAttachmentsProbe(): Promise<AttachmentsProbeResult> {
+  const runtime = configureNodeRuntime();
+  if (attachmentsProbe) return attachmentsProbe;
+  if (!attachmentsProbeRun) {
+    attachmentsProbeRun = probeAttachmentsDir(runtime.attachmentsDir, {
+      expectMount: runtime.attachmentsFromEnv,
+      // A FUSE mount is often still connecting when the entry module runs.
+      attempts: runtime.attachmentsFromEnv ? 6 : 1,
+      delayMs: 500,
+    }).then((result) => {
+      attachmentsProbe = result;
+      const problem = describeAttachmentsProblem(result);
+      if (!problem) {
+        console.log(`[attachments] storage ready at ${result.dir}`);
+      } else {
+        console.error(`[attachments] ${problem}`);
+      }
+      return result;
+    });
+  }
+  return attachmentsProbeRun;
 }
 
 export function getRuntimeInfo(): RuntimeState {
@@ -197,69 +259,6 @@ function createFileKv(dataDir: string) {
 // ---------------------------------------------------------------------------
 // Filesystem-backed R2-compatible bucket (attachments / send files)
 // ---------------------------------------------------------------------------
-
-function safeObjectPath(attachmentsDir: string, key: string): string {
-  // Containment check via path.relative: a plain startsWith() also accepts
-  // sibling directories such as "/data/attachments-evil".
-  const normalized = key.replace(/^[/\\]+/, '');
-  const full = path.resolve(attachmentsDir, normalized);
-  const rel = path.relative(attachmentsDir, full);
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('Invalid object key');
-  return full;
-}
-
-function createFsR2(attachmentsDir: string) {
-  return {
-    async put(key: string, value: unknown, options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }): Promise<void> {
-      const full = safeObjectPath(attachmentsDir, key);
-      fs.mkdirSync(path.dirname(full), { recursive: true });
-      let bytes: Uint8Array;
-      if (typeof value === 'string') bytes = new TextEncoder().encode(value);
-      else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
-      else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-      else if (value instanceof ReadableStream) {
-        const buf = await new Response(value).arrayBuffer();
-        bytes = new Uint8Array(buf);
-      } else {
-        bytes = new Uint8Array(0);
-      }
-      await fsp.writeFile(full, bytes);
-      const meta = {
-        contentType: options?.httpMetadata?.contentType || 'application/octet-stream',
-        customMetadata: options?.customMetadata || {},
-      };
-      await fsp.writeFile(`${full}.meta.json`, JSON.stringify(meta));
-    },
-    async get(key: string): Promise<{ body: ReadableStream; size: number; httpMetadata: { contentType: string }; customMetadata: Record<string, string> } | null> {
-      const full = safeObjectPath(attachmentsDir, key);
-      try {
-        // Stream, don't slurp: attachments can be large and FC instances are small
-        // (0.5 GB). Reading the file into a Buffer first doubled peak memory.
-        const stat = await fsp.stat(full);
-        let meta: { contentType?: string; customMetadata?: Record<string, string> } = {};
-        try {
-          meta = JSON.parse(await fsp.readFile(`${full}.meta.json`, 'utf8'));
-        } catch {
-          // no meta
-        }
-        const stream = fs.createReadStream(full);
-        return {
-          body: Readable.toWeb(stream) as unknown as ReadableStream,
-          size: stat.size,
-          httpMetadata: { contentType: meta.contentType || 'application/octet-stream' },
-          customMetadata: meta.customMetadata || {},
-        };
-      } catch {
-        return null;
-      }
-    },
-    async delete(key: string): Promise<void> {
-      const full = safeObjectPath(attachmentsDir, key);
-      await fsp.rm(full, { force: true });
-      await fsp.rm(`${full}.meta.json`, { force: true });
-    },
-  };
-}
 
 // ---------------------------------------------------------------------------
 // caches.* shim (in-memory)
@@ -398,6 +397,19 @@ export function buildNodeEnv(): Env {
     DB_NAME: process.env.DB_NAME,
     DB_SSL: process.env.DB_SSL,
     DB_CONN_LIMIT: process.env.DB_CONN_LIMIT,
+    // Optional env-declared standbys. Listed explicitly because this object is a
+    // whitelist: a variable that is not copied here does not exist as far as
+    // src/ is concerned, which is exactly how "I set DB_STANDBY_NODES and
+    // nothing happened" would look.
+    DB_STANDBY_NODES: process.env.DB_STANDBY_NODES,
+    DB_STANDBYS: process.env.DB_STANDBYS,
+    DB_STANDBY_NAME: process.env.DB_STANDBY_NAME,
+    DB_STANDBY_HOST: process.env.DB_STANDBY_HOST,
+    DB_STANDBY_PORT: process.env.DB_STANDBY_PORT,
+    DB_STANDBY_USER: process.env.DB_STANDBY_USER,
+    DB_STANDBY_PASSWORD: process.env.DB_STANDBY_PASSWORD,
+    DB_STANDBY_SSL: process.env.DB_STANDBY_SSL,
+    DB_STANDBY_CONN_LIMIT: process.env.DB_STANDBY_CONN_LIMIT,
     DB_CONFIG_KEY: process.env.DB_CONFIG_KEY,
   };
   sharedEnv = env as unknown as Env;
@@ -426,8 +438,22 @@ async function handleHealthz(env: Env): Promise<Response> {
     // Public endpoint: never echo raw driver errors (host, user, schema names).
     console.error('[healthz] database unavailable:', status.error);
   }
+  // Only the status word is exposed: the path itself would leak the container
+  // layout, and an operator reads the details from the startup log.
+  const attachments = await ensureAttachmentsProbe().catch(() => null);
+  const repaired = getLastSchemaRepair();
   return jsonResponse(
-    { ok: status.ok, db: status.ok ? 'up' : 'down', mode: status.mode, source: status.source, runtime: 'node' },
+    {
+      ok: status.ok,
+      db: status.ok ? 'up' : 'down',
+      mode: status.mode,
+      source: status.source,
+      runtime: 'node',
+      attachments: attachments?.status ?? 'unknown',
+      // Only present when this process actually had to widen an old table, so a
+      // clean install keeps the same shape it always had.
+      ...(repaired.length > 0 ? { schemaRepair: repaired } : {}),
+    },
     status.ok ? 200 : 503
   );
 }
@@ -436,6 +462,10 @@ export async function pipeline(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   let pathname = url.pathname;
   if (pathname.length > 1) pathname = pathname.replace(/\/+$/, '');
+
+  // Runs once per process: proves the attachment disk accepts writes before a
+  // single upload reports success against a mount that is not there.
+  await ensureAttachmentsProbe();
 
   if (pathname === '/internal/cron/backup' && request.method === 'POST') {
     return handleCronTick(request, env);
@@ -454,21 +484,44 @@ export async function pipeline(request: Request, env: Env): Promise<Response> {
   }
 
   await ensureDatabaseInitialized(env);
-  const dbInitError = getDbInitError();
-  if (dbInitError) {
-    const resp = jsonResponse(
-      {
-        error: 'Database not initialized',
-        error_description: 'Database initialization failed. Check server logs for details.',
-        ErrorModel: { Message: 'Service temporarily unavailable', Object: 'error' },
-      },
-      500
-    );
-    return applyCors(request, resp, env);
-  }
+  const dbFailure = dbInitFailureResponse();
+  if (dbFailure) return applyCors(request, dbFailure, env);
 
   const resp = await handleRequest(request, env);
   return applyCors(request, resp, env);
+}
+
+/**
+ * Translate a latched DB init failure into a response.
+ *
+ * Cluster-level refusals ("every node is disabled", "no database configured")
+ * are written for the operator and carry their own status, so they are passed
+ * through. Everything else stays behind the generic message: on this runtime the
+ * message can end up in a browser, and a raw driver error names hosts and
+ * credentials.
+ */
+function dbInitFailureResponse(): Response | null {
+  const failure = getDbInitFailure();
+  if (!failure) return null;
+  console.error('DB init error:', failure.message);
+  if (failure.status) {
+    return jsonResponse(
+      {
+        error: failure.message,
+        error_description: failure.message,
+        ErrorModel: { Message: failure.message, Object: 'error' },
+      },
+      failure.status
+    );
+  }
+  return jsonResponse(
+    {
+      error: 'Database not initialized',
+      error_description: 'Database initialization failed. Check server logs for details.',
+      ErrorModel: { Message: 'Service temporarily unavailable', Object: 'error' },
+    },
+    500
+  );
 }
 
 /**

@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://workers.cloudflare.com/"><img src="https://img.shields.io/badge/Powered%20by-Cloudflare-F38020?logo=cloudflare&logoColor=white" alt="Powered by Cloudflare" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-LGPL--3.0-2ea44f" alt="License: LGPL-3.0" /></a>
-  <a href="https://github.com/shuaiplus/NodeWarden/releases/latest"><img src="https://img.shields.io/github/v/release/shuaiplus/NodeWarden?display_name=tag" alt="Latest Release" /></a>
+  <a href="https://github.com/muzhi621/NodeWarden_fceo/releases/latest"><img src="https://img.shields.io/github/v/release/muzhi621/NodeWarden_fceo?display_name=tag" alt="Latest Release" /></a>
 
 </p>
 
@@ -120,7 +120,7 @@
 ## CLI deploy
 
 ```powershell
-git clone https://github.com/shuaiplus/NodeWarden.git
+git clone https://github.com/muzhi621/NodeWarden_fceo.git
 cd NodeWarden
 
 npm install
@@ -160,6 +160,43 @@ Then open **Admin → Database settings** (`/admin/database`) to edit/test the c
 (AES-256-GCM encrypted, password never echoed). `/healthz` reports DB mode and connectivity
 only — driver errors and the version string are no longer echoed to unauthenticated callers.
 Without `DB_HOST` the app falls back to D1 — `npm run deploy` works exactly like upstream.
+
+> **Where attachments and saved settings live** — see **[DEPLOY.md](DEPLOY.md)** for the
+> consolidated guide (all four deployment targets, full env-var table, storage mounting).
+> On the Node runtime everything writable goes under `DATA_DIR` (attachments in
+> `$DATA_DIR/attachments`, override with `ATTACHMENTS_DIR`). Alibaba Cloud FC defaults that to
+> `/tmp`, which is wiped when the instance recycles — **mount NAS and set `DATA_DIR`** if you
+> want attachments to survive. On Workers, attachments use the R2 binding `ATTACHMENTS` and the
+> config store uses the KV binding `SETTINGS_KV`. EdgeOne Pages has no persistent disk at all.
+
+### Multiple databases: primary + standby
+
+`/admin/database` manages a list of nodes (one primary, up to seven standbys) instead of a single
+connection; priority decides the takeover order.
+
+| Policy | Effect |
+|---|---|
+| Sync `native` (default) | The database replicates itself (MySQL binlog / managed replica). The app only fails over and never writes to the standby. |
+| Sync `write-through` | Every committed write is replayed on the other nodes, so two independent servers become live copies. Cross-server writes are not atomic: if a standby rejects the replay, the primary write stands and the error is recorded in the node health panel. |
+| Failover | Only connection-level failures (refused / timeout / reset / pool full) move traffic to the next healthy node. SQL errors never do — retrying a mistyped statement elsewhere would apply it twice. |
+| Write watermark | Every commit gets a sequence number and each node records the highest one it applied. A node that is behind is never chosen to write, and reads avoid it. That "who is behind" relationship is persisted, so a restart cannot silently turn a stale standby into a healthy one. |
+| Read split | Read-only statements may go to standbys, falling back to the primary. |
+| Circuit breaker | N consecutive failures take a node out for a cooldown, then it is retried half-open. |
+| Manual promote | `POST /api/admin/db-config/promote` (the **Switch primary** button). It checks reachability, that the target's own `@@read_only` flag says writable, and — in `write-through` — a completed sync with no backlog. Anything else is a 409 listing the gap; only `?force=1` overrides it. The demoted node keeps its data. |
+| No usable database | A config whose nodes are all disabled no longer falls back to D1 (there is none on the Node runtime — the old path crashed on `undefined.prepare`). `/healthz` and normal requests answer 503 with the reason instead. |
+
+A standby attached to a deployment that already holds data needs one backfill: save the cluster,
+then press **Sync data to standbys** (write-through only). It walks every table with a chunked,
+capped, idempotent upsert — safe to re-run after an interruption or to repair a node that fell
+behind. Merge mode re-sends rows the target already has, so the result reports *added* rows
+(measured from the target's own count) separately from the rows it pushed. Per-node replay errors
+are visible on the admin page and in `/healthz`.
+
+`native` mode trusts the database to copy the rows, so saving a cluster whose standby has an empty
+`users` table while the primary does not now produces a red warning naming that node: it almost
+always means replication was never set up, and the first failover would show an empty vault.
+A completed sync only covers writes up to the moment it started; anything committed while it ran is
+still replayed from the journal on the next write.
 
 ### Deploying to Aliyun FC / self-hosting Node
 
@@ -230,16 +267,16 @@ LGPL-3.0 License
 
 ## Contributors
 
-<a href="https://github.com/shuaiplus/nodewarden/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=shuaiplus/nodewarden" alt="NodeWarden contributors" />
+<a href="https://github.com/muzhi621/NodeWarden_fceo/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=muzhi621/NodeWarden_fceo" alt="NodeWarden contributors" />
 </a>
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=shuaiplus%2FNodeWarden&type=timeline&legend=top-left">
+<a href="https://www.star-history.com/?repos=muzhi621%2FNodeWarden_fceo&type=timeline&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=shuaiplus/NodeWarden&type=timeline&theme=dark&legend=top-left&sealed_token=ck0AMqR8EFMjJ6tMbnGDHT5QwMpO85IUuN7i8e82zRRNPtjoLsAAFwVzxmSZwaid97wLUwy56EEiVE9M-OY0cf16bQKBrU9GaauFoOFXGq-vMqcOyk0tIc4b3o1ZGfDw9IH8o6NUxC125TJkjKSLn9fxhFUUeNr1f1El0UcAUcjsMPl_LX80qQrlvQqp" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=shuaiplus/NodeWarden&type=timeline&legend=top-left&sealed_token=ck0AMqR8EFMjJ6tMbnGDHT5QwMpO85IUuN7i8e82zRRNPtjoLsAAFwVzxmSZwaid97wLUwy56EEiVE9M-OY0cf16bQKBrU9GaauFoOFXGq-vMqcOyk0tIc4b3o1ZGfDw9IH8o6NUxC125TJkjKSLn9fxhFUUeNr1f1El0UcAUcjsMPl_LX80qQrlvQqp" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=shuaiplus/NodeWarden&type=timeline&legend=top-left&sealed_token=ck0AMqR8EFMjJ6tMbnGDHT5QwMpO85IUuN7i8e82zRRNPtjoLsAAFwVzxmSZwaid97wLUwy56EEiVE9M-OY0cf16bQKBrU9GaauFoOFXGq-vMqcOyk0tIc4b3o1ZGfDw9IH8o6NUxC125TJkjKSLn9fxhFUUeNr1f1El0UcAUcjsMPl_LX80qQrlvQqp" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=muzhi621/NodeWarden_fceo&type=timeline&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=muzhi621/NodeWarden_fceo&type=timeline&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=muzhi621/NodeWarden_fceo&type=timeline&legend=top-left" />
  </picture>
 </a>

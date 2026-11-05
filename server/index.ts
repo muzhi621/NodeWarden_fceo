@@ -17,12 +17,16 @@ import http from 'node:http';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeWebReadableStream } from 'node:stream/web';
 
+import { createLimitedBody } from './body-stream';
+
 import { jsonResponse } from '../src/utils/response';
+import { resolveStandbysFromEnv } from '../src/services/db-config';
 import {
   buildNodeEnv,
   configureNodeRuntime,
   getCronSecret,
   handleCronTick,
+  isDataDirEphemeral,
   pipeline,
 } from './node-runtime';
 
@@ -33,7 +37,17 @@ const PORT = Number(process.env.PORT || 8787);
 // http <-> fetch bridging
 // ---------------------------------------------------------------------------
 
-function nodeRequestToRequest(req: http.IncomingMessage, body: Buffer): Request {
+/**
+ * A request whose body exceeded MAX_BODY_BYTES while it was being streamed.
+ *
+ * The declared `content-length` case is rejected before a byte is read; this
+ * flag covers chunked uploads, where the size is only known as it arrives.
+ */
+interface LimitedRequest extends http.IncomingMessage {
+  bodyTooLarge?: () => boolean;
+}
+
+function nodeRequestToRequest(req: LimitedRequest): Request {
   const protocol = (req.headers['x-forwarded-proto'] as string) || 'http';
   const host = (req.headers['x-forwarded-host'] as string) || req.headers.host || `localhost:${PORT}`;
   const url = `${protocol}://${host}${req.url || '/'}`;
@@ -44,9 +58,15 @@ function nodeRequestToRequest(req: http.IncomingMessage, body: Buffer): Request 
     else headers.set(key, value);
   }
   const method = (req.method || 'GET').toUpperCase();
-  const init: RequestInit = { method, headers };
-  if (!['GET', 'HEAD'].includes(method) && body.length > 0) {
-    init.body = body;
+  const init: RequestInit & { duplex?: 'half' } = { method, headers };
+  if (!['GET', 'HEAD'].includes(method)) {
+    // Forwarded as it arrives, not buffered: a 100 MB attachment used to be
+    // copied whole before the storage layer saw its first byte.
+    const body = createLimitedBody(req, MAX_BODY_BYTES);
+    req.bodyTooLarge = body.exceeded;
+    init.body = body.stream as unknown as BodyInit;
+    // Required by Node's fetch implementation for a streaming request body.
+    init.duplex = 'half';
   }
   return new Request(url, init);
 }
@@ -99,46 +119,55 @@ const MAX_BODY_BYTES = ((): number => {
   return Math.floor(megabytes * 1024 * 1024);
 })();
 
-const server = http.createServer((req, res) => {
-  const chunks: Buffer[] = [];
-  let received = 0;
-  let rejected = false;
-  req.on('data', (chunk: Buffer) => {
-    if (rejected) return;
-    received += chunk.length;
-    if (received > MAX_BODY_BYTES) {
-      rejected = true;
-      // Unbounded buffering is a memory DoS on a self-hosted instance.
-      res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8', Connection: 'close' });
-      res.end(JSON.stringify({ error: 'Payload too large' }));
-      req.destroy();
+/**
+ * Answer one request.
+ *
+ * The body is *not* drained up front: it is handed to the pipeline as a stream,
+ * so a handler that never reads it (a 404, an auth failure) costs nothing, and
+ * an upload is consumed chunk by chunk.
+ */
+async function serveRequest(req: LimitedRequest, res: http.ServerResponse): Promise<void> {
+  const declared = Number(req.headers['content-length'] ?? NaN);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    // Refuse before reading: accepting the body is exactly the unbounded
+    // buffering this check exists to prevent.
+    const payload = JSON.stringify({ error: 'Payload too large' });
+    res.writeHead(413, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': Buffer.byteLength(payload),
+      Connection: 'close',
+    });
+    res.end(payload, () => req.destroy());
+    return;
+  }
+
+  try {
+    const env = buildNodeEnv();
+    const request = nodeRequestToRequest(req);
+    const response = await pipeline(request, env);
+    if (req.bodyTooLarge?.()) {
+      // A chunked upload that grew past the limit while being read. The handler
+      // failed on the truncated stream; answer 413 instead of a generic 500.
+      await writeResponse(res, jsonResponse({ error: 'Payload too large' }, 413), request.method);
       return;
     }
-    chunks.push(chunk);
-  });
-  req.on('end', () => {
-    if (rejected) return;
-    void (async () => {
-      try {
-        const env = buildNodeEnv();
-        const body = Buffer.concat(chunks);
-        const request = nodeRequestToRequest(req, body);
-        const response = await pipeline(request, env);
-        await writeResponse(res, response, request.method);
-      } catch (error) {
-        console.error('Unhandled request error:', error);
-        try {
-          await writeResponse(res, jsonResponse({ error: 'Internal server error' }, 500), req.method || 'GET');
-        } catch {
-          res.destroy();
-        }
-      }
-    })();
-  });
+    await writeResponse(res, response, request.method);
+  } catch (error) {
+    console.error('Unhandled request error:', error);
+    try {
+      await writeResponse(res, jsonResponse({ error: 'Internal server error' }, 500), req.method || 'GET');
+    } catch {
+      res.destroy();
+    }
+  }
+}
+
+const server = http.createServer((req, res) => {
   req.on('error', (error) => {
     console.error('Request stream error:', error);
     res.destroy();
   });
+  void serveRequest(req, res);
 });
 
 server.requestTimeout = Number(process.env.REQUEST_TIMEOUT_MS || 300_000);
@@ -185,5 +214,29 @@ server.listen(PORT, () => {
   console.log(`  attachments:    ${runtime.attachmentsDir}`);
   console.log(`  web vault:      ${runtime.distDir}`);
   console.log(`  database:       ${process.env.DB_HOST ? `MySQL ${process.env.DB_HOST}:${process.env.DB_PORT || 3306}/${process.env.DB_NAME || ''}` : 'configured via env DB_* or admin UI (/admin/database)'}`);
+  // The standby list is a free-form value: a typo, a wrong separator or an entry
+  // pointing at the primary silently yields fewer standbys than intended, and
+  // the only other place that shows it is the admin page (which needs a working
+  // database). Echo what was actually understood, at boot.
+  const standbys = resolveStandbysFromEnv(buildNodeEnv());
+  if (standbys.length > 0) {
+    console.log(
+      `  standbys:       ${standbys.length} · ${standbys
+        .map((node) => `${node.database}@${node.host}:${node.port}`)
+        .join(', ')}`
+    );
+  }
   console.log(`  cron:           POST /internal/cron/backup (x-cron-secret)${cronSecret ? '' : ' — CRON_SECRET not set, endpoint disabled'}`);
+  // The admin-saved MySQL cluster lives in SETTINGS_KV = $DATA_DIR/kv-store.json.
+  // On a serverless host /tmp is per-instance and dies with it, so a deployment
+  // that relies on the admin config (no DB_* variables) silently loses its only
+  // database on the next recycle — every request then returns 503 and the admin
+  // page that could fix it needs a working database. Say it once, loudly, at boot.
+  if (isDataDirEphemeral(runtime.dataDir)) {
+    console.warn(
+      `  WARNING:        data dir ${runtime.dataDir} is inside the temporary directory. A database cluster ` +
+        'saved in the admin page, node sync records and write watermarks are lost when the instance is ' +
+        'recycled. Mount NAS (or set DATA_DIR to a persistent path) before removing the DB_* variables.'
+    );
+  }
 });

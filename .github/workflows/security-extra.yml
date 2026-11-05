@@ -34,19 +34,22 @@ jobs:
 
   osv:
     name: OSV Dependency Scan
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2
-
+    # uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@v1.9.0
     permissions:
       contents: read
       actions: read
       security-events: write
 
     with:
-      scan-args: |-
-        --recursive
+      scan-args: |
         ./
+        --recursive
+        --output-files=results.sarif
       upload-sarif: true
       fail-on-vuln: true
+  
+
 
   pnpm-audit:
     name: pnpm audit

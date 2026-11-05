@@ -40,6 +40,17 @@ const ALLOWED_METADATA_KEYS = new Set([
   'targetEmail',
   'grantType',
   'webSession',
+  // Which check inside the refresh flow rejected the request, and how many
+  // refresh-token rows existed at that moment. "not found" alone cannot be
+  // acted on; "no rows at all" and "rows exist but not this token" have
+  // completely different causes.
+  'stage',
+  'tokenRows',
+  'newestTokenAt',
+  // Whether the request arrived with cookies at all, and with the session
+  // cookie under its expected name. Presence only, never a value.
+  'cookieHeader',
+  'webCookie',
   'deviceIdentifier',
   'deviceType',
   'reason',

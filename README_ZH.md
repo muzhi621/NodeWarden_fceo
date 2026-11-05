@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://workers.cloudflare.com/"><img src="https://img.shields.io/badge/Powered%20by-Cloudflare-F38020?logo=cloudflare&logoColor=white" alt="Powered by Cloudflare" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-LGPL--3.0-2ea44f" alt="License: LGPL-3.0" /></a>
-  <a href="https://github.com/shuaiplus/NodeWarden/releases/latest"><img src="https://img.shields.io/github/v/release/shuaiplus/NodeWarden?display_name=tag" alt="Latest Release" /></a>
+  <a href="https://github.com/muzhi621/NodeWarden_fceo/releases/latest"><img src="https://img.shields.io/github/v/release/muzhi621/NodeWarden_fceo?display_name=tag" alt="Latest Release" /></a>
 
 </p>
 
@@ -118,7 +118,7 @@
 ## CLI 部署
 
 ```powershell
-git clone https://github.com/shuaiplus/NodeWarden.git
+git clone https://github.com/muzhi621/NodeWarden_fceo.git
 cd NodeWarden
 
 npm install
@@ -160,11 +160,62 @@ npm run dev:kv
 > 都附带 `nodewarden-fc.zip`（已构建好前端与后端 bundle，免装依赖直接上传）。
 > 规格选型、环境变量、平台定时备份、旧库升级 SQL 见 **[FC-DEPLOY.md](FC-DEPLOY.md)**。
 >
+> 🧭 **四种部署方式（Workers / EdgeOne / FC / Docker）汇总 + 环境变量总表 + 存储挂载**：
+> 见 **[DEPLOY.md](DEPLOY.md)**。其中「附件和管理页配置到底存在哪、怎么挂持久盘」是过去最容易漏的一环：
+> Node 运行时用 `DATA_DIR`（附件在同目录的 `attachments/` 下，可用 `ATTACHMENTS_DIR` 单独指定），
+> **FC 默认写在 `/tmp`，实例回收就丢，必须挂 NAS 并改这两个变量**；Workers 则用 R2 `ATTACHMENTS`
+> 与 KV `SETTINGS_KV` 绑定。EdgeOne Pages 没有持久盘（`DATA_DIR` 会被强制改写），只适合当入口。
+> 想把**阿里云 OSS / 腾讯云 COS** 挂成附件盘（仅 VPS/Docker 可行，FC 没有 FUSE 设备），
+> 见 [DEPLOY.md 3.6](DEPLOY.md#36-把阿里云-oss--腾讯云-cos-当附件盘fuse-挂载)；Serverless 上请改用备份中心的 S3 兼容目标。
+>
 > 与本家（上游）行为的三处差异，升级前务必知道：
 > - **TLS 默认校验证书**：自签库设 `DB_SSL_INSECURE=1`，更好的是把 `DB_SSL_CA` 指向 PEM；
 > - 后台「测试连接」默认拒绝内网/回环地址，自建库在内网需把 host 加进 `DB_HOST_ALLOWLIST`；
 > - **定时备份改为平台触发**：`POST /internal/cron/backup` + `x-cron-secret` 头（`CRON_SECRET`），
 >   不再用进程内定时器（避免多实例重复跑、缩容到 0 后停摆）；单机自托管可用 `INPROCESS_CRON=1` 恢复旧行为。
+
+#### 多节点：主库 + 副库（高可用）
+
+`/admin/database` 里配置的是一组节点（1 个主库 + 最多 7 个副库），按优先级决定接管顺序：
+
+| 策略 | 作用 |
+|---|---|
+| 同步方式 `native`（默认） | 数据由数据库自身复制（MySQL 主从 / 云厂商只读副本）。应用不写副库，只在主库不可用时切换，一致性由数据库保证。 |
+| 同步方式 `write-through` | 应用层实时双写：每次写入提交后，立即在其他节点重放。适合"两台互不相关的库互为备份"。跨库写入不是原子操作——主库已提交、副库失败时以主库为准，失败会记在节点健康里。 |
+| 故障切换 | 只对**连接级失败**生效（拒绝连接、连接超时、连接池满）。SQL 语法错误、唯一键冲突不会切节点，否则同一条语句会被执行两次；`ECONNRESET`／`ETIMEDOUT` 这类"可能已经提交"的失败也不会重放到别的节点，而是报"无法确认是否已提交"，避免重复写入。 |
+| 写入水位 | 每次提交写入都记序号，每个节点记"已应用到第几号"。落后于最新的节点不会被派去写，读请求也会绕开它——否则主库恢复后立刻收回写权，切换期间写进副库的数据就再也不会回到主库。这个"谁落后"的关系会持久化：进程重启后落后的副库仍然要求完整同步，不会因为重启就被当成已追平。 |
+| 读分流 | 只读语句可以分摊到副库，失败自动回退主库；刚写完的 1 秒内读固定走写入节点（read-your-writes），避免读到还没重放的行。 |
+| 熔断 | 连续失败达到阈值后把该节点摘除一段时间，冷却结束后半开重试。只读节点（返回 1290）不算故障，只是不参与写入。 |
+| 手动切换主库 | `POST /api/admin/db-config/promote`（页面上的「切换主库」）。切换前校验连通性、`@@read_only` 可写性、同步完成与水位，不满足返回 409 并列出缺口；`?force=1` 才强制切换。切换后原主库降为副库、数据保留。 |
+| 没有可用数据库 | 配置存在但全部节点停用时，不再静默回落到 D1（Node 运行时根本没有 D1，旧行为是 `undefined.prepare` 崩溃）：`/healthz` 与业务请求统一返回 503，并直接说明"配置里有 N 个节点但全部停用"。 |
+
+#### 同步与切换怎么用
+
+**首次添加副库**：保存配置 → 点「同步数据到副库」。给已有数据的部署新增副库时，双写只覆盖保存之后的写入，历史数据必须靠这一次补齐。
+
+`native` 模式下应用不负责复制数据，所以保存时若发现某个副库的 `users` 表一条记录都没有、而主库有，页面会用红色警告点名这个副库：这通常意味着它并没有真正接入 MySQL 主从复制，故障切换后看到的就是一个空库。
+
+**同步是安全默认**：默认「只补缺失行」（`INSERT ... ON DUPLICATE KEY UPDATE 主键=主键`），副库上更新的行**不会**被主库的旧值覆盖；只有显式选「覆盖已有行」才会改写。同步源也可以指定（默认主库）——发生过错切换后，应该以"接管期间实际接收写入的那个节点"为源，否则就是拿旧数据盖新数据。覆盖模式下若源节点比分枝落后，接口会直接拒绝（409），除非显式加 `?force=1`。
+
+**大库可以分次同步**：按主键游标分页（不是 `LIMIT/OFFSET`，所以同步过程中有人删行也不会漏行），单次受行数上限与时间预算限制。没跑完会自动接着跑（最多连续 8 轮），仍未完成再点一次即可，下一次**从上次的游标接着走**，不是从头再来。每张表同步完会比对两侧 `COUNT(*)`，行数不一致会列在结果里——注意行数一致只说明没有缺行，不代表旧值已被纠正。
+
+**副库未同步不会被使用**：`write-through` 模式下，从没完成过一次同步的副库既不承接读，也不会在故障时接管（健康面板标红提示「尚未同步（不可接管）」）。这是为了不让一张空库在故障日顶上来。同步记录与"具体指向哪个库"绑定（`host:port/库名`）：把副库改指到另一个库之后，旧记录自动作废，必须重新同步才算就绪。
+
+**落后节点自动补齐**：主库故障期间写入落在副库，主库恢复后不会立刻拿回写权——先把落后期间的写入按序重放补齐，再切回；超出内存补写日志范围（默认 2000 条 / 约 2 MB）时该节点会被标记「需要完整同步」，此时请执行一次同步。
+
+**同步不会掩盖没补齐的写**：手动同步只把水位推进到"同步开始那一刻"，同步期间新提交的写仍留在补写日志里，由下一次写自动补齐。所以"同步完成"不会把还没重放的写当成已复制——这也是为什么「只补缺失行」修不了被改过的旧值，要纠正得用「覆盖已有行」。
+
+**切换 runbook**（`write-through` 模式）：
+
+1. **发现**：`/healthz` 返回 `degraded: true`，或管理页某节点显示熔断／落后；
+2. **确认**：看节点卡片上的「落后 N 条写入」——还没自愈的才需要人工介入；只读报错 1290 说明连到了 `native` 模式的只读副本，先确认主库是否真的挂了；
+3. **提升**：点副库卡片上的**「切换主库」**（`POST /api/admin/db-config/promote`）。它会先验证三件事：目标节点连得上、数据库自己报告**可写**（`@@read_only=1` 的只读副本会被当场挡回，因为切过去后所有写入都会失败）、以及 `write-through` 下该节点**已完成同步且 `lag` 为 0**。任一项不满足会返回 409 并列出缺口，确认可以放弃那部分数据后才用 `?force=1` 强制切换。切换后原主库自动降为副库、数据保留；它若原本与写入水位持平，会自动记为"已同步"，仍可承接读请求或再次接管；
+4. **补齐**：原来的主库恢复后，用「同步数据到副库」以新主库为源把它补齐（默认只补缺失行，不会回退数据）；它落后过就会保持「尚未同步」状态，补齐前不参与读写；
+5. **复核**：同步结果里的行数校验必须一致；`/healthz` 的 `nodes[].lag` 回到 0。
+
+> ⚠️ 节点健康、熔断状态和补写日志都在**进程内**。多实例部署（FC 多实例 / EdgeOne）时，各实例各自判断、各自切换，同一时刻可能有两个实例往不同节点写，必然分叉。生产上要么只保留一个写实例，要么直接用 `native` 让数据库负责复制。
+
+> ⚠️ EdgeOne Pages 上多节点功能不可用：Node Functions 用不了 KV、`/tmp` 不持久，运行时配置无处可存，只能走 `DB_*` 环境变量，而该路径固定生成单节点。主副库请在 FC 或自托管环境使用。
 
 ### 2. 快速开始（Node.js + 外接 MySQL）
 
@@ -198,7 +249,8 @@ npm run start:node                   # 默认监听 http://localhost:8787
 | `DB_SSL` | — | 默认 `true`；TiDB Serverless 必须开启 |
 | `DB_CONN_LIMIT` | — | 连接池上限，默认 5 |
 | `DB_CONFIG_KEY` | 前台配置时必填 | 前台保存配置的加密主密钥 |
-| `DATA_DIR` | — | 数据目录（附件/配置文件），默认 `./data` |
+| `DATA_DIR` | — | 数据目录（后台保存的配置、节点同步记录、写入水位），默认 `./data`。**要跨重启保留就必须指向持久盘** |
+| `ATTACHMENTS_DIR` | `${DATA_DIR}/attachments` | 附件实际落盘目录；想单独挂一块盘时设。目录启动时自动创建，但挂载点必须可写 |
 | `PORT` | — | 监听端口，默认 8787 |
 | `HIDE_WEB_VAULT` / `WEBAUTHN_*` | — | 与 Workers 版一致 |
 
@@ -282,6 +334,10 @@ npm run deploy:kv   # KV 模式
 ```bash
 npm run test:mysql-dialect   # SQL 方言翻译器单元测试
 npm run test:db-lifecycle    # 切库/初始化生命周期测试
+npm run test:db-cluster      # 多节点路由/故障切换/写入水位与追赶
+npm run test:db-cluster-sync # 同步分页、游标续传、merge/overwrite、行数校验
+npm run test:db-sync-gate    # 副库就绪门禁（未同步不得接管）
+npm run test:db-cluster:e2e  # 接真实 MySQL 的双库端到端（临时建库，跑完删除；读 .smoke-db.json）
 npx tsc --noEmit             # 类型检查
 npm run build                # 前端构建
 curl http://localhost:8787/healthz   # 健康检查（返回数据库模式/连接状态）
@@ -306,16 +362,16 @@ LGPL-3.0 License
 
 ## 贡献者
 
-<a href="https://github.com/shuaiplus/nodewarden/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=shuaiplus/nodewarden" alt="NodeWarden contributors" />
+<a href="https://github.com/muzhi621/NodeWarden_fceo/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=muzhi621/NodeWarden_fceo" alt="NodeWarden contributors" />
 </a>
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=shuaiplus%2FNodeWarden&type=timeline&legend=top-left">
+<a href="https://www.star-history.com/?repos=muzhi621%2FNodeWarden_fceo&type=timeline&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=shuaiplus/NodeWarden&type=timeline&theme=dark&legend=top-left&sealed_token=ck0AMqR8EFMjJ6tMbnGDHT5QwMpO85IUuN7i8e82zRRNPtjoLsAAFwVzxmSZwaid97wLUwy56EEiVE9M-OY0cf16bQKBrU9GaauFoOFXGq-vMqcOyk0tIc4b3o1ZGfDw9IH8o6NUxC125TJkjKSLn9fxhFUUeNr1f1El0UcAUcjsMPl_LX80qQrlvQqp" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=shuaiplus/NodeWarden&type=timeline&legend=top-left&sealed_token=ck0AMqR8EFMjJ6tMbnGDHT5QwMpO85IUuN7i8e82zRRNPtjoLsAAFwVzxmSZwaid97wLUwy56EEiVE9M-OY0cf16bQKBrU9GaauFoOFXGq-vMqcOyk0tIc4b3o1ZGfDw9IH8o6NUxC125TJkjKSLn9fxhFUUeNr1f1El0UcAUcjsMPl_LX80qQrlvQqp" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=shuaiplus/NodeWarden&type=timeline&legend=top-left&sealed_token=ck0AMqR8EFMjJ6tMbnGDHT5QwMpO85IUuN7i8e82zRRNPtjoLsAAFwVzxmSZwaid97wLUwy56EEiVE9M-OY0cf16bQKBrU9GaauFoOFXGq-vMqcOyk0tIc4b3o1ZGfDw9IH8o6NUxC125TJkjKSLn9fxhFUUeNr1f1El0UcAUcjsMPl_LX80qQrlvQqp" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=muzhi621/NodeWarden_fceo&type=timeline&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=muzhi621/NodeWarden_fceo&type=timeline&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=muzhi621/NodeWarden_fceo&type=timeline&legend=top-left" />
  </picture>
 </a>

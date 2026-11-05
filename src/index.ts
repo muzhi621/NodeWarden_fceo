@@ -2,8 +2,9 @@ import { Env } from './types';
 import { NotificationsHub } from './durable/notifications-hub';
 import { BackupTransferRunner } from './durable/backup-transfer-runner';
 import { handleRequest } from './router';
-import { ensureDatabaseInitialized, getDbInitError } from './services/db-lifecycle';
+import { ensureDatabaseInitialized, getDbInitError, getDbInitFailure } from './services/db-lifecycle';
 import { getDatabaseStatus } from './services/storage-factory';
+import { getLastSchemaRepair } from './services/storage-schema';
 import { applyCors, jsonResponse } from './utils/response';
 import { runScheduledBackupIfDue } from './handlers/backup';
 import {
@@ -57,8 +58,17 @@ async function handleHealthz(env: Env): Promise<Response> {
     // schema names. Keep the detail in the logs, expose only the shape.
     console.error('[healthz] database unavailable:', status.error);
   }
+  const repaired = getLastSchemaRepair();
   return jsonResponse(
-    { ok: status.ok, db: status.ok ? 'up' : 'down', mode: status.mode, source: status.source },
+    {
+      ok: status.ok,
+      db: status.ok ? 'up' : 'down',
+      mode: status.mode,
+      source: status.source,
+      // Only present when this process actually had to widen an old table, so a
+      // clean install keeps the same shape it always had.
+      ...(repaired.length > 0 ? { schemaRepair: repaired } : {}),
+    },
     status.ok ? 200 : 503
   );
 }
@@ -83,10 +93,23 @@ export default {
     }
 
     await ensureDatabaseInitialized(env);
-    const dbInitError = getDbInitError();
+    const dbInitError = getDbInitFailure();
     if (dbInitError) {
-      // Log full error server-side, return generic message to client.
-      console.error('DB init error (not forwarded to client):', dbInitError);
+      // A failure that was written for a human (no database configured, every
+      // node disabled, no node can take the write) carries its own status and is
+      // forwarded; raw driver errors stay behind the generic message.
+      console.error('DB init error:', dbInitError.message);
+      if (dbInitError.status) {
+        const resp = jsonResponse(
+          {
+            error: dbInitError.message,
+            error_description: dbInitError.message,
+            ErrorModel: { Message: dbInitError.message, Object: 'error' },
+          },
+          dbInitError.status
+        );
+        return applyCors(normalizedRequest, resp, env);
+      }
       const resp = jsonResponse(
         {
           error: 'Database not initialized',

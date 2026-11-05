@@ -206,7 +206,39 @@ type SessionRefreshOutcome =
 
 async function maybeRefreshSession(session: SessionState): Promise<SessionRefreshOutcome> {
   if (!session.refreshToken && session.authMode !== 'web-cookie') {
-    return session.accessToken ? { kind: 'success', session } : { kind: 'expired' };
+    if (session.accessToken) return { kind: 'success', session };
+    // A web login that did not come back with `web_session` is stored in token
+    // mode, and then a reload holds nothing worth sending: the access token
+    // lived in memory and the refresh token was never handed to the client. It
+    // used to give up right here and show the login screen, which looks exactly
+    // like "reloading logs me out".
+    //
+    // The cookie may still be in the browser. The flag and the cookie are set
+    // by the same response, but a request-only header deciding between them is
+    // free to be dropped on the way (a proxy, a rewritten request), and then
+    // the browser keeps a perfectly good cookie while the client believes it
+    // has no session at all. So try the cookie once before declaring the
+    // session dead; when there is none this costs one 400 and behaves as before.
+    const viaCookie = await refreshAccessToken({ ...session, authMode: 'web-cookie' });
+    if (viaCookie.ok) {
+      return {
+        kind: 'success',
+        session: {
+          ...session,
+          accessToken: viaCookie.token.access_token,
+          refreshToken: viaCookie.token.refresh_token || session.refreshToken,
+          authMode: viaCookie.token.web_session ? 'web-cookie' : session.authMode,
+        },
+      };
+    }
+    return viaCookie.transient
+      ? {
+          kind: 'transient',
+          session,
+          message: viaCookie.error || t('txt_session_refresh_temporarily_unavailable'),
+          retryAfterMs: viaCookie.retryAfterMs,
+        }
+      : { kind: 'expired' };
   }
   const exp = decodeJwtExp(session.accessToken);
   const nowSeconds = Math.floor(Date.now() / 1000);

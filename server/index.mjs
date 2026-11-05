@@ -276,8 +276,8 @@ var init_origins = __esm({
 });
 
 // src/utils/response.ts
-function isWildcardCorsPath(path2) {
-  return path2.startsWith("/icons/") || path2.startsWith("/fill-assist/") || path2 === "/v1/assetlinks:check" || path2 === "/api/v1/assetlinks:check" || path2 === "/config" || path2 === "/api/config" || path2 === "/api/version";
+function isWildcardCorsPath(path4) {
+  return path4.startsWith("/icons/") || path4.startsWith("/fill-assist/") || path4 === "/v1/assetlinks:check" || path4 === "/api/v1/assetlinks:check" || path4 === "/config" || path4 === "/api/config" || path4 === "/api/version";
 }
 function getCorsPolicy(request, env) {
   const url = new URL(request.url);
@@ -736,13 +736,13 @@ var init_storage_config_repo = __esm({
 });
 
 // src/services/push-relay.ts
-async function fetchPushEndpoint(url, init, errorMessage) {
+async function fetchPushEndpoint(url, init, errorMessage2) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PUSH_REQUEST_TIMEOUT_MS);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (error) {
-    console.error(errorMessage, error);
+    console.error(errorMessage2, error);
     return null;
   } finally {
     clearTimeout(timeout);
@@ -845,11 +845,11 @@ async function getPushAccessToken(env) {
   };
   return token;
 }
-async function postToPushRelay(env, path2, body) {
+async function postToPushRelay(env, path4, body) {
   const token = await getPushAccessToken(env);
   if (!token) return false;
   const response = await fetchPushEndpoint(
-    `${PUSH_RELAY_URI}${path2}`,
+    `${PUSH_RELAY_URI}${path4}`,
     {
       method: "POST",
       headers: {
@@ -859,11 +859,11 @@ async function postToPushRelay(env, path2, body) {
       },
       body: body === void 0 ? void 0 : JSON.stringify(body)
     },
-    `Bitwarden push relay request failed: ${path2}`
+    `Bitwarden push relay request failed: ${path4}`
   );
   if (!response) return false;
   if (!response.ok) {
-    console.error("Bitwarden push relay request failed:", path2, response.status, await response.text().catch(() => ""));
+    console.error("Bitwarden push relay request failed:", path4, response.status, await response.text().catch(() => ""));
     return false;
   }
   return true;
@@ -957,15 +957,41 @@ async function ensureAdminUserExists(db) {
   if (!firstUser?.id) return;
   await db.prepare("UPDATE users SET role = 'admin', updated_at = ? WHERE id = ?").bind((/* @__PURE__ */ new Date()).toISOString(), firstUser.id).run();
 }
+async function repairMillisecondColumns(db) {
+  const repaired = [];
+  for (const { table, column, notNull } of MILLISECOND_COLUMNS) {
+    try {
+      const row = await db.prepare(
+        "SELECT DATA_TYPE AS data_type FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?"
+      ).bind(table, column).first();
+      const type = String(row?.data_type ?? "").toLowerCase();
+      if (!type || type === "bigint") continue;
+      await db.prepare(`ALTER TABLE ${table} MODIFY COLUMN ${column} BIGINT${notNull ? " NOT NULL" : ""}`).run();
+      repaired.push(`${table}.${column} (${type} -> bigint)`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/no such table|does not exist|unknown database|information_schema/i.test(message)) {
+        console.warn(`[schema] could not verify ${table}.${column}:`, message);
+      }
+    }
+  }
+  return repaired;
+}
 async function ensureStorageSchema(db) {
   await db.prepare("PRAGMA foreign_keys = ON").run();
   await db.prepare("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL)").run();
   for (const stmt of SCHEMA_STATEMENTS) {
     await executeSchemaStatement(db, stmt);
   }
+  const repaired = await repairMillisecondColumns(db);
+  lastSchemaRepair = repaired;
   await ensureAdminUserExists(db);
+  return repaired;
 }
-var SCHEMA_STATEMENTS;
+function getLastSchemaRepair() {
+  return lastSchemaRepair;
+}
+var SCHEMA_STATEMENTS, MILLISECOND_COLUMNS, lastSchemaRepair;
 var init_storage_schema = __esm({
   "src/services/storage-schema.ts"() {
     "use strict";
@@ -1065,6 +1091,26 @@ var init_storage_schema = __esm({
       "CREATE TABLE IF NOT EXISTS login_attempts_ip (ip TEXT PRIMARY KEY, attempts INTEGER NOT NULL, locked_until INTEGER, updated_at INTEGER NOT NULL)",
       "CREATE TABLE IF NOT EXISTS used_attachment_download_tokens (jti TEXT PRIMARY KEY, expires_at INTEGER NOT NULL)"
     ];
+    MILLISECOND_COLUMNS = [
+      { table: "refresh_tokens", column: "expires_at", notNull: true },
+      { table: "refresh_tokens", column: "created_at", notNull: false },
+      { table: "refresh_tokens", column: "last_used_at", notNull: false },
+      { table: "refresh_tokens", column: "absolute_expires_at", notNull: false }
+    ];
+    lastSchemaRepair = [];
+  }
+});
+
+// src/services/sql-hints.ts
+function wantsPrimaryRead(sql) {
+  return PRIMARY_READ_PATTERN.test(sql);
+}
+var PRIMARY_READ_HINT, PRIMARY_READ_PATTERN;
+var init_sql_hints = __esm({
+  "src/services/sql-hints.ts"() {
+    "use strict";
+    PRIMARY_READ_HINT = "/* nw:primary */";
+    PRIMARY_READ_PATTERN = /\/\*\s*nw:primary\s*\*\//i;
   }
 });
 
@@ -1106,7 +1152,7 @@ async function getUser(db, email) {
   return mapUserRow(row);
 }
 async function getUserById(db, id) {
-  const row = await db.prepare(`SELECT ${USER_SELECT_COLUMNS} FROM users WHERE id = ?`).bind(id).first();
+  const row = await db.prepare(`SELECT ${PRIMARY_READ_HINT} ${USER_SELECT_COLUMNS} FROM users WHERE id = ?`).bind(id).first();
   if (!row) return null;
   return mapUserRow(row);
 }
@@ -1239,6 +1285,7 @@ var USER_SELECT_COLUMNS;
 var init_storage_user_repo = __esm({
   "src/services/storage-user-repo.ts"() {
     "use strict";
+    init_sql_hints();
     USER_SELECT_COLUMNS = "id, email, name, master_password_hint, master_password_hash, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, role, status, verify_devices, totp_secret, totp_recovery_code, yubikey_key1, yubikey_key2, yubikey_key3, yubikey_key4, yubikey_key5, yubikey_nfc, api_key, created_at, updated_at";
   }
 });
@@ -2082,7 +2129,9 @@ async function getRefreshTokenRecord(db, refreshTokenKey, maybeCleanupExpiredRef
   await maybeCleanupExpiredRefreshTokens(now);
   const tokenKey = await refreshTokenKey(token);
   const row = await db.prepare(
-    "SELECT user_id, expires_at, device_identifier, device_session_stamp, security_stamp, created_at, last_used_at, absolute_expires_at, client_type FROM refresh_tokens WHERE token = ?"
+    // Written by the login a moment ago; a replica one replay behind would
+    // answer "not found" and the token would be deleted as invalid.
+    `SELECT ${PRIMARY_READ_HINT} user_id, expires_at, device_identifier, device_session_stamp, security_stamp, created_at, last_used_at, absolute_expires_at, client_type FROM refresh_tokens WHERE token = ?`
   ).bind(tokenKey).first();
   if (!row) return null;
   if (row.expires_at && row.expires_at < now || row.absolute_expires_at && row.absolute_expires_at < now) {
@@ -2129,9 +2178,19 @@ async function deleteRefreshTokensByDevice(db, userId, deviceIdentifier) {
   const result = await db.prepare("DELETE FROM refresh_tokens WHERE user_id = ? AND device_identifier = ?").bind(userId, deviceIdentifier).run();
   return Number(result.meta.changes ?? 0);
 }
+async function getRefreshTokenTableStats(db) {
+  const row = await db.prepare("SELECT COUNT(*) AS total, MAX(created_at) AS newest FROM refresh_tokens").first();
+  const total = Number(row?.total);
+  const newest = row?.newest === null || row?.newest === void 0 ? null : Number(row.newest);
+  return {
+    total: Number.isFinite(total) ? total : -1,
+    newestCreatedAt: newest !== null && Number.isFinite(newest) ? newest : null
+  };
+}
 var init_storage_refresh_token_repo = __esm({
   "src/services/storage-refresh-token-repo.ts"() {
     "use strict";
+    init_sql_hints();
   }
 });
 
@@ -2250,7 +2309,7 @@ async function getDevicesByUserId(db, userId) {
 }
 async function getDevice(db, userId, deviceIdentifier) {
   const row = await db.prepare(
-    "SELECT user_id, device_identifier, name, type, session_stamp, encrypted_user_key, encrypted_public_key, encrypted_private_key, push_uuid, push_token, banned, banned_at, device_note, last_seen_at, created_at, updated_at FROM devices WHERE user_id = ? AND device_identifier = ? LIMIT 1"
+    `SELECT ${PRIMARY_READ_HINT} user_id, device_identifier, name, type, session_stamp, encrypted_user_key, encrypted_public_key, encrypted_private_key, push_uuid, push_token, banned, banned_at, device_note, last_seen_at, created_at, updated_at FROM devices WHERE user_id = ? AND device_identifier = ? LIMIT 1`
   ).bind(userId, deviceIdentifier).first();
   return row ? mapDeviceRow(row) : null;
 }
@@ -2331,6 +2390,7 @@ var init_storage_device_repo = __esm({
   "src/services/storage-device-repo.ts"() {
     "use strict";
     init_uuid();
+    init_sql_hints();
   }
 });
 
@@ -3134,7 +3194,7 @@ var init_storage = __esm({
     init_storage_account_passkey_repo();
     TWO_FACTOR_REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
     STORAGE_SCHEMA_VERSION_KEY = "schema.version";
-    STORAGE_SCHEMA_VERSION = "2026-07-13-refresh-session-reuse";
+    STORAGE_SCHEMA_VERSION = "2026-11-02-mysql-bigint-epoch-columns";
     REQUIRED_SCHEMA_TABLES = ["webauthn_credentials", "webauthn_challenges", "auth_requests", "totp_login_replays"];
     StorageService = class _StorageService {
       constructor(db) {
@@ -3240,7 +3300,10 @@ var init_storage = __esm({
         const schemaVersion = await getConfigValue(this.db, STORAGE_SCHEMA_VERSION_KEY);
         const schemaMissingRequiredTables = schemaVersion === STORAGE_SCHEMA_VERSION ? !await this.hasRequiredSchemaTables() : true;
         if (schemaVersion !== STORAGE_SCHEMA_VERSION || schemaMissingRequiredTables) {
-          await ensureStorageSchema(this.db);
+          const repairedColumns = await ensureStorageSchema(this.db);
+          if (repairedColumns.length > 0) {
+            console.warn("[schema] widened millisecond columns to BIGINT:", repairedColumns.join(", "));
+          }
           await setConfigValue(this.db, STORAGE_SCHEMA_VERSION_KEY, STORAGE_SCHEMA_VERSION);
         }
         await ensurePushInstallationCredentials(this.db);
@@ -3534,6 +3597,10 @@ var init_storage = __esm({
       async getRefreshTokenUserId(token) {
         const record = await this.getRefreshTokenRecord(token);
         return record?.userId ?? null;
+      }
+      /** Failure-path diagnostics: how many rows the table holds, and how fresh. */
+      async getRefreshTokenTableStats() {
+        return getRefreshTokenTableStats(this.db);
       }
       async deleteRefreshToken(token) {
         await deleteRefreshToken(this.db, this.refreshTokenKey.bind(this), token);
@@ -4020,19 +4087,28 @@ var init_auth = __esm({
       // Refresh access token
       async refreshAccessTokenDetailed(refreshToken) {
         const record = await this.storage.getRefreshTokenRecord(refreshToken);
-        if (!record?.userId) return { ok: false, reason: "token_not_found_or_expired" };
+        if (!record?.userId) {
+          const stats = await this.storage.getRefreshTokenTableStats().catch(() => null);
+          return {
+            ok: false,
+            reason: "token_not_found_or_expired",
+            stage: "record_missing",
+            tokenRows: stats?.total ?? -1,
+            newestTokenAt: stats?.newestCreatedAt ?? null
+          };
+        }
         const user = await this.storage.getUserById(record.userId);
         if (!user) {
           await this.storage.deleteRefreshToken(refreshToken);
-          return { ok: false, reason: "user_missing", userId: record.userId, deviceIdentifier: record.deviceIdentifier };
+          return { ok: false, reason: "user_missing", stage: "user_missing", userId: record.userId, deviceIdentifier: record.deviceIdentifier };
         }
         if (user.status !== "active") {
           await this.storage.deleteRefreshToken(refreshToken);
-          return { ok: false, reason: "user_inactive", userId: user.id, deviceIdentifier: record.deviceIdentifier };
+          return { ok: false, reason: "user_inactive", stage: "user_inactive", userId: user.id, deviceIdentifier: record.deviceIdentifier };
         }
         if (record.securityStamp && record.securityStamp !== user.securityStamp) {
           await this.storage.deleteRefreshToken(refreshToken);
-          return { ok: false, reason: "security_stamp_mismatch", userId: user.id, deviceIdentifier: record.deviceIdentifier };
+          return { ok: false, reason: "security_stamp_mismatch", stage: "security_stamp_mismatch", userId: user.id, deviceIdentifier: record.deviceIdentifier };
         }
         if (!record.securityStamp) {
           await this.storage.bindRefreshTokenSecurityStamp(refreshToken, user.securityStamp);
@@ -4042,11 +4118,11 @@ var init_auth = __esm({
           const boundDevice = await this.storage.getDevice(user.id, record.deviceIdentifier);
           if (!boundDevice) {
             await this.storage.deleteRefreshToken(refreshToken);
-            return { ok: false, reason: "device_missing", userId: user.id, deviceIdentifier: record.deviceIdentifier };
+            return { ok: false, reason: "device_missing", stage: "device_missing", userId: user.id, deviceIdentifier: record.deviceIdentifier };
           }
           if (record.deviceSessionStamp && boundDevice.sessionStamp !== record.deviceSessionStamp) {
             await this.storage.deleteRefreshToken(refreshToken);
-            return { ok: false, reason: "device_session_mismatch", userId: user.id, deviceIdentifier: record.deviceIdentifier };
+            return { ok: false, reason: "device_session_mismatch", stage: "device_session_mismatch", userId: user.id, deviceIdentifier: record.deviceIdentifier };
           }
           if (!record.deviceSessionStamp) {
             await this.storage.bindRefreshTokenDeviceStamp(refreshToken, boundDevice.sessionStamp);
@@ -4060,7 +4136,16 @@ var init_auth = __esm({
         );
         const extended = await this.storage.extendRefreshTokenExpiry(refreshToken, expiresAt, now);
         if (!extended) {
-          return { ok: false, reason: "token_not_found_or_expired", userId: user.id, deviceIdentifier: record.deviceIdentifier };
+          const stats = await this.storage.getRefreshTokenTableStats().catch(() => null);
+          return {
+            ok: false,
+            reason: "token_not_found_or_expired",
+            stage: "extend_rejected",
+            userId: user.id,
+            deviceIdentifier: record.deviceIdentifier,
+            tokenRows: stats?.total ?? -1,
+            newestTokenAt: stats?.newestCreatedAt ?? null
+          };
         }
         const accessToken = await this.generateAccessToken(user, device);
         return { ok: true, accessToken, user, device, expiresAt };
@@ -4205,6 +4290,17 @@ var init_audit_events = __esm({
       "targetEmail",
       "grantType",
       "webSession",
+      // Which check inside the refresh flow rejected the request, and how many
+      // refresh-token rows existed at that moment. "not found" alone cannot be
+      // acted on; "no rows at all" and "rows exist but not this token" have
+      // completely different causes.
+      "stage",
+      "tokenRows",
+      "newestTokenAt",
+      // Whether the request arrived with cookies at all, and with the session
+      // cookie under its expected name. Presence only, never a value.
+      "cookieHeader",
+      "webCookie",
       "deviceIdentifier",
       "deviceType",
       "reason",
@@ -5126,11 +5222,11 @@ var init_notifications_hub = __esm({
 });
 
 // src/utils/direct-upload.ts
-function buildDirectUploadUrl(request, path2, token) {
+function buildDirectUploadUrl(request, path4, token) {
   const version = "2023-11-03";
   const expiresAt = "2099-12-31T23:59:59Z";
   const origin = new URL(request.url).origin;
-  return `${origin}${path2}?sv=${encodeURIComponent(version)}&se=${encodeURIComponent(expiresAt)}&token=${encodeURIComponent(token)}`;
+  return `${origin}${path4}?sv=${encodeURIComponent(version)}&se=${encodeURIComponent(expiresAt)}&token=${encodeURIComponent(token)}`;
 }
 function getSafeJwtSecret(env) {
   const secret = (env.JWT_SECRET || "").trim();
@@ -6323,7 +6419,7 @@ var APP_VERSION;
 var init_app_version = __esm({
   "shared/app-version.ts"() {
     "use strict";
-    APP_VERSION = "1.8.3";
+    APP_VERSION = "1.8.15";
   }
 });
 
@@ -6683,9 +6779,35 @@ function isBlockedIpv6Address(hostname) {
   if (!Number.isFinite(firstHextet)) return true;
   return firstHextet === 0 || (firstHextet & 65024) === 64512 || (firstHextet & 65472) === 65152 || (firstHextet & 65280) === 65280 || hextets.join(":").startsWith("2001:0db8:");
 }
+function backupEndpointAllowlist() {
+  const raw = typeof process !== "undefined" && process.env ? process.env.BACKUP_ENDPOINT_ALLOWLIST ?? "" : "";
+  return raw.split(",").map((entry) => normalizeHostnameForPolicy(entry)).filter(Boolean);
+}
+function ipv4ToInt(octets) {
+  return (octets[0] << 24 >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3];
+}
+function cidrContains(cidr, hostname) {
+  const [network, bitsRaw] = cidr.split("/");
+  const bits2 = Number(bitsRaw);
+  const networkOctets = parseIpv4Address(network);
+  const hostOctets = parseIpv4Address(hostname);
+  if (!networkOctets || !hostOctets || !Number.isInteger(bits2) || bits2 < 0 || bits2 > 32) return false;
+  if (bits2 === 0) return true;
+  const mask = 4294967295 << 32 - bits2 >>> 0;
+  return (ipv4ToInt(hostOctets) & mask) === (ipv4ToInt(networkOctets) & mask);
+}
+function allowlistAllowsHostname(entries, hostname) {
+  return entries.some((entry) => {
+    if (entry === hostname) return true;
+    if (entry.startsWith("*.") && hostname.endsWith(entry.slice(1))) return true;
+    if (entry.includes("/") && cidrContains(entry, hostname)) return true;
+    return false;
+  });
+}
 function assertBackupEndpointHostAllowed(hostname, label) {
   const normalized = normalizeHostnameForPolicy(hostname);
   if (!normalized) throw new Error(`${label} host is required`);
+  if (allowlistAllowsHostname(backupEndpointAllowlist(), normalized)) return;
   if (normalized === "localhost" || normalized === "localhost.localdomain" || normalized.endsWith(".localhost.localdomain") || normalized.endsWith(".localhost") || normalized.endsWith(".local") || normalized.endsWith(".home.arpa") || normalized.endsWith(".internal") || normalized.endsWith(".lan") || normalized === "metadata.google.internal" || normalized === "localtest.me" || normalized.endsWith(".localtest.me") || normalized === "lvh.me" || normalized.endsWith(".lvh.me") || normalized === "vcap.me" || normalized.endsWith(".vcap.me") || normalized === "nip.io" || normalized.endsWith(".nip.io") || normalized === "sslip.io" || normalized.endsWith(".sslip.io") || normalized === "xip.io" || normalized.endsWith(".xip.io")) {
     throw new Error(`${label} host is not allowed`);
   }
@@ -7455,8 +7577,8 @@ function normalizeParsedBackupDb(value) {
 }
 function createZipEntries(files) {
   const entries = {};
-  for (const [path2, bytes] of Object.entries(files)) {
-    entries[path2] = [bytes, { level: BACKUP_TEXT_COMPRESSION_LEVEL }];
+  for (const [path4, bytes] of Object.entries(files)) {
+    entries[path4] = [bytes, { level: BACKUP_TEXT_COMPRESSION_LEVEL }];
   }
   return entries;
 }
@@ -8220,11 +8342,11 @@ async function readEnvFile(name, label) {
   if (!filePath) return void 0;
   try {
     const fsName = "node:fs";
-    const fs2 = await import(
+    const fs3 = await import(
       /* @vite-ignore */
       fsName
     );
-    return fs2.readFileSync(filePath, "utf8");
+    return fs3.readFileSync(filePath, "utf8");
   } catch (error) {
     console.error(`[runtime-env] failed to read ${label} (${filePath}):`, error);
     return void 0;
@@ -8259,6 +8381,9 @@ function isDuplicateDdlError(error) {
   }
   return false;
 }
+function isReadOnlySql(sql) {
+  return /^\s*(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i.test(sql);
+}
 function isDdlStatement(sql) {
   return /^\s*(CREATE|ALTER|DROP)\b/i.test(sql);
 }
@@ -8276,7 +8401,7 @@ function toResult(rows, affectedRows, insertId) {
 function isMySqlDatabase(db) {
   return !!db && typeof db === "object" && db.dialect === "mysql";
 }
-var IGNORABLE_DDL_ERRNOS, IGNORABLE_DDL_CODES, RETRYABLE_CONN_CODES, RETRYABLE_PRECONNECT_CODES, CON_CAP_RETRY_DELAY_MS, READ_ONLY_SQL, MySqlStatement, MySqlDatabase;
+var IGNORABLE_DDL_ERRNOS, IGNORABLE_DDL_CODES, RETRYABLE_CONN_CODES, RETRYABLE_PRECONNECT_CODES, CON_CAP_RETRY_DELAY_MS, MySqlStatement, MySqlDatabase;
 var init_storage_mysql = __esm({
   "src/services/storage-mysql.ts"() {
     "use strict";
@@ -8305,7 +8430,6 @@ var init_storage_mysql = __esm({
       // in-flight query just to free one slot.
     ]);
     CON_CAP_RETRY_DELAY_MS = 200;
-    READ_ONLY_SQL = /^\s*(?:SELECT|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i;
     MySqlStatement = class {
       constructor(db, translatedSql, originalSql) {
         this.db = db;
@@ -8446,7 +8570,7 @@ var init_storage_mysql = __esm({
             await new Promise((resolve) => setTimeout(resolve, CON_CAP_RETRY_DELAY_MS));
             return await pool.query(sql, params);
           }
-          const retryable = RETRYABLE_PRECONNECT_CODES.has(code) || RETRYABLE_CONN_CODES.has(code) && READ_ONLY_SQL.test(sql);
+          const retryable = RETRYABLE_PRECONNECT_CODES.has(code) || RETRYABLE_CONN_CODES.has(code) && isReadOnlySql(sql);
           if (retryable) {
             await this.close();
             return await (await this.getPool()).query(sql, params);
@@ -8989,22 +9113,22 @@ async function prepareRemoteAttachmentPayload(env, payload, files, source) {
     const lookupKey = `${cipherId}/${attachmentId}`;
     const ref = manifestLookup.get(lookupKey);
     const sizeBytes = ref?.sizeBytes || Number(row.size || 0) || 0;
-    const path2 = ref ? `attachments/${ref.blobName}` : `attachments/${lookupKey}`;
+    const path4 = ref ? `attachments/${ref.blobName}` : `attachments/${lookupKey}`;
     const inlinePath = `attachments/${cipherId}/${attachmentId}.bin`;
     if (files[inlinePath]) {
       nextAttachments.push(row);
       continue;
     }
     if (!ref) {
-      skippedItems.push({ kind: "attachment", path: path2, sizeBytes });
+      skippedItems.push({ kind: "attachment", path: path4, sizeBytes });
       continue;
     }
     if (storageKind === "kv" && sizeBytes > KV_MAX_OBJECT_BYTES) {
-      skippedItems.push({ kind: "attachment", path: path2, sizeBytes });
+      skippedItems.push({ kind: "attachment", path: path4, sizeBytes });
       continue;
     }
     if (storageKind === null) {
-      skippedItems.push({ kind: "attachment", path: path2, sizeBytes });
+      skippedItems.push({ kind: "attachment", path: path4, sizeBytes });
       continue;
     }
     nextAttachments.push(row);
@@ -9444,8 +9568,8 @@ var init_backup_import = __esm({
 function isBackupArchiveName(name) {
   return /\.zip$/i.test(String(name || "").trim());
 }
-function encodePathSegments(path2) {
-  return path2.split("/").filter(Boolean).map((segment) => encodeURIComponent(segment)).join("/");
+function encodePathSegments(path4) {
+  return path4.split("/").filter(Boolean).map((segment) => encodeURIComponent(segment)).join("/");
 }
 function trimSlashes(value) {
   let next = String(value || "");
@@ -9456,8 +9580,8 @@ function trimSlashes(value) {
 function buildJoinedPath(...segments) {
   return segments.map(trimSlashes).filter(Boolean).join("/");
 }
-function normalizeRelativePath(path2) {
-  const normalized = trimSlashes(path2).replace(/\\/g, "/");
+function normalizeRelativePath(path4) {
+  const normalized = trimSlashes(path4).replace(/\\/g, "/");
   if (!normalized) return "";
   const parts = normalized.split("/").filter(Boolean);
   if (parts.some((part) => part === "." || part === "..")) {
@@ -9465,14 +9589,14 @@ function normalizeRelativePath(path2) {
   }
   return parts.join("/");
 }
-function basename(path2) {
-  const normalized = trimSlashes(path2);
+function basename(path4) {
+  const normalized = trimSlashes(path4);
   if (!normalized) return "";
   const parts = normalized.split("/").filter(Boolean);
   return parts[parts.length - 1] || "";
 }
-function parentPath(path2) {
-  const normalized = normalizeRelativePath(path2);
+function parentPath(path4) {
+  const normalized = normalizeRelativePath(path4);
   if (!normalized) return null;
   const parts = normalized.split("/");
   parts.pop();
@@ -9523,6 +9647,14 @@ function extractXmlFirst(xml, tagName) {
   const match = xml.match(pattern);
   return match?.[1] ? decodeXmlText(match[1].trim()) : null;
 }
+function decodeS3UrlEncoded(value) {
+  if (value === null) return null;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
 async function sha256Hex2(value) {
   const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
   const digest2 = await crypto.subtle.digest("SHA-256", bytes);
@@ -9537,17 +9669,33 @@ function toBasicAuthHeader(username, password) {
   const token = btoa(`${username}:${password}`);
   return `Basic ${token}`;
 }
+function encodeRfc3986(value) {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+function compareCodePoints(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 function buildCanonicalQueryString(url) {
-  const params = Array.from(url.searchParams.entries()).sort(([aKey, aValue], [bKey, bValue]) => {
-    if (aKey === bKey) return aValue.localeCompare(bValue);
-    return aKey.localeCompare(bKey);
-  });
-  return params.map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");
+  const raw = url.search.startsWith("?") ? url.search.slice(1) : url.search;
+  if (!raw) return "";
+  return raw.split("&").filter(Boolean).map((pair) => {
+    const index = pair.indexOf("=");
+    const rawKey = index === -1 ? pair : pair.slice(0, index);
+    const rawValue = index === -1 ? "" : pair.slice(index + 1);
+    const decode3 = (part) => {
+      try {
+        return decodeURIComponent(part);
+      } catch {
+        return part;
+      }
+    };
+    return `${encodeRfc3986(decode3(rawKey))}=${encodeRfc3986(decode3(rawValue))}`;
+  }).sort(compareCodePoints).join("&");
 }
 async function buildAwsV4Authorization(method, url, headers, payloadHashHex, accessKeyId, secretAccessKey, region) {
   const amzDate = headers["x-amz-date"];
   const shortDate = amzDate.slice(0, 8);
-  const headerEntries = Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]).sort(([a], [b]) => a.localeCompare(b));
+  const headerEntries = Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]).sort(([a], [b]) => compareCodePoints(a, b));
   const canonicalHeaders = headerEntries.map(([name, value]) => `${name}:${String(value).trim().replace(/\s+/g, " ")}`).join("\n");
   const signedHeaders = headerEntries.map(([name]) => name).join(";");
   const canonicalRequest = [
@@ -9587,6 +9735,7 @@ function ensureDestinationConfigReady(destination) {
     const config = destination.destination;
     if (!String(config.endpoint || "").trim()) throw new Error("S3 endpoint is required");
     normalizeBackupEndpointUrl(String(config.endpoint || "").trim(), "S3 endpoint");
+    assertProviderAddressingSupported(String(config.endpoint || "").trim(), String(config.addressingStyle || ""));
     if (!String(config.bucket || "").trim()) throw new Error("S3 bucket is required");
     if (!String(config.accessKeyId || "").trim()) throw new Error("S3 access key is required");
     if (!String(config.secretAccessKey || "")) throw new Error("S3 secret key is required");
@@ -9799,6 +9948,61 @@ function isBucketHostedS3Endpoint(endpoint, bucket) {
   const bucketName = bucket.trim().toLowerCase();
   return !!bucketName && (hostname === bucketName || hostname.startsWith(`${bucketName}.`));
 }
+function s3RequestTimeoutMs() {
+  const configured = Number(
+    typeof process !== "undefined" && process.env ? process.env.S3_REQUEST_TIMEOUT_MS : NaN
+  );
+  return Number.isFinite(configured) && configured >= 1e3 ? configured : 12e4;
+}
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function s3Fetch(url, init) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= S3_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(url, { ...init, signal: AbortSignal.timeout(s3RequestTimeoutMs()) });
+      if ((response.status === 429 || response.status >= 500) && attempt < S3_MAX_ATTEMPTS) {
+        await response.body?.cancel().catch(() => void 0);
+        await delay(200 * attempt * attempt);
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt === S3_MAX_ATTEMPTS) break;
+      await delay(200 * attempt * attempt);
+    }
+  }
+  throw new Error(
+    `S3 request failed after ${S3_MAX_ATTEMPTS} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`
+  );
+}
+async function throwS3Error(response, action) {
+  let detail = "";
+  try {
+    const text = (await response.text()).slice(0, 2e3);
+    const code = /<Code>([^<]{1,100})<\/Code>/i.exec(text)?.[1];
+    const message = /<Message>([^<]{1,300})<\/Message>/i.exec(text)?.[1];
+    detail = [code, message].filter(Boolean).join(": ");
+  } catch {
+  }
+  throw new Error(`S3 ${action} failed: ${response.status}${detail ? ` ${detail}` : ""}`);
+}
+function assertProviderAddressingSupported(endpoint, addressingStyle) {
+  if (addressingStyle === "virtual-hosted-style") return;
+  let hostname = "";
+  try {
+    hostname = new URL(endpoint).hostname.toLowerCase();
+  } catch {
+    return;
+  }
+  if (/(^|\.)aliyuncs\.com$/.test(hostname)) {
+    throw new Error(
+      'Aliyun OSS only accepts virtual-hosted-style addressing: set the S3 addressing style to "virtual-hosted-style" (path-style requests are rejected by OSS).'
+    );
+  }
+}
 function s3BucketBaseUrl(config) {
   const endpoint = new URL(config.endpoint.replace(/\/+$/, ""));
   const bucket = config.bucket.trim();
@@ -9833,7 +10037,7 @@ async function signedS3Request(config, method, url, body, contentType) {
     config.secretAccessKey,
     config.region || "auto"
   );
-  return fetch(url, {
+  return s3Fetch(url, {
     method,
     headers: {
       Authorization: authorization,
@@ -9849,7 +10053,7 @@ async function putToS3(config, relativePath, bytes, options = {}) {
   const url = s3ObjectUrl(config, objectKey);
   const response = await signedS3Request(config, "PUT", url, bytes, options.contentType);
   if (!response.ok) {
-    throw new Error(`S3 upload failed: ${response.status}`);
+    await throwS3Error(response, "upload");
   }
 }
 async function uploadToS3(config, archive, fileName) {
@@ -9867,18 +10071,25 @@ async function listS3Entries(config, relativePath) {
   const items = [];
   let continuationToken = "";
   do {
-    const url = s3BucketBaseUrl(config);
-    url.searchParams.set("list-type", "2");
-    url.searchParams.set("delimiter", "/");
-    if (targetPrefix) url.searchParams.set("prefix", targetPrefix);
-    if (continuationToken) url.searchParams.set("continuation-token", continuationToken);
+    const queryPairs = [
+      ["list-type", "2"],
+      ["delimiter", "/"],
+      // Percent-encode keys in the response: otherwise a key containing '&' or
+      // '<' is indistinguishable from XML markup and the listing silently
+      // truncates it.
+      ["encoding-type", "url"]
+    ];
+    if (targetPrefix) queryPairs.push(["prefix", targetPrefix]);
+    if (continuationToken) queryPairs.push(["continuation-token", continuationToken]);
+    const queryString = queryPairs.map(([key, value]) => `${encodeRfc3986(key)}=${encodeRfc3986(value)}`).join("&");
+    const url = new URL(`${s3BucketBaseUrl(config).toString().replace(/\/+$/, "")}?${queryString}`);
     const response = await signedS3Request(config, "GET", url);
     if (!response.ok) {
-      throw new Error(`S3 listing failed: ${response.status}`);
+      await throwS3Error(response, "listing");
     }
     const xml = await response.text();
     for (const prefix of extractXmlBlocks(xml, "CommonPrefixes")) {
-      const fullPrefix = trimSlashes(extractXmlFirst(prefix, "Prefix") || "");
+      const fullPrefix = trimSlashes(decodeS3UrlEncoded(extractXmlFirst(prefix, "Prefix")) || "");
       if (!fullPrefix) continue;
       const relative = rootPrefix ? fullPrefix === rootPrefix ? "" : fullPrefix.startsWith(`${rootPrefix}/`) ? fullPrefix.slice(rootPrefix.length + 1) : "" : fullPrefix;
       const normalizedRelative = trimSlashes(relative);
@@ -9894,7 +10105,7 @@ async function listS3Entries(config, relativePath) {
       });
     }
     for (const content of extractXmlBlocks(xml, "Contents")) {
-      const fullKey = trimSlashes(extractXmlFirst(content, "Key") || "");
+      const fullKey = trimSlashes(decodeS3UrlEncoded(extractXmlFirst(content, "Key")) || "");
       if (!fullKey || targetPrefix && fullKey === trimSlashes(targetPrefix)) continue;
       const relative = rootPrefix ? fullKey.startsWith(`${rootPrefix}/`) ? fullKey.slice(rootPrefix.length + 1) : "" : fullKey;
       const normalizedRelative = trimSlashes(relative);
@@ -9907,7 +10118,7 @@ async function listS3Entries(config, relativePath) {
         modifiedAt: parseHttpDate(extractXmlFirst(content, "LastModified") || "") || null
       });
     }
-    continuationToken = extractXmlFirst(xml, "NextContinuationToken") || "";
+    continuationToken = decodeS3UrlEncoded(extractXmlFirst(xml, "NextContinuationToken")) || "";
   } while (continuationToken);
   const deduped = /* @__PURE__ */ new Map();
   for (const item of items) deduped.set(`${item.isDirectory ? "d" : "f"}:${item.path}`, item);
@@ -9927,7 +10138,7 @@ async function downloadFromS3(config, relativePath) {
   const url = s3ObjectUrl(config, objectKey);
   const response = await signedS3Request(config, "GET", url);
   if (!response.ok) {
-    throw new Error(`S3 download failed: ${response.status}`);
+    await throwS3Error(response, "download");
   }
   return {
     provider: "s3",
@@ -9942,7 +10153,7 @@ async function deleteFromS3(config, relativePath) {
   const url = s3ObjectUrl(config, objectKey);
   const response = await signedS3Request(config, "DELETE", url);
   if (!response.ok && response.status !== 404) {
-    throw new Error(`S3 delete failed: ${response.status}`);
+    await throwS3Error(response, "delete");
   }
 }
 async function existsInS3(config, relativePath) {
@@ -9954,7 +10165,7 @@ async function statS3File(config, relativePath) {
   const response = await signedS3Request(config, "HEAD", url);
   if (response.status === 404) return null;
   if (!response.ok) {
-    throw new Error(`S3 existence check failed: ${response.status}`);
+    await throwS3Error(response, "existence check");
   }
   const size = Number(response.headers.get("Content-Length") || "");
   return {
@@ -10061,10 +10272,12 @@ function ensureRemoteRestoreCandidate(relativePath) {
   }
   return normalized;
 }
+var S3_MAX_ATTEMPTS;
 var init_backup_uploader = __esm({
   "src/services/backup-uploader.ts"() {
     "use strict";
     init_backup_config();
+    S3_MAX_ATTEMPTS = 3;
   }
 });
 
@@ -10490,17 +10703,17 @@ async function executeConfiguredBackup(env, storage, actorUserId, trigger, desti
       provider: upload.provider
     };
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : "Backup upload failed";
+    const errorMessage2 = error instanceof Error ? error.message : "Backup upload failed";
     await touchLease();
     destination.runtime = await updateBackupDestinationRuntime(storage, destination.id, (runtime2) => ({
       ...runtime2,
       lastErrorAt: (/* @__PURE__ */ new Date()).toISOString(),
-      lastErrorMessage: errorMessage
+      lastErrorMessage: errorMessage2
     }));
     await touchLease();
     await writeAuditLog2(storage, actorUserId, `admin.backup.remote.${trigger}.failed`, "backup", null, {
       ...getBackupDestinationSummary(destination),
-      error: errorMessage,
+      error: errorMessage2,
       ...auditMetadata || {}
     });
     await progress?.({
@@ -10511,7 +10724,7 @@ async function executeConfiguredBackup(env, storage, actorUserId, trigger, desti
       stageDetail: "txt_backup_remote_run_progress_failed_detail",
       done: true,
       ok: false,
-      error: errorMessage
+      error: errorMessage2
     });
     throw error;
   }
@@ -10609,8 +10822,8 @@ async function downloadRemoteAttachmentBatchViaDurableObject(env, destination, b
   const manifest = JSON.parse(new TextDecoder().decode(manifestBytes));
   for (const entry of manifest.entries || []) {
     const blobName = String(entry.blobName || "").trim();
-    const path2 = String(entry.path || "").trim();
-    const bytes = path2 ? files[path2] : null;
+    const path4 = String(entry.path || "").trim();
+    const bytes = path4 ? files[path4] : null;
     if (blobName && bytes) {
       result.set(blobName, bytes);
     }
@@ -10932,9 +11145,9 @@ async function handleDownloadAdminRemoteBackup(request, env, actorUser) {
   const storage = new StorageService(env.DB);
   try {
     const settings = await loadBackupSettings(storage, env, "UTC");
-    const path2 = ensureRemoteRestoreCandidate(String(body.path || ""));
+    const path4 = ensureRemoteRestoreCandidate(String(body.path || ""));
     const destination = requireBackupDestination(settings, body.destinationId || null);
-    const remoteFile = await downloadRemoteBackupFile(destination, path2);
+    const remoteFile = await downloadRemoteBackupFile(destination, path4);
     return new Response(remoteFile.bytes, {
       status: 200,
       headers: {
@@ -10961,15 +11174,15 @@ async function handleInspectAdminRemoteBackup(request, env, actorUser) {
   const storage = new StorageService(env.DB);
   try {
     const settings = await loadBackupSettings(storage, env, "UTC");
-    const path2 = ensureRemoteRestoreCandidate(String(body.path || ""));
+    const path4 = ensureRemoteRestoreCandidate(String(body.path || ""));
     const destination = requireBackupDestination(settings, body.destinationId || null);
-    const remoteFile = await downloadRemoteBackupFile(destination, path2);
-    const integrity = await inspectBackupArchiveFileNameChecksum(remoteFile.bytes, remoteFile.fileName || path2);
+    const remoteFile = await downloadRemoteBackupFile(destination, path4);
+    const integrity = await inspectBackupArchiveFileNameChecksum(remoteFile.bytes, remoteFile.fileName || path4);
     return jsonResponse({
       object: "backup-remote-integrity",
       destinationId: destination.id,
-      path: path2,
-      fileName: remoteFile.fileName || path2.split("/").pop() || path2,
+      path: path4,
+      fileName: remoteFile.fileName || path4.split("/").pop() || path4,
       integrity
     });
   } catch (error) {
@@ -10989,14 +11202,14 @@ async function handleDeleteAdminRemoteBackup(request, env, actorUser) {
   const storage = new StorageService(env.DB);
   try {
     const settings = await loadBackupSettings(storage, env, "UTC");
-    const path2 = ensureRemoteRestoreCandidate(String(body.path || ""));
+    const path4 = ensureRemoteRestoreCandidate(String(body.path || ""));
     const destination = requireBackupDestination(settings, body.destinationId || null);
-    await deleteRemoteBackupFile(destination, path2);
+    await deleteRemoteBackupFile(destination, path4);
     await writeAuditLog2(storage, actorUser.id, "admin.backup.remote.delete", "backup", null, {
       ...getBackupDestinationSummary(destination),
-      remotePath: path2
+      remotePath: path4
     }, request);
-    return jsonResponse({ object: "backup-remote-delete", deleted: true, path: path2 });
+    return jsonResponse({ object: "backup-remote-delete", deleted: true, path: path4 });
   } catch (error) {
     return errorResponse(error instanceof Error ? error.message : "Remote backup delete failed", 409);
   }
@@ -11012,14 +11225,14 @@ async function handleRestoreAdminRemoteBackup(request, env, actorUser) {
   const verificationError = await requireBackupUserVerification(actorUser, String(body.masterPasswordHash || ""), env);
   if (verificationError) return verificationError;
   try {
-    const path2 = ensureRemoteRestoreCandidate(String(body.path || ""));
+    const path4 = ensureRemoteRestoreCandidate(String(body.path || ""));
     const targetDeviceIdentifier = String(request.headers.get("X-NodeWarden-Acting-Device-Id") || "").trim() || null;
     const imported = await restoreRemoteBackupInDurableObject(env, {
       actorUserId: actorUser.id,
       allowChecksumMismatch: !!body.allowChecksumMismatch,
       auditMetadata: auditRequestMetadata(request),
       destinationId: body.destinationId || null,
-      path: path2,
+      path: path4,
       replaceExisting: !!body.replaceExisting,
       targetDeviceIdentifier
     });
@@ -15482,13 +15695,13 @@ function __disposeResources(env) {
   }
   return next();
 }
-function __rewriteRelativeImportExtension(path2, preserveJsx) {
-  if (typeof path2 === "string" && /^\.\.?\//.test(path2)) {
-    return path2.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m, tsx, d, ext, cm) {
+function __rewriteRelativeImportExtension(path4, preserveJsx) {
+  if (typeof path4 === "string" && /^\.\.?\//.test(path4)) {
+    return path4.replace(/\.(tsx)$|((?:\.d)?)((?:\.[^./]+?)?)\.([cm]?)ts$/i, function(m, tsx, d, ext, cm) {
       return tsx ? preserveJsx ? ".jsx" : ".js" : d && (!ext || !cm) ? m : d + ext + "." + cm.toLowerCase() + "js";
     });
   }
-  return path2;
+  return path4;
 }
 var extendStatics, __assign, __createBinding, __setModuleDefault, ownKeys, _SuppressedError, tslib_es6_default;
 var init_tslib_es6 = __esm({
@@ -24056,13 +24269,13 @@ var require_lazy_helpers = __commonJS({
       }
     };
     exports.DelayedConstructor = DelayedConstructor;
-    function delay(wrappedConstructor) {
+    function delay2(wrappedConstructor) {
       if (typeof wrappedConstructor === "undefined") {
         throw new Error("Attempt to `delay` undefined. Constructor must be wrapped in a callback");
       }
       return new DelayedConstructor(wrappedConstructor);
     }
-    exports.delay = delay;
+    exports.delay = delay2;
   }
 });
 
@@ -24336,14 +24549,14 @@ var require_dependency_container = __commonJS({
           provider = providerOrConstructor;
         }
         if (providers_1.isTokenProvider(provider)) {
-          const path2 = [token];
+          const path4 = [token];
           let tokenProvider = provider;
           while (tokenProvider != null) {
             const currentToken = tokenProvider.useToken;
-            if (path2.includes(currentToken)) {
-              throw new Error(`Token registration cycle detected! ${[...path2, currentToken].join(" -> ")}`);
+            if (path4.includes(currentToken)) {
+              throw new Error(`Token registration cycle detected! ${[...path4, currentToken].join(" -> ")}`);
             }
-            path2.push(currentToken);
+            path4.push(currentToken);
             const registration = this._registry.get(currentToken);
             if (registration && providers_1.isTokenProvider(registration.provider)) {
               tokenProvider = registration.provider;
@@ -29147,16 +29360,795 @@ var require_x509_cjs = __commonJS({
 });
 
 // server/index.ts
-init_response();
 import http from "node:http";
-import { Readable as Readable2 } from "node:stream";
+import { Readable as Readable3 } from "node:stream";
+
+// server/body-stream.ts
+import { Readable, Transform } from "node:stream";
+function createLimitedBody(source, maxBytes) {
+  let received = 0;
+  let exceeded = false;
+  const limiter = new Transform({
+    transform(chunk, _encoding, callback) {
+      received += chunk.length;
+      if (received > maxBytes) {
+        exceeded = true;
+        callback(new Error("Payload too large"));
+        return;
+      }
+      callback(null, chunk);
+    }
+  });
+  source.on("error", (error) => limiter.destroy(error));
+  source.pipe(limiter);
+  return {
+    stream: Readable.toWeb(limiter),
+    exceeded: () => exceeded
+  };
+}
+
+// server/index.ts
+init_response();
+
+// src/services/db-config.ts
+var CONFIG_OBJECT_KEY = "__system__/db-config.json";
+var CONFIG_KV_KEY = "db-config:v1";
+var SYNC_STATUS_OBJECT_KEY = "__system__/db-sync-status.json";
+var SYNC_STATUS_KV_KEY = "db-sync-status:v1";
+var WATERMARK_OBJECT_KEY = "__system__/db-watermark.json";
+var WATERMARK_KV_KEY = "db-watermark:v1";
+var CONFIG_KEYS = { kv: CONFIG_KV_KEY, object: CONFIG_OBJECT_KEY };
+var SYNC_STATUS_KEYS = { kv: SYNC_STATUS_KV_KEY, object: SYNC_STATUS_OBJECT_KEY };
+var WATERMARK_KEYS = { kv: WATERMARK_KV_KEY, object: WATERMARK_OBJECT_KEY };
+function nodeFingerprint(node) {
+  return `${node.host}|${node.port}|${node.database}`;
+}
+var DEFAULT_CLUSTER_POLICY = {
+  readSplit: false,
+  syncMode: "native",
+  syncAsync: false,
+  failoverEnabled: true,
+  failureThreshold: 3,
+  cooldownMs: 3e4
+};
+var CLUSTER_LIMITS = {
+  maxNodes: 8,
+  minConnectionLimit: 1,
+  maxConnectionLimit: 64,
+  minFailureThreshold: 1,
+  maxFailureThreshold: 10,
+  minCooldownMs: 5e3,
+  maxCooldownMs: 10 * 6e4
+};
+function asKvLike(value) {
+  if (!value || typeof value !== "object") return null;
+  const kv = value;
+  if (typeof kv.get !== "function" || typeof kv.put !== "function") return null;
+  return {
+    get: (key) => Promise.resolve(kv.get.call(value, key)),
+    put: (key, val) => Promise.resolve(kv.put.call(value, key, val)),
+    delete: (key) => Promise.resolve(kv.delete?.call(value, key))
+  };
+}
+function getConfigStore(env) {
+  if (asKvLike(env.SETTINGS_KV)) return "kv";
+  if (env.ATTACHMENTS) return "r2";
+  if (asKvLike(env.ATTACHMENTS_KV)) return "attachment-kv";
+  return null;
+}
+async function deriveKey(env) {
+  const raw = (env.DB_CONFIG_KEY || "").trim();
+  if (!raw) return null;
+  const subtle = crypto.subtle;
+  let keyBytes = null;
+  try {
+    const b64 = atob(raw.trim());
+    if (b64.length === 32) {
+      const bytes = new Uint8Array(b64.length);
+      for (let i2 = 0; i2 < b64.length; i2 += 1) bytes[i2] = b64.charCodeAt(i2);
+      keyBytes = bytes.buffer;
+    }
+  } catch {
+  }
+  if (!keyBytes) {
+    keyBytes = await subtle.digest("SHA-256", new TextEncoder().encode(raw));
+  }
+  return subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+async function encryptJson(env, data) {
+  const key = await deriveKey(env);
+  if (!key) return null;
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = new TextEncoder().encode(JSON.stringify(data));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: new TextEncoder().encode("nodewarden-db-config:v1") },
+    key,
+    plaintext
+  );
+  const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(ciphertext), iv.length);
+  let binary = "";
+  combined.forEach((b) => {
+    binary += String.fromCharCode(b);
+  });
+  return `v1:${btoa(binary)}`;
+}
+async function decryptJson(env, payload) {
+  const key = await deriveKey(env);
+  if (!key) return null;
+  if (!payload.startsWith("v1:")) return null;
+  try {
+    const binary = atob(payload.slice(3));
+    const combined = new Uint8Array(binary.length);
+    for (let i2 = 0; i2 < binary.length; i2 += 1) combined[i2] = binary.charCodeAt(i2);
+    const iv = combined.slice(0, 12);
+    const ciphertext = combined.slice(12);
+    const plaintext = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv, additionalData: new TextEncoder().encode("nodewarden-db-config:v1") },
+      key,
+      ciphertext
+    );
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  } catch {
+    return null;
+  }
+}
+async function readStoredText(env, keys) {
+  const store = getConfigStore(env);
+  if (store === "kv") {
+    return await asKvLike(env.SETTINGS_KV).get(keys.kv);
+  }
+  if (store === "attachment-kv") {
+    return await asKvLike(env.ATTACHMENTS_KV).get(keys.kv);
+  }
+  if (store === "r2") {
+    const object = await env.ATTACHMENTS.get(keys.object);
+    if (!object) return null;
+    return await new Response(object.body).text();
+  }
+  return null;
+}
+async function writeStoredText(env, keys, payload) {
+  const store = getConfigStore(env);
+  if (!store) return false;
+  if (store === "kv") {
+    const kv = asKvLike(env.SETTINGS_KV);
+    if (payload) await kv.put(keys.kv, payload);
+    else await kv.delete(keys.kv);
+    return true;
+  }
+  if (store === "attachment-kv") {
+    const kv = asKvLike(env.ATTACHMENTS_KV);
+    if (payload) await kv.put(keys.kv, payload);
+    else await kv.delete(keys.kv);
+    return true;
+  }
+  if (store === "r2") {
+    if (payload) {
+      await env.ATTACHMENTS.put(keys.object, payload, {
+        httpMetadata: { contentType: "application/json" },
+        customMetadata: {
+          purpose: keys.object === SYNC_STATUS_OBJECT_KEY ? "db-sync-status" : keys.object === WATERMARK_OBJECT_KEY ? "db-watermark" : "db-config"
+        }
+      });
+    } else {
+      await env.ATTACHMENTS.delete(keys.object);
+    }
+    return true;
+  }
+  return false;
+}
+async function readStoredPayload(env) {
+  return readStoredText(env, CONFIG_KEYS);
+}
+async function writeStoredPayload(env, payload) {
+  return writeStoredText(env, CONFIG_KEYS, payload);
+}
+var CONFIG_CACHE_TTL_MS = 3e4;
+var payloadCache = /* @__PURE__ */ new WeakMap();
+var cacheEpoch = 0;
+function cacheStoreRef(env) {
+  const store = getConfigStore(env);
+  if (store === "kv") return env.SETTINGS_KV ?? null;
+  if (store === "attachment-kv") return env.ATTACHMENTS_KV ?? null;
+  if (store === "r2") return env.ATTACHMENTS ?? null;
+  return null;
+}
+async function readStoredPayloadCached(env) {
+  const ref = cacheStoreRef(env);
+  const now = Date.now();
+  if (ref) {
+    const hit = payloadCache.get(ref);
+    if (hit && hit.epoch === cacheEpoch && now - hit.at < CONFIG_CACHE_TTL_MS) return hit.payload;
+  }
+  const payload = await readStoredPayload(env);
+  if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: now });
+  return payload;
+}
+var SYNC_CACHE_TTL_MS = 5e3;
+var syncCache = /* @__PURE__ */ new WeakMap();
+function normalizeSyncState(raw) {
+  const input = asRecord(raw);
+  if (!input) return null;
+  const at = Number(input.at ?? 0);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  const cursors = asRecord(input.cursors);
+  const normalizedCursors = {};
+  if (cursors) {
+    for (const [table, cursor] of Object.entries(cursors)) {
+      if (!Array.isArray(cursor)) continue;
+      const values = cursor.filter(
+        (value) => value === null || ["string", "number", "boolean"].includes(typeof value)
+      );
+      if (values.length === cursor.length && values.length > 0) normalizedCursors[table] = values;
+    }
+  }
+  return {
+    at,
+    complete: input.complete === true,
+    fingerprint: typeof input.fingerprint === "string" && input.fingerprint ? input.fingerprint : void 0,
+    truncated: input.truncated === true,
+    rowsWritten: Number(input.rowsWritten ?? 0) || 0,
+    tables: Number(input.tables ?? 0) || 0,
+    sourceId: typeof input.sourceId === "string" && input.sourceId ? input.sourceId : void 0,
+    cursors: Object.keys(normalizedCursors).length > 0 ? normalizedCursors : void 0,
+    mode: input.mode === "overwrite" ? "overwrite" : input.mode === "merge" ? "merge" : void 0,
+    doneTables: normalizeTableNames(input.doneTables),
+    progress: normalizeRunProgress(input.progress)
+  };
+}
+function normalizeTableNames(raw) {
+  if (!Array.isArray(raw)) return void 0;
+  const names = raw.filter((value) => typeof value === "string" && value.length > 0);
+  return names.length > 0 ? [...new Set(names)] : void 0;
+}
+function normalizeRunProgress(raw) {
+  const input = asRecord(raw);
+  if (!input) return void 0;
+  const startedAt = Number(input.startedAt ?? 0);
+  if (!Number.isFinite(startedAt) || startedAt <= 0) return void 0;
+  const percent = Math.max(0, Math.min(100, Math.round(Number(input.percent ?? 0) || 0)));
+  return {
+    startedAt,
+    percent,
+    done: input.done === true,
+    tablesTotal: Math.max(0, Number(input.tablesTotal ?? 0) || 0),
+    tablesDone: Math.max(0, Number(input.tablesDone ?? 0) || 0),
+    rowsCopied: Math.max(0, Number(input.rowsCopied ?? 0) || 0),
+    rowsEstimate: Math.max(0, Number(input.rowsEstimate ?? 0) || 0)
+  };
+}
+async function readSyncStates(env) {
+  const ref = cacheStoreRef(env);
+  const now = Date.now();
+  if (ref) {
+    const hit = syncCache.get(ref);
+    if (hit && hit.epoch === cacheEpoch && now - hit.at < SYNC_CACHE_TTL_MS) return hit.value;
+  }
+  const raw = await readStoredText(env, SYNC_STATUS_KEYS).catch(() => null);
+  const states = {};
+  if (raw) {
+    try {
+      const parsed = asRecord(JSON.parse(raw));
+      if (parsed) {
+        for (const [id, value] of Object.entries(parsed)) {
+          const state2 = normalizeSyncState(value);
+          if (state2) states[id] = state2;
+        }
+      }
+    } catch {
+      console.warn("[db-config] sync status payload is not valid JSON; ignoring it");
+    }
+  }
+  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: now, value: states });
+  return states;
+}
+async function saveNodeSyncState(env, nodeId, state2) {
+  const current = await readSyncStates(env);
+  const next = { ...current, [nodeId]: state2 };
+  const saved = await writeStoredText(env, SYNC_STATUS_KEYS, JSON.stringify(next));
+  const ref = cacheStoreRef(env);
+  if (saved && ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: next });
+  return saved;
+}
+async function deleteNodeSyncStates(env, ids) {
+  if (ids.length === 0) return;
+  const current = await readSyncStates(env);
+  const next = { ...current };
+  let changed = false;
+  for (const id of ids) {
+    if (!(id in next)) continue;
+    delete next[id];
+    changed = true;
+  }
+  if (!changed) return;
+  await writeStoredText(env, SYNC_STATUS_KEYS, JSON.stringify(next));
+  const ref = cacheStoreRef(env);
+  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: next });
+}
+async function clearSyncStates(env) {
+  await writeStoredText(env, SYNC_STATUS_KEYS, null).catch(() => false);
+  const ref = cacheStoreRef(env);
+  if (ref) syncCache.set(ref, { epoch: cacheEpoch, at: Date.now(), value: {} });
+  await clearClusterWatermark(env);
+}
+async function readClusterWatermark(env) {
+  try {
+    const raw = await readStoredText(env, WATERMARK_KEYS);
+    if (!raw) return null;
+    const parsed = asRecord(JSON.parse(raw));
+    if (!parsed) return null;
+    const writeSeq = Number(parsed.writeSeq);
+    if (!Number.isFinite(writeSeq) || writeSeq <= 0) return null;
+    const nodes = {};
+    const rawNodes = asRecord(parsed.nodes);
+    if (rawNodes) {
+      for (const [id, value] of Object.entries(rawNodes)) {
+        const seq = Number(value);
+        if (Number.isFinite(seq) && seq >= 0) nodes[id] = Math.floor(seq);
+      }
+    }
+    return { writeSeq: Math.floor(writeSeq), nodes };
+  } catch {
+    return null;
+  }
+}
+async function saveClusterWatermark(env, snapshot) {
+  return writeStoredText(env, WATERMARK_KEYS, JSON.stringify(snapshot)).catch(() => false);
+}
+async function clearClusterWatermark(env) {
+  await writeStoredText(env, WATERMARK_KEYS, null).catch(() => false);
+}
+function asRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function parsePort(raw, fallback) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 && n <= 65535 ? Math.floor(n) : fallback;
+}
+function clampInt(raw, fallback, min, max2) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max2, Math.max(min, Math.floor(n)));
+}
+function normalizePolicy(raw) {
+  const input = asRecord(raw) ?? {};
+  const syncMode = input.syncMode === "write-through" ? "write-through" : "native";
+  return {
+    readSplit: input.readSplit === true,
+    syncMode,
+    // Async only makes sense for an app-level replay; ignore it otherwise so a
+    // stale flag cannot silently downgrade a native pair.
+    syncAsync: syncMode === "write-through" && input.syncAsync === true,
+    failoverEnabled: input.failoverEnabled !== false,
+    failureThreshold: clampInt(
+      input.failureThreshold,
+      DEFAULT_CLUSTER_POLICY.failureThreshold,
+      CLUSTER_LIMITS.minFailureThreshold,
+      CLUSTER_LIMITS.maxFailureThreshold
+    ),
+    cooldownMs: clampInt(
+      input.cooldownMs,
+      DEFAULT_CLUSTER_POLICY.cooldownMs,
+      CLUSTER_LIMITS.minCooldownMs,
+      CLUSTER_LIMITS.maxCooldownMs
+    )
+  };
+}
+function normalizeNode(raw, index) {
+  const input = asRecord(raw);
+  if (!input) return null;
+  const host = String(input.host ?? "").trim();
+  if (!host) return null;
+  const id = String(input.id ?? "").trim() || `node-${index + 1}`;
+  return {
+    id,
+    label: String(input.label ?? "").trim() || (index === 0 ? "\u4E3B\u5E93" : `\u8282\u70B9 ${index + 1}`),
+    role: input.role === "replica" ? "replica" : "primary",
+    priority: clampInt(input.priority, index + 1, 1, 99),
+    enabled: input.enabled !== false,
+    host,
+    port: parsePort(input.port, 3306),
+    user: String(input.user ?? "").trim(),
+    password: typeof input.password === "string" ? input.password : "",
+    database: String(input.database ?? "").trim(),
+    ssl: input.ssl !== false,
+    connectionLimit: clampInt(
+      input.connectionLimit,
+      5,
+      CLUSTER_LIMITS.minConnectionLimit,
+      CLUSTER_LIMITS.maxConnectionLimit
+    )
+  };
+}
+function normalizeRuntimeConfig(raw) {
+  const input = asRecord(raw);
+  if (!input) return null;
+  const rawNodes = Array.isArray(input.nodes) ? input.nodes : [];
+  const nodes = rawNodes.map((node, index) => normalizeNode(node, index)).filter((node) => node !== null).slice(0, CLUSTER_LIMITS.maxNodes);
+  if (nodes.length === 0) {
+    const legacy = normalizeNode(
+      {
+        id: "node-1",
+        label: "\u4E3B\u5E93",
+        role: "primary",
+        priority: 1,
+        enabled: true,
+        host: input.host,
+        port: input.port,
+        user: input.user,
+        password: input.password,
+        database: input.database,
+        ssl: input.ssl,
+        connectionLimit: input.connectionLimit
+      },
+      0
+    );
+    if (!legacy) return null;
+    nodes.push(legacy);
+  }
+  const activePrimaries = nodes.filter((node) => node.role === "primary" && node.enabled);
+  if (activePrimaries.length > 1) {
+    activePrimaries.slice().sort((a, b) => a.priority - b.priority).slice(1).forEach((node) => {
+      node.role = "replica";
+    });
+  }
+  return {
+    version: 2,
+    mode: "mysql",
+    nodes,
+    policy: normalizePolicy(input.policy)
+  };
+}
+async function loadRuntimeConfig(env) {
+  const payload = await readStoredPayloadCached(env);
+  if (!payload) return null;
+  const decrypted = await decryptJson(env, payload);
+  return normalizeRuntimeConfig(decrypted);
+}
+async function saveRuntimeConfig(env, config) {
+  const payload = await encryptJson(env, config);
+  if (!payload) return false;
+  const saved = await writeStoredPayload(env, payload);
+  if (saved) {
+    const ref = cacheStoreRef(env);
+    if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: Date.now() });
+  }
+  return saved;
+}
+async function clearRuntimeConfig(env) {
+  const saved = await writeStoredPayload(env, null);
+  if (saved) {
+    const ref = cacheStoreRef(env);
+    if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload: null, at: Date.now() });
+  }
+  return saved;
+}
+function parseEnvFlag(raw, fallback) {
+  const value = String(raw ?? "").trim().toLowerCase();
+  if (!value) return fallback;
+  return value !== "false" && value !== "0" && value !== "no" && value !== "off";
+}
+function resolveDbConfigFromEnv(env) {
+  const host = (env.DB_HOST || "").trim();
+  if (!host) return null;
+  return {
+    mode: "mysql",
+    source: "env",
+    host,
+    port: parsePort(env.DB_PORT, 3306),
+    user: (env.DB_USER || "").trim(),
+    password: env.DB_PASSWORD || "",
+    database: (env.DB_NAME || "").trim(),
+    ssl: parseEnvFlag(env.DB_SSL, true),
+    connectionLimit: parsePort(env.DB_CONN_LIMIT, 5)
+  };
+}
+var STANDBY_LIST_VARS = ["DB_STANDBY_NODES", "DB_STANDBYS", "DB_STANDBY_NAME"];
+var reportedStandbyEntries = /* @__PURE__ */ new Set();
+function reportOnce(key, message) {
+  if (reportedStandbyEntries.has(key)) return;
+  reportedStandbyEntries.add(key);
+  console.warn(message);
+}
+function splitStandbyEntries(raw) {
+  return raw.split(/[,;\r\n]+/).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+}
+function decodeUrlPart(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+function redactEntry(entry) {
+  return entry.replace(/\/\/([^/@:]*):[^/]*@/, "//$1:***@");
+}
+function parseStandbyUrl(entry, base) {
+  let url;
+  try {
+    url = new URL(entry);
+  } catch {
+    reportOnce(
+      `malformed:${entry}`,
+      `[db-config] standby entry "${redactEntry(entry)}" looks like a URL but does not parse; ignoring it. Percent-encode special characters in the password (for example @ becomes %40).`
+    );
+    return null;
+  }
+  const protocol = url.protocol.replace(/:$/, "").toLowerCase();
+  if (!["mysql", "mysqls", "mariadb", "mariadbs"].includes(protocol)) {
+    reportOnce(
+      `protocol:${entry}`,
+      `[db-config] standby entry "${redactEntry(entry)}" uses protocol "${protocol}"; expected mysql:// . Ignoring it.`
+    );
+    return null;
+  }
+  if (!url.hostname) {
+    reportOnce(
+      `nohost:${entry}`,
+      `[db-config] standby entry "${redactEntry(entry)}" has no host; write the schema name on its own to inherit the primary connection. Ignoring it.`
+    );
+    return null;
+  }
+  const database = decodeUrlPart(url.pathname.replace(/^\/+/, "")).trim();
+  if (!database) {
+    reportOnce(
+      `nodatabase:${entry}`,
+      `[db-config] standby entry "${redactEntry(entry)}" has no database name in the path (mysql://host:3306/DATABASE); ignoring it.`
+    );
+    return null;
+  }
+  const sslParam = url.searchParams.get("ssl") ?? url.searchParams.get("tls");
+  const connParam = url.searchParams.get("conn") ?? url.searchParams.get("connectionLimit") ?? url.searchParams.get("connLimit");
+  return {
+    mode: "mysql",
+    source: "env",
+    host: url.hostname || base.host,
+    port: url.port ? parsePort(url.port, base.port) : base.port,
+    user: url.username ? decodeUrlPart(url.username) : base.user,
+    password: url.password ? decodeUrlPart(url.password) : base.password,
+    database,
+    ssl: sslParam === null ? base.ssl : parseEnvFlag(sslParam, base.ssl),
+    connectionLimit: connParam === null ? base.connectionLimit : parsePort(connParam, base.connectionLimit)
+  };
+}
+function resolveStandbysFromEnv(env) {
+  const primary = resolveDbConfigFromEnv(env);
+  if (!primary) return [];
+  const entries = [];
+  for (const key of STANDBY_LIST_VARS) {
+    const raw = env[key];
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    entries.push(...splitStandbyEntries(raw));
+  }
+  if (entries.length === 0) return [];
+  const defaults = {
+    ...primary,
+    host: (env.DB_STANDBY_HOST || "").trim() || primary.host,
+    port: parsePort(env.DB_STANDBY_PORT ?? env.DB_PORT, primary.port),
+    user: (env.DB_STANDBY_USER || "").trim() || primary.user,
+    password: env.DB_STANDBY_PASSWORD || primary.password,
+    ssl: parseEnvFlag(env.DB_STANDBY_SSL, primary.ssl),
+    connectionLimit: parsePort(env.DB_STANDBY_CONN_LIMIT, primary.connectionLimit)
+  };
+  const standbys = [];
+  const seen = /* @__PURE__ */ new Set([`${primary.host}:${primary.port}/${primary.database}`]);
+  const limit = Math.max(1, CLUSTER_LIMITS.maxNodes - 1);
+  for (const entry of entries) {
+    const parsed = entry.includes("://") ? parseStandbyUrl(entry, defaults) : { ...defaults, database: entry };
+    if (!parsed) continue;
+    if (!parsed.database) {
+      reportOnce(`emptydb:${entry}`, `[db-config] standby entry "${redactEntry(entry)}" has no database name; ignoring it.`);
+      continue;
+    }
+    const fingerprint = `${parsed.host}:${parsed.port}/${parsed.database}`;
+    if (seen.has(fingerprint)) {
+      reportOnce(
+        `duplicate:${fingerprint}`,
+        `[db-config] standby entry "${redactEntry(entry)}" resolves to ${fingerprint}, which is already in the list (or is the primary); ignoring it.`
+      );
+      continue;
+    }
+    if (standbys.length >= limit) {
+      reportOnce(
+        `limit:${limit}`,
+        `[db-config] more than ${limit} standby entries configured; only the first ${limit} are used.`
+      );
+      break;
+    }
+    seen.add(fingerprint);
+    standbys.push(parsed);
+  }
+  return standbys;
+}
+function toResolvedNodes(config, syncStates) {
+  const writeThrough = config.policy.syncMode === "write-through";
+  return config.nodes.filter((node) => node.enabled).map((node) => {
+    const recorded = syncStates[node.id];
+    const syncStatus = recorded && recorded.fingerprint && recorded.fingerprint !== nodeFingerprint(node) ? void 0 : recorded;
+    return {
+      ...node,
+      source: "runtime",
+      syncStatus,
+      // In native mode the database replicates itself: whether a standby is
+      // filled is not something the app can judge. In write-through it is, and
+      // a replica that never completed a sync must not become a failover
+      // target (B-4).
+      syncReady: node.role === "primary" || !writeThrough ? void 0 : syncStatus?.complete === true
+    };
+  }).sort((a, b) => {
+    if (a.role !== b.role) return a.role === "primary" ? -1 : 1;
+    return a.priority - b.priority;
+  });
+}
+async function resolveStoredCluster(env) {
+  const runtime2 = await loadRuntimeConfig(env);
+  if (!runtime2) return null;
+  const syncStates = runtime2.policy.syncMode === "write-through" ? await readSyncStates(env) : {};
+  return {
+    mode: "mysql",
+    source: "runtime",
+    nodes: toResolvedNodes(runtime2, syncStates),
+    policy: runtime2.policy
+  };
+}
+async function resolveDbCluster(env) {
+  const fromEnv = resolveDbConfigFromEnv(env);
+  if (fromEnv) {
+    const standbys = resolveStandbysFromEnv(env);
+    const syncStates = standbys.length > 0 ? await readSyncStates(env) : {};
+    const recordedFor = (node, id) => {
+      const recorded = syncStates[id];
+      if (!recorded) return void 0;
+      return recorded.fingerprint && recorded.fingerprint !== nodeFingerprint(node) ? void 0 : recorded;
+    };
+    const nodes = [
+      {
+        id: "env-primary",
+        label: "\u73AF\u5883\u53D8\u91CF\u4E3B\u5E93",
+        role: "primary",
+        priority: 1,
+        enabled: true,
+        host: fromEnv.host,
+        port: fromEnv.port,
+        user: fromEnv.user,
+        password: fromEnv.password,
+        database: fromEnv.database,
+        ssl: fromEnv.ssl,
+        connectionLimit: fromEnv.connectionLimit,
+        source: "env"
+      }
+    ];
+    if (standbys.length > 0) {
+      standbys.forEach((standby, index) => {
+        const id = `env-standby-${index + 1}`;
+        const node = {
+          // Positional id: the list order is the operator's failover order, and
+          // the per-node fingerprint check discards a sync record whose
+          // host/port/schema no longer match, so a reordered list cannot inherit
+          // a stale "complete" from a different database.
+          id,
+          label: `\u526F\u5E93 ${index + 1} \xB7 ${standby.database}`,
+          role: "replica",
+          priority: index + 2,
+          enabled: true,
+          host: standby.host,
+          port: standby.port,
+          user: standby.user,
+          password: standby.password,
+          database: standby.database,
+          ssl: standby.ssl,
+          connectionLimit: standby.connectionLimit,
+          source: "env"
+        };
+        nodes.push({ ...node, syncStatus: recordedFor(node, id) });
+      });
+    }
+    return {
+      mode: "mysql",
+      source: "env",
+      nodes,
+      policy: standbys.length > 0 ? { ...DEFAULT_CLUSTER_POLICY, failoverEnabled: false } : { ...DEFAULT_CLUSTER_POLICY }
+    };
+  }
+  const runtime2 = await loadRuntimeConfig(env);
+  if (runtime2) {
+    const syncStates = runtime2.policy.syncMode === "write-through" ? await readSyncStates(env) : {};
+    const nodes = toResolvedNodes(runtime2, syncStates);
+    if (nodes.length > 0) {
+      return { mode: "mysql", source: "runtime", nodes, policy: runtime2.policy };
+    }
+    return {
+      mode: "d1",
+      source: "d1",
+      nodes: [],
+      policy: runtime2.policy,
+      unavailableReason: runtime2.nodes.length > 0 ? `\u5DF2\u4FDD\u5B58\u7684 MySQL \u96C6\u7FA4\u914D\u7F6E\u4E2D\u6709 ${runtime2.nodes.length} \u4E2A\u8282\u70B9\uFF0C\u4F46\u5168\u90E8\u5904\u4E8E\u300C\u505C\u7528\u300D\u72B6\u6001` : "\u5DF2\u4FDD\u5B58\u7684 MySQL \u96C6\u7FA4\u914D\u7F6E\u91CC\u6CA1\u6709\u4EFB\u4F55\u8282\u70B9"
+    };
+  }
+  return { mode: "d1", source: "d1", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } };
+}
+function primaryNodeOf(cluster) {
+  return cluster.nodes.find((node) => node.role === "primary") ?? cluster.nodes[0] ?? null;
+}
+async function resolveDbConfig(env) {
+  const cluster = await resolveDbCluster(env);
+  const primary = primaryNodeOf(cluster);
+  if (cluster.mode === "mysql" && primary) {
+    return {
+      mode: "mysql",
+      source: cluster.source,
+      host: primary.host,
+      port: primary.port,
+      user: primary.user,
+      password: primary.password,
+      database: primary.database,
+      ssl: primary.ssl,
+      connectionLimit: primary.connectionLimit
+    };
+  }
+  return {
+    mode: "d1",
+    source: "d1",
+    host: "",
+    port: 3306,
+    user: "",
+    password: "",
+    database: "",
+    ssl: false,
+    connectionLimit: 5
+  };
+}
+function maskNode(node) {
+  return {
+    id: node.id,
+    label: node.label,
+    role: node.role,
+    priority: node.priority,
+    enabled: node.enabled,
+    host: node.host,
+    port: node.port,
+    user: node.user,
+    database: node.database,
+    ssl: node.ssl,
+    connectionLimit: node.connectionLimit,
+    passwordSet: !!node.password,
+    syncStatus: node.syncStatus,
+    syncReady: node.syncReady
+  };
+}
+function maskCluster(cluster) {
+  return {
+    mode: cluster.mode,
+    source: cluster.source,
+    nodes: cluster.nodes.map(maskNode),
+    policy: cluster.policy,
+    unavailableReason: cluster.unavailableReason
+  };
+}
+function maskConfig(config) {
+  return {
+    mode: config.mode,
+    source: config.source,
+    host: config.host,
+    port: config.port,
+    user: config.user,
+    database: config.database,
+    ssl: config.ssl,
+    connectionLimit: config.connectionLimit,
+    passwordSet: !!config.password
+  };
+}
+function hasConfigStore(env) {
+  return getConfigStore(env) !== null;
+}
 
 // server/node-runtime.ts
-import fs from "node:fs";
-import fsp from "node:fs/promises";
+import fs2 from "node:fs";
+import fsp3 from "node:fs/promises";
 import os from "node:os";
-import path from "node:path";
-import { Readable } from "node:stream";
+import path3 from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/router.ts
@@ -29804,17 +30796,17 @@ function readBodyString(body, names) {
   }
   return "";
 }
-function readNestedString(source, path2) {
+function readNestedString(source, path4) {
   let current = source;
-  for (const key of path2) {
+  for (const key of path4) {
     if (!current || typeof current !== "object") return "";
     current = current[key];
   }
   return typeof current === "string" ? current : "";
 }
-function readNestedNumber(source, path2) {
+function readNestedNumber(source, path4) {
   let current = source;
-  for (const key of path2) {
+  for (const key of path4) {
     if (!current || typeof current !== "object") return void 0;
     current = current[key];
   }
@@ -31130,12 +32122,12 @@ async function processAttachmentUpload(request, env, cipher, attachment, cipherI
   if (upload instanceof Response) {
     return upload;
   }
-  const path2 = getAttachmentObjectKey(cipherId, attachment.id);
-  if (await getBlobObject(env, path2)) {
+  const path4 = getAttachmentObjectKey(cipherId, attachment.id);
+  if (await getBlobObject(env, path4)) {
     return errorResponse("Attachment file has already been uploaded", 409);
   }
   try {
-    await putBlobObject(env, path2, upload.body, {
+    await putBlobObject(env, path4, upload.body, {
       size: upload.size,
       contentType: upload.contentType,
       customMetadata: {
@@ -31335,12 +32327,12 @@ async function handlePublicDownloadAttachment(request, env, cipherId, attachment
   if (!attachment || attachment.cipherId !== cipherId) {
     return errorResponse("Attachment not found", 404);
   }
-  const path2 = getAttachmentObjectKey(cipherId, attachmentId);
+  const path4 = getAttachmentObjectKey(cipherId, attachmentId);
   const firstUse = await storage.consumeAttachmentDownloadToken(claims.jti, claims.exp);
   if (!firstUse) {
     return errorResponse("Invalid or expired token", 401);
   }
-  const object = await getBlobObject(env, path2);
+  const object = await getBlobObject(env, path4);
   if (!object) {
     return errorResponse("Attachment file not found", 404);
   }
@@ -31364,8 +32356,8 @@ async function handleDeleteAttachment(request, env, userId, cipherId, attachment
   if (!attachment || attachment.cipherId !== cipherId) {
     return errorResponse("Attachment not found", 404);
   }
-  const path2 = getAttachmentObjectKey(cipherId, attachmentId);
-  await deleteBlobObject(env, path2);
+  const path4 = getAttachmentObjectKey(cipherId, attachmentId);
+  await deleteBlobObject(env, path4);
   await storage.deleteAttachmentForUser(attachmentId, userId);
   const revisionInfo = await storage.updateCipherRevisionDate(cipherId);
   if (revisionInfo) {
@@ -31398,8 +32390,8 @@ async function deleteAllAttachmentsForCiphers(env, cipherIds) {
   );
   if (!attachments.length) return;
   await runWithConcurrency(attachments, LIMITS.performance.attachmentDeleteConcurrency, async ({ attachment, cipherId }) => {
-    const path2 = getAttachmentObjectKey(cipherId, attachment.id);
-    await deleteBlobObject(env, path2);
+    const path4 = getAttachmentObjectKey(cipherId, attachment.id);
+    await deleteBlobObject(env, path4);
   });
   await storage.bulkDeleteAttachmentsByIds(attachments.map(({ attachment }) => attachment.id));
 }
@@ -33241,12 +34233,12 @@ async function processSendFileUpload(request, env, send, fileId) {
   if (upload instanceof Response) {
     return upload;
   }
-  const path2 = getSendFileObjectKey(send.id, fileId);
-  if (await getBlobObject(env, path2)) {
+  const path4 = getSendFileObjectKey(send.id, fileId);
+  if (await getBlobObject(env, path4)) {
     return errorResponse("Send file has already been uploaded", 409);
   }
   try {
-    await putBlobObject(env, path2, upload.body, {
+    await putBlobObject(env, path4, upload.body, {
       size: upload.size,
       contentType: upload.contentType,
       customMetadata: {
@@ -35258,32 +36250,32 @@ async function handleClearDeviceToken(request, env, userId, deviceIdentifier) {
 function devicesPath(pattern) {
   return new RegExp(`^/(?:api/)?devices${pattern}$`, "i");
 }
-async function handleAuthenticatedDeviceRoute(request, env, userId, path2, method) {
-  if (path2 === "/api/devices" || path2 === "/devices") {
+async function handleAuthenticatedDeviceRoute(request, env, userId, path4, method) {
+  if (path4 === "/api/devices" || path4 === "/devices") {
     if (method === "GET") return handleGetDevices(request, env, userId);
     if (method === "POST") return handleRegisterDevice(request, env, userId);
     if (method === "DELETE") return handleDeleteAllDevices(request, env, userId);
     return null;
   }
-  if ((path2 === "/api/devices/lost-trust" || path2 === "/devices/lost-trust") && method === "POST") {
+  if ((path4 === "/api/devices/lost-trust" || path4 === "/devices/lost-trust") && method === "POST") {
     return handleReportLostTrust(request, env, userId);
   }
-  if (path2 === "/api/devices/authorized" || path2 === "/devices/authorized") {
+  if (path4 === "/api/devices/authorized" || path4 === "/devices/authorized") {
     if (method === "GET") return handleGetAuthorizedDevices(request, env, userId);
     if (method === "DELETE") return handleRevokeAllTrustedDevices(request, env, userId);
     return null;
   }
-  const authorizedDeviceMatch = path2.match(devicesPath("/authorized/([^/]+)"));
+  const authorizedDeviceMatch = path4.match(devicesPath("/authorized/([^/]+)"));
   if (authorizedDeviceMatch && method === "DELETE") {
     const deviceIdentifier = decodeURIComponent(authorizedDeviceMatch[1]);
     return handleRevokeTrustedDevice(request, env, userId, deviceIdentifier);
   }
-  const permanentAuthorizedDeviceMatch = path2.match(devicesPath("/authorized/([^/]+)/permanent"));
+  const permanentAuthorizedDeviceMatch = path4.match(devicesPath("/authorized/([^/]+)/permanent"));
   if (permanentAuthorizedDeviceMatch && method === "POST") {
     const deviceIdentifier = decodeURIComponent(permanentAuthorizedDeviceMatch[1]);
     return handleTrustDevicePermanently(request, env, userId, deviceIdentifier);
   }
-  const deleteDeviceMatch = path2.match(devicesPath("/([^/]+)"));
+  const deleteDeviceMatch = path4.match(devicesPath("/([^/]+)"));
   if (deleteDeviceMatch && method === "GET") {
     const deviceIdentifier = decodeURIComponent(deleteDeviceMatch[1]);
     return handleGetDevice(request, env, userId, deviceIdentifier);
@@ -35292,50 +36284,50 @@ async function handleAuthenticatedDeviceRoute(request, env, userId, path2, metho
     const deviceIdentifier = decodeURIComponent(deleteDeviceMatch[1]);
     return handleDeleteDevice(request, env, userId, deviceIdentifier);
   }
-  const updateDeviceNameMatch = path2.match(devicesPath("/([^/]+)/name"));
+  const updateDeviceNameMatch = path4.match(devicesPath("/([^/]+)/name"));
   if (updateDeviceNameMatch && method === "PUT") {
     const deviceIdentifier = decodeURIComponent(updateDeviceNameMatch[1]);
     return handleUpdateDeviceName(request, env, userId, deviceIdentifier);
   }
-  const identifierMatch = path2.match(devicesPath("/identifier/([^/]+)"));
+  const identifierMatch = path4.match(devicesPath("/identifier/([^/]+)"));
   if (identifierMatch && method === "GET") {
     const deviceIdentifier = decodeURIComponent(identifierMatch[1]);
     return handleGetDeviceByIdentifier(request, env, userId, deviceIdentifier);
   }
-  const deviceKeysMatch = path2.match(devicesPath("/([^/]+)/keys")) || path2.match(devicesPath("/identifier/([^/]+)/keys"));
+  const deviceKeysMatch = path4.match(devicesPath("/([^/]+)/keys")) || path4.match(devicesPath("/identifier/([^/]+)/keys"));
   if (deviceKeysMatch && (method === "PUT" || method === "POST")) {
     const deviceIdentifier = decodeURIComponent(deviceKeysMatch[1]);
     return handleUpdateDeviceKeys(request, env, userId, deviceIdentifier);
   }
-  const identifierTokenMatch = path2.match(devicesPath("/identifier/([^/]+)/token"));
+  const identifierTokenMatch = path4.match(devicesPath("/identifier/([^/]+)/token"));
   if (identifierTokenMatch && (method === "PUT" || method === "POST")) {
     const deviceIdentifier = decodeURIComponent(identifierTokenMatch[1]);
     return handleUpdateDeviceToken(request, env, userId, deviceIdentifier);
   }
-  const identifierWebPushMatch = path2.match(devicesPath("/identifier/([^/]+)/web-push-auth"));
+  const identifierWebPushMatch = path4.match(devicesPath("/identifier/([^/]+)/web-push-auth"));
   if (identifierWebPushMatch && (method === "PUT" || method === "POST")) {
     const deviceIdentifier = decodeURIComponent(identifierWebPushMatch[1]);
     return handleUpdateDeviceWebPushAuth(request, env, userId, deviceIdentifier);
   }
-  const identifierClearTokenMatch = path2.match(devicesPath("/identifier/([^/]+)/clear-token"));
+  const identifierClearTokenMatch = path4.match(devicesPath("/identifier/([^/]+)/clear-token"));
   if (identifierClearTokenMatch && (method === "PUT" || method === "POST")) {
     const deviceIdentifier = decodeURIComponent(identifierClearTokenMatch[1]);
     return handleClearDeviceToken(request, env, userId, deviceIdentifier);
   }
-  const identifierRetrieveKeysMatch = path2.match(devicesPath("/([^/]+)/retrieve-keys"));
+  const identifierRetrieveKeysMatch = path4.match(devicesPath("/([^/]+)/retrieve-keys"));
   if (identifierRetrieveKeysMatch && method === "POST") {
     const deviceIdentifier = decodeURIComponent(identifierRetrieveKeysMatch[1]);
     return handleRetrieveDeviceKeys(request, env, userId, deviceIdentifier);
   }
-  const identifierDeactivateMatch = path2.match(devicesPath("/([^/]+)/deactivate"));
+  const identifierDeactivateMatch = path4.match(devicesPath("/([^/]+)/deactivate"));
   if (identifierDeactivateMatch && (method === "POST" || method === "DELETE")) {
     const deviceIdentifier = decodeURIComponent(identifierDeactivateMatch[1]);
     return handleDeactivateDevice(request, env, userId, deviceIdentifier);
   }
-  if ((path2 === "/api/devices/update-trust" || path2 === "/devices/update-trust") && method === "POST") {
+  if ((path4 === "/api/devices/update-trust" || path4 === "/devices/update-trust") && method === "POST") {
     return handleUpdateDeviceTrust(request, env, userId);
   }
-  if ((path2 === "/api/devices/untrust" || path2 === "/devices/untrust") && method === "POST") {
+  if ((path4 === "/api/devices/untrust" || path4 === "/devices/untrust") && method === "POST") {
     return handleUntrustDevices(request, env, userId);
   }
   return null;
@@ -35671,11 +36663,11 @@ async function handleAdminDeleteUser(request, env, actorUser, targetUserId) {
 // src/router-admin-backup.ts
 init_backup();
 init_response();
-async function handleAdminBackupRoute(request, env, actorUser, path2, method) {
-  if (path2 === "/api/admin/backup/export" && method === "POST") {
+async function handleAdminBackupRoute(request, env, actorUser, path4, method) {
+  if (path4 === "/api/admin/backup/export" && method === "POST") {
     return handleAdminExportBackup(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/blob") {
+  if (path4 === "/api/admin/backup/blob") {
     if (method === "POST") {
       return handleDownloadAdminBackupAttachment(request, env, actorUser);
     }
@@ -35687,35 +36679,35 @@ async function handleAdminBackupRoute(request, env, actorUser, path2, method) {
     }
     return null;
   }
-  if (path2 === "/api/admin/backup/settings") {
+  if (path4 === "/api/admin/backup/settings") {
     if (method === "GET") return handleGetAdminBackupSettings(request, env, actorUser);
     if (method === "PUT") return handleUpdateAdminBackupSettings(request, env, actorUser);
     return null;
   }
-  if (path2 === "/api/admin/backup/settings/repair") {
+  if (path4 === "/api/admin/backup/settings/repair") {
     if (method === "GET") return handleGetAdminBackupSettingsRepairState(request, env, actorUser);
     if (method === "POST") return handleRepairAdminBackupSettings(request, env, actorUser);
     return null;
   }
-  if (path2 === "/api/admin/backup/run" && method === "POST") {
+  if (path4 === "/api/admin/backup/run" && method === "POST") {
     return handleRunAdminConfiguredBackup(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/remote" && method === "GET") {
+  if (path4 === "/api/admin/backup/remote" && method === "GET") {
     return handleListAdminRemoteBackups(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/remote/download" && method === "POST") {
+  if (path4 === "/api/admin/backup/remote/download" && method === "POST") {
     return handleDownloadAdminRemoteBackup(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/remote/integrity" && method === "POST") {
+  if (path4 === "/api/admin/backup/remote/integrity" && method === "POST") {
     return handleInspectAdminRemoteBackup(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/remote/file" && method === "DELETE") {
+  if (path4 === "/api/admin/backup/remote/file" && method === "DELETE") {
     return handleDeleteAdminRemoteBackup(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/remote/restore" && method === "POST") {
+  if (path4 === "/api/admin/backup/remote/restore" && method === "POST") {
     return handleRestoreAdminRemoteBackup(request, env, actorUser);
   }
-  if (path2 === "/api/admin/backup/import" && method === "POST") {
+  if (path4 === "/api/admin/backup/import" && method === "POST") {
     return handleAdminImportBackup(request, env, actorUser);
   }
   return null;
@@ -35724,277 +36716,821 @@ async function handleAdminBackupRoute(request, env, actorUser, path2, method) {
 // src/handlers/admin-db-config.ts
 init_response();
 
-// src/services/db-config.ts
-var CONFIG_OBJECT_KEY = "__system__/db-config.json";
-var CONFIG_KV_KEY = "db-config:v1";
-function asKvLike(value) {
-  if (!value || typeof value !== "object") return null;
-  const kv = value;
-  if (typeof kv.get !== "function" || typeof kv.put !== "function") return null;
-  return {
-    get: (key) => Promise.resolve(kv.get.call(value, key)),
-    put: (key, val) => Promise.resolve(kv.put.call(value, key, val)),
-    delete: (key) => Promise.resolve(kv.delete?.call(value, key))
-  };
+// src/services/db-cluster.ts
+init_sql_hints();
+init_storage_mysql();
+var NODE_FAILURE_CODES = /* @__PURE__ */ new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+  "ETIMEDOUT",
+  "PROTOCOL_CONNECTION_LOST",
+  "PROTOCOL_SEQUENCE_TIMEOUT",
+  "ER_CLIENT_INTERACTION_TIMEOUT",
+  // The server refused a *new* connection because of max_connections: the node
+  // is saturated, so spilling over is the right call.
+  "ER_CON_COUNT_ERROR"
+]);
+var NODE_FAILURE_ERRNOS = /* @__PURE__ */ new Set([
+  1040,
+  // ER_CON_COUNT_ERROR
+  2002,
+  // CR_CONN_HOST_ERROR
+  2003,
+  // CR_CONNECTION_ERROR
+  2006,
+  // CR_SERVER_GONE_ERROR
+  2013
+  // CR_SERVER_LOST
+]);
+var AMBIGUOUS_WRITE_CODES = /* @__PURE__ */ new Set([
+  "ECONNRESET",
+  "EPIPE",
+  "PROTOCOL_CONNECTION_LOST",
+  "ER_CLIENT_INTERACTION_TIMEOUT",
+  "ETIMEDOUT"
+]);
+var AMBIGUOUS_WRITE_ERRNOS = /* @__PURE__ */ new Set([
+  2006,
+  // CR_SERVER_GONE_ERROR — the connection died at some point during the call
+  2013
+  // CR_SERVER_LOST
+]);
+var READ_ONLY_REJECTION_CODES = /* @__PURE__ */ new Set([
+  "ER_OPTION_PREVENTS_STATEMENT",
+  "ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION"
+]);
+var READ_ONLY_REJECTION_ERRNOS = /* @__PURE__ */ new Set([1290, 1792]);
+var WRITE_JOURNAL_MAX_ENTRIES = 2e3;
+var WRITE_JOURNAL_MAX_BYTES = 2e6;
+var JOURNAL_ENTRY_OVERHEAD = 96;
+var READ_YOUR_WRITES_MS = 1e3;
+var READ_YOUR_WRITES_ASYNC_MS = 3e3;
+var WRITE_BLOCKED_COOLDOWN_MS = 6e4;
+function nodeFailureMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
-function getConfigStore(env) {
-  if (asKvLike(env.SETTINGS_KV)) return "kv";
-  if (env.ATTACHMENTS) return "r2";
-  if (asKvLike(env.ATTACHMENTS_KV)) return "attachment-kv";
-  return null;
-}
-async function deriveKey(env) {
-  const raw = (env.DB_CONFIG_KEY || "").trim();
-  if (!raw) return null;
-  const subtle = crypto.subtle;
-  let keyBytes = null;
-  try {
-    const b64 = atob(raw.trim());
-    if (b64.length === 32) {
-      const bytes = new Uint8Array(b64.length);
-      for (let i2 = 0; i2 < b64.length; i2 += 1) bytes[i2] = b64.charCodeAt(i2);
-      keyBytes = bytes.buffer;
-    }
-  } catch {
-  }
-  if (!keyBytes) {
-    keyBytes = await subtle.digest("SHA-256", new TextEncoder().encode(raw));
-  }
-  return subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt", "decrypt"]);
-}
-async function encryptJson(env, data) {
-  const key = await deriveKey(env);
-  if (!key) return null;
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const plaintext = new TextEncoder().encode(JSON.stringify(data));
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv, additionalData: new TextEncoder().encode("nodewarden-db-config:v1") },
-    key,
-    plaintext
+function isNodeLevelFailure(error) {
+  const code = String(error?.code ?? "");
+  const errno = Number(error?.errno ?? 0);
+  if (NODE_FAILURE_CODES.has(code) || NODE_FAILURE_ERRNOS.has(errno)) return true;
+  const message = nodeFailureMessage(error);
+  return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|PROTOCOL_CONNECTION_LOST|Connection lost|connect timeout|Connection refused/i.test(
+    message
   );
-  const combined = new Uint8Array(iv.length + ciphertext.byteLength);
-  combined.set(iv, 0);
-  combined.set(new Uint8Array(ciphertext), iv.length);
-  let binary = "";
-  combined.forEach((b) => {
-    binary += String.fromCharCode(b);
-  });
-  return `v1:${btoa(binary)}`;
 }
-async function decryptJson(env, payload) {
-  const key = await deriveKey(env);
-  if (!key) return null;
-  if (!payload.startsWith("v1:")) return null;
-  try {
-    const binary = atob(payload.slice(3));
-    const combined = new Uint8Array(binary.length);
-    for (let i2 = 0; i2 < binary.length; i2 += 1) combined[i2] = binary.charCodeAt(i2);
-    const iv = combined.slice(0, 12);
-    const ciphertext = combined.slice(12);
-    const plaintext = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv, additionalData: new TextEncoder().encode("nodewarden-db-config:v1") },
-      key,
-      ciphertext
+function isAmbiguousWriteFailure(error) {
+  const code = String(error?.code ?? "");
+  const errno = Number(error?.errno ?? 0);
+  return AMBIGUOUS_WRITE_CODES.has(code) || AMBIGUOUS_WRITE_ERRNOS.has(errno);
+}
+function isReadOnlyRejection(error) {
+  const code = String(error?.code ?? "");
+  const errno = Number(error?.errno ?? 0);
+  if (READ_ONLY_REJECTION_CODES.has(code) || READ_ONLY_REJECTION_ERRNOS.has(errno)) return true;
+  return /--read-only option|read[- ]only transaction|READ ONLY/i.test(nodeFailureMessage(error));
+}
+var DbClusterUnavailableError = class extends Error {
+  code = "ERR_DB_CLUSTER_UNAVAILABLE";
+  status = 503;
+  constructor(message) {
+    super(message);
+    this.name = "DbClusterUnavailableError";
+  }
+};
+var DbClusterWriteUnconfirmedError = class extends Error {
+  code = "ERR_DB_CLUSTER_WRITE_UNCONFIRMED";
+  status = 503;
+  constructor(nodeLabel, cause) {
+    super(
+      `\u5199\u5165\u5DF2\u53D1\u9001\u5230\u8282\u70B9\u300C${nodeLabel}\u300D\uFF0C\u4F46\u8FDE\u63A5\u5728\u8FD4\u56DE\u7ED3\u679C\u524D\u4E2D\u65AD\uFF0C\u65E0\u6CD5\u786E\u8BA4\u662F\u5426\u5DF2\u63D0\u4EA4\u3002\u4E3A\u907F\u514D\u91CD\u590D\u5199\u5165\uFF0C\u672C\u6B21\u6CA1\u6709\u5728\u5176\u4ED6\u8282\u70B9\u91CD\u653E\uFF1B\u8BF7\u7A0D\u540E\u7528\u76F8\u540C\u4E3B\u952E\u91CD\u8BD5\u6216\u6838\u5BF9\u6570\u636E\u3002`
     );
-    return JSON.parse(new TextDecoder().decode(plaintext));
-  } catch {
-    return null;
+    this.name = "DbClusterWriteUnconfirmedError";
+    this.cause = cause;
   }
+};
+function defaultNodeFactory(config) {
+  return new MySqlDatabase(config);
 }
-async function readStoredPayload(env) {
-  const store = getConfigStore(env);
-  if (store === "kv") {
-    return await asKvLike(env.SETTINGS_KV).get(CONFIG_KV_KEY);
-  }
-  if (store === "attachment-kv") {
-    return await asKvLike(env.ATTACHMENTS_KV).get(CONFIG_KV_KEY);
-  }
-  if (store === "r2") {
-    const object = await env.ATTACHMENTS.get(CONFIG_OBJECT_KEY);
-    if (!object) return null;
-    const text = await new Response(object.body).text();
-    return text;
-  }
-  return null;
-}
-async function writeStoredPayload(env, payload) {
-  const store = getConfigStore(env);
-  if (!store) return false;
-  if (store === "kv") {
-    const kv = asKvLike(env.SETTINGS_KV);
-    if (payload) await kv.put(CONFIG_KV_KEY, payload);
-    else await kv.delete(CONFIG_KV_KEY);
-    return true;
-  }
-  if (store === "attachment-kv") {
-    const kv = asKvLike(env.ATTACHMENTS_KV);
-    if (payload) await kv.put(CONFIG_KV_KEY, payload);
-    else await kv.delete(CONFIG_KV_KEY);
-    return true;
-  }
-  if (store === "r2") {
-    if (payload) {
-      await env.ATTACHMENTS.put(CONFIG_OBJECT_KEY, payload, {
-        httpMetadata: { contentType: "application/json" },
-        customMetadata: { purpose: "db-config" }
-      });
-    } else {
-      await env.ATTACHMENTS.delete(CONFIG_OBJECT_KEY);
+function estimateBytes(statements) {
+  let total = 0;
+  for (const statement of statements) {
+    total += statement.sql.length + JOURNAL_ENTRY_OVERHEAD;
+    for (const param of statement.params) {
+      if (param === null || param === void 0) {
+        total += 4;
+      } else if (typeof param === "string") {
+        total += param.length + 8;
+      } else if (param instanceof Uint8Array) {
+        total += param.byteLength + 16;
+      } else {
+        total += 16;
+      }
     }
-    return true;
   }
-  return false;
+  return total;
 }
-var CONFIG_CACHE_TTL_MS = 3e4;
-var payloadCache = /* @__PURE__ */ new WeakMap();
-var cacheEpoch = 0;
-function cacheStoreRef(env) {
-  const store = getConfigStore(env);
-  if (store === "kv") return env.SETTINGS_KV ?? null;
-  if (store === "attachment-kv") return env.ATTACHMENTS_KV ?? null;
-  if (store === "r2") return env.ATTACHMENTS ?? null;
-  return null;
-}
-async function readStoredPayloadCached(env) {
-  const ref = cacheStoreRef(env);
-  const now = Date.now();
-  if (ref) {
-    const hit = payloadCache.get(ref);
-    if (hit && hit.epoch === cacheEpoch && now - hit.at < CONFIG_CACHE_TTL_MS) return hit.payload;
+var ClusterStatement = class {
+  constructor(cluster, sql) {
+    this.cluster = cluster;
+    this.sql = sql;
   }
-  const payload = await readStoredPayload(env);
-  if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: now });
-  return payload;
-}
-async function loadRuntimeConfig(env) {
-  const payload = await readStoredPayloadCached(env);
-  if (!payload) return null;
-  return decryptJson(env, payload);
-}
-async function saveRuntimeConfig(env, config) {
-  const payload = await encryptJson(env, config);
-  if (!payload) return false;
-  const saved = await writeStoredPayload(env, payload);
-  if (saved) {
-    const ref = cacheStoreRef(env);
-    if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload, at: Date.now() });
+  cluster;
+  sql;
+  params = [];
+  bind(...params) {
+    this.params = params;
+    return this;
   }
-  return saved;
-}
-async function clearRuntimeConfig(env) {
-  const saved = await writeStoredPayload(env, null);
-  if (saved) {
-    const ref = cacheStoreRef(env);
-    if (ref) payloadCache.set(ref, { epoch: cacheEpoch, payload: null, at: Date.now() });
+  getSql() {
+    return this.sql;
   }
-  return saved;
-}
-function parsePort(raw, fallback) {
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
-}
-function resolveDbConfigFromEnv(env) {
-  const host = (env.DB_HOST || "").trim();
-  if (!host) return null;
-  return {
-    mode: "mysql",
-    source: "env",
-    host,
-    port: parsePort(env.DB_PORT, 3306),
-    user: (env.DB_USER || "").trim(),
-    password: env.DB_PASSWORD || "",
-    database: (env.DB_NAME || "").trim(),
-    ssl: (env.DB_SSL || "").toLowerCase() !== "false" && (env.DB_SSL || "") !== "0",
-    connectionLimit: parsePort(env.DB_CONN_LIMIT, 5)
-  };
-}
-async function resolveDbConfig(env) {
-  const fromEnv = resolveDbConfigFromEnv(env);
-  if (fromEnv) return fromEnv;
-  const runtime2 = await loadRuntimeConfig(env);
-  if (runtime2 && runtime2.mode === "mysql" && runtime2.host) {
+  getParams() {
+    return this.params;
+  }
+  run() {
+    return this.cluster.execute(this.sql, this.params, "run");
+  }
+  all() {
+    return this.cluster.execute(this.sql, this.params, "all");
+  }
+  first() {
+    return this.cluster.execute(this.sql, this.params, "first");
+  }
+};
+var MySqlClusterDatabase = class {
+  /** Lets the storage layer recognize the adapter (see isMySqlDatabase). */
+  dialect = "mysql";
+  /** Marker so callers can tell a cluster from a single-node adapter. */
+  clusterNodes = true;
+  nodes;
+  policy;
+  onWatermarkChange;
+  readCursor = 0;
+  /** Sequence of the last committed write (0 = nothing written yet). */
+  writeSeq = 0;
+  /** Committed writes, kept so a node that was down can be caught up. */
+  journal = /* @__PURE__ */ new Map();
+  journalBytes = 0;
+  /** Node that currently holds the latest data (sticky across a failover). */
+  activeWriterId = null;
+  lastWriteAt = 0;
+  constructor(specs, policy, createDb = defaultNodeFactory, options = {}) {
+    this.policy = policy;
+    this.onWatermarkChange = options.onWatermarkChange;
+    const ordered = [...specs].sort((a, b) => {
+      if (a.role !== b.role) return a.role === "primary" ? -1 : 1;
+      return a.priority - b.priority;
+    });
+    this.nodes = ordered.map((spec) => ({
+      spec,
+      db: createDb({
+        host: spec.host,
+        port: spec.port,
+        user: spec.user,
+        password: spec.password,
+        database: spec.database,
+        ssl: spec.ssl,
+        connectionLimit: spec.connectionLimit,
+        connectTimeoutMs: spec.connectTimeoutMs ?? 1e4
+      }),
+      failures: 0,
+      downUntil: 0,
+      syncErrors: 0,
+      appliedSeq: 0,
+      missedWrites: 0,
+      needsFullSync: false,
+      writeBlockedUntil: 0,
+      replayChain: Promise.resolve()
+    }));
+    this.applyInitialWatermark(options.watermark);
+  }
+  /**
+   * Restore "who was behind" from the previous process (B1).
+   *
+   * A node recorded as level with the writer stays usable; one recorded as
+   * behind keeps that state and is flagged `needsFullSync`, because the journal
+   * entries that could bridge the gap died with the old process. Treating both
+   * as "0 == 0" is what made a restart silently un-flag a stale standby.
+   */
+  applyInitialWatermark(watermark) {
+    if (!watermark || this.policy.syncMode !== "write-through") return;
+    const writeSeq = Number(watermark.writeSeq);
+    if (!Number.isFinite(writeSeq) || writeSeq <= 0) return;
+    this.writeSeq = Math.floor(writeSeq);
+    for (const node of this.nodes) {
+      const recorded = watermark.nodes?.[node.spec.id];
+      if (!Number.isFinite(Number(recorded))) continue;
+      node.appliedSeq = Math.max(0, Math.floor(Number(recorded)));
+      if (node.appliedSeq < this.writeSeq) {
+        node.needsFullSync = true;
+        node.behindSince = Date.now();
+        node.missedWrites = this.writeSeq - node.appliedSeq;
+        console.warn(
+          `[db-cluster] node "${node.spec.label}" was ${node.missedWrites} writes behind when the process restarted; it stays out of rotation until a full sync is run from /admin/database`
+        );
+      }
+    }
+  }
+  /** Current watermark, for persistence (see `onWatermarkChange`). */
+  watermarkSnapshot() {
+    const nodes = {};
+    for (const node of this.nodes) nodes[node.spec.id] = node.appliedSeq;
+    return { writeSeq: this.writeSeq, nodes };
+  }
+  notifyWatermark() {
+    if (!this.onWatermarkChange || this.policy.syncMode !== "write-through") return;
+    try {
+      this.onWatermarkChange(this.watermarkSnapshot());
+    } catch (error) {
+      console.warn("[db-cluster] could not record the write watermark:", error);
+    }
+  }
+  /**
+   * Refresh per-node readiness from persisted sync state without rebuilding the
+   * connection pools (S2). Cache keys deliberately exclude `syncReady` (it
+   * changes on every sync, and rebuilding pools for that would drop every
+   * in-flight connection), so a cached instance has to be told about it.
+   */
+  applySyncReadiness(readiness) {
+    for (const node of this.nodes) {
+      const next = readiness.get(node.spec.id);
+      if (next === void 0 || node.spec.syncReady === next) continue;
+      node.spec = { ...node.spec, syncReady: next };
+    }
+  }
+  getPolicy() {
+    return this.policy;
+  }
+  /** Schema key helper: the primary's identity (see StorageService.schemaKeyFor). */
+  getConfig() {
+    const primary = this.primaryNode();
+    return { host: primary.spec.host, port: primary.spec.port, database: primary.spec.database };
+  }
+  /** Every node's database handle, for per-node schema bootstrap. */
+  nodeDatabases() {
+    return this.nodes.map((node) => ({ id: node.spec.id, db: node.db }));
+  }
+  /**
+   * Write watermarks, for the admin sync guard: syncing "backwards" (from a node
+   * that missed writes into one that has them) would undo committed data (B-2).
+   */
+  writeWatermarks() {
     return {
-      mode: "mysql",
-      source: "runtime",
-      host: runtime2.host,
-      port: runtime2.port || 3306,
-      user: runtime2.user || "",
-      password: runtime2.password || "",
-      database: runtime2.database || "",
-      ssl: runtime2.ssl !== false,
-      connectionLimit: runtime2.connectionLimit || 5
+      writeSeq: this.writeSeq,
+      nodes: this.nodes.map((node) => ({ id: node.spec.id, appliedSeq: node.appliedSeq }))
     };
   }
-  return {
-    mode: "d1",
-    source: "d1",
-    host: "",
-    port: 3306,
-    user: "",
-    password: "",
-    database: "",
-    ssl: false,
-    connectionLimit: 5
-  };
+  /**
+   * Record that `id` now holds everything that existed when the sync *started*.
+   *
+   * `syncedThroughSeq` is the watermark captured **before** the copy ran. Writes
+   * that committed while the copy was in flight are not covered by it — they are
+   * still in the journal and get replayed on the next write (B2). Passing no
+   * sequence keeps the old "everything up to now" behaviour, which is only
+   * correct for callers that really did copy the live database atomically.
+   */
+  markNodeSynced(id, syncedThroughSeq) {
+    const node = this.nodes.find((entry) => entry.spec.id === id);
+    if (!node) return;
+    const through = syncedThroughSeq === void 0 ? this.writeSeq : Math.max(0, syncedThroughSeq);
+    node.appliedSeq = Math.max(node.appliedSeq, Math.min(through, this.writeSeq));
+    node.needsFullSync = false;
+    node.spec = { ...node.spec, syncReady: true };
+    if (node.appliedSeq >= this.writeSeq) this.clearBehind(node);
+    else this.markBehind(node);
+    this.notifyWatermark();
+  }
+  nodeHealth() {
+    const now = Date.now();
+    return this.nodes.map((node) => ({
+      id: node.spec.id,
+      label: node.spec.label,
+      role: node.spec.role,
+      priority: node.spec.priority,
+      available: node.downUntil <= now,
+      failures: node.failures,
+      lastError: node.lastError,
+      lastOkAt: node.lastOkAt,
+      lastFailureAt: node.lastFailureAt,
+      downUntil: node.downUntil > now ? node.downUntil : void 0,
+      syncErrors: node.syncErrors,
+      lastSyncError: node.lastSyncError,
+      lag: Math.max(0, this.writeSeq - node.appliedSeq),
+      appliedSeq: node.appliedSeq,
+      missedWrites: node.missedWrites,
+      behindSince: node.behindSince,
+      needsFullSync: node.needsFullSync,
+      writeBlocked: node.writeBlockedUntil > now,
+      syncReady: node.spec.syncReady
+    }));
+  }
+  primaryNode() {
+    return this.nodes.find((node) => node.spec.role === "primary") ?? this.nodes[0];
+  }
+  markOk(node) {
+    node.failures = 0;
+    node.downUntil = 0;
+    node.lastOkAt = Date.now();
+  }
+  markFailure(node, error) {
+    node.failures += 1;
+    node.lastError = nodeFailureMessage(error);
+    node.lastFailureAt = Date.now();
+    if (node.failures >= this.policy.failureThreshold) {
+      node.downUntil = Date.now() + this.policy.cooldownMs;
+      console.warn(
+        `[db-cluster] node "${node.spec.label}" tripped after ${node.failures} failures; skipping it for ${this.policy.cooldownMs}ms`
+      );
+    }
+  }
+  /** A read-only server is not failing — it just cannot be a write target. */
+  markWriteBlocked(node, error) {
+    const first = node.writeBlockedUntil <= Date.now();
+    node.writeBlockedUntil = Date.now() + WRITE_BLOCKED_COOLDOWN_MS;
+    node.lastError = nodeFailureMessage(error);
+    if (first) {
+      console.warn(
+        `[db-cluster] node "${node.spec.label}" rejected a write as read-only; it stays out of the write candidates for ${WRITE_BLOCKED_COOLDOWN_MS}ms`
+      );
+    }
+  }
+  markBehind(node) {
+    const first = node.behindSince === void 0;
+    if (first) node.behindSince = Date.now();
+    node.missedWrites = Math.max(node.missedWrites, this.writeSeq - node.appliedSeq);
+    if (first) this.notifyWatermark();
+  }
+  clearBehind(node) {
+    const wasBehind = node.behindSince !== void 0 || node.missedWrites > 0;
+    node.behindSince = void 0;
+    node.missedWrites = 0;
+    if (wasBehind) this.notifyWatermark();
+  }
+  markNeedsFullSync(node) {
+    this.markBehind(node);
+    if (node.needsFullSync) return;
+    node.needsFullSync = true;
+    console.warn(
+      `[db-cluster] node "${node.spec.label}" is ${this.writeSeq - node.appliedSeq} writes behind and the journal no longer covers the gap; it stays out of rotation until a full sync is run from the admin page.`
+    );
+    this.notifyWatermark();
+  }
+  isCaughtUp(node) {
+    if (this.policy.syncMode !== "write-through") return true;
+    return node.appliedSeq >= this.writeSeq;
+  }
+  canAcceptWrites(node) {
+    if (node.spec.syncReady === false) return false;
+    if (node.needsFullSync) return false;
+    return node.writeBlockedUntil <= Date.now();
+  }
+  /** Everything is down: retry the node whose cooldown ends first (half-open). */
+  availablePool() {
+    const now = Date.now();
+    const up = this.nodes.filter((node) => node.downUntil <= now);
+    if (up.length > 0) return up;
+    return [...this.nodes].sort((a, b) => a.downUntil - b.downUntil).slice(0, 1);
+  }
+  /**
+   * Nodes to write through, best first.
+   *
+   * The primary is *not* automatically first: a primary that was down missed
+   * writes and must not get traffic back until it has caught up (B-1). While it
+   * is behind, the node that kept receiving writes stays the writer.
+   */
+  writeCandidates() {
+    if (!this.policy.failoverEnabled) return [this.primaryNode()];
+    const pool = this.availablePool();
+    const eligible = pool.filter((node) => this.canAcceptWrites(node));
+    if (eligible.length === 0) {
+      throw new DbClusterUnavailableError(
+        "\u6CA1\u6709\u53EF\u5199\u7684\u6570\u636E\u5E93\u8282\u70B9\uFF1A\u6240\u6709\u8282\u70B9\u90FD\u843D\u540E\u4E8E\u6700\u65B0\u5199\u5165\u6216\u5904\u4E8E\u53EA\u8BFB\u72B6\u6001\u3002\u8BF7\u5148\u5728 /admin/database \u6267\u884C\u300C\u540C\u6B65\u6570\u636E\u300D\u8865\u9F50\u843D\u540E\u7684\u8282\u70B9\u3002"
+      );
+    }
+    const caughtUp = eligible.filter((node) => this.isCaughtUp(node));
+    return this.orderForWrite(caughtUp.length > 0 ? caughtUp : eligible);
+  }
+  orderForWrite(list) {
+    const primary = this.primaryNode();
+    const stickyId = this.activeWriterId && !this.isCaughtUp(primary) && list.some((node) => node.spec.id === this.activeWriterId) ? this.activeWriterId : null;
+    return [...list].sort((a, b) => {
+      if (stickyId) {
+        if (a.spec.id === stickyId) return -1;
+        if (b.spec.id === stickyId) return 1;
+      }
+      if (a.spec.role !== b.spec.role) return a.spec.role === "primary" ? -1 : 1;
+      return a.spec.priority - b.spec.priority;
+    });
+  }
+  readCandidates() {
+    if (!this.policy.failoverEnabled) return [this.primaryNode()];
+    const pool = this.availablePool();
+    const ready = pool.filter((node) => node.spec.syncReady !== false);
+    const base = ready.length > 0 ? ready : pool;
+    const fresh = base.filter((node) => this.isCaughtUp(node));
+    const candidates = fresh.length > 0 ? fresh : base;
+    if (!this.policy.readSplit) {
+      return [...candidates].sort((a, b) => a.spec.role === b.spec.role ? 0 : a.spec.role === "primary" ? -1 : 1);
+    }
+    const window = this.policy.syncAsync ? READ_YOUR_WRITES_ASYNC_MS : READ_YOUR_WRITES_MS;
+    if (Date.now() - this.lastWriteAt < window) {
+      const writer = candidates.find((node) => node.spec.id === this.activeWriterId);
+      if (writer) return [writer, ...candidates.filter((node) => node !== writer)];
+    }
+    const replicas = candidates.filter((node) => node.spec.role === "replica");
+    const primaries = candidates.filter((node) => node.spec.role === "primary");
+    if (replicas.length === 0) return primaries;
+    const start = this.readCursor % replicas.length;
+    this.readCursor += 1;
+    return [...replicas.slice(start), ...replicas.slice(0, start), ...primaries];
+  }
+  // Statements carrying the primary hint read back something this request — or
+  // the request a moment ago — has already committed. They are not split, even
+  // when `readSplit` is on: the whole point is that a replica being one replay
+  // behind must not be allowed to answer "not found".
+  //
+  // The rest of the pool still follows as a fallback, because a dead writer is
+  // worse than a slightly stale answer; the journal and the admin sync repair
+  // the divergence afterwards.
+  consistencyCandidates() {
+    if (!this.policy.failoverEnabled) return [this.primaryNode()];
+    const pool = this.availablePool();
+    const writer = this.activeWriterId ? pool.find((node) => node.spec.id === this.activeWriterId) : null;
+    const head = writer ?? this.primaryNode();
+    const tail2 = pool.filter((node) => node !== head);
+    return this.isCaughtUp(head) ? [head, ...tail2] : [...tail2, head];
+  }
+  async runOnNode(node, sql, params, mode) {
+    const statement = node.db.prepare(sql);
+    if (params.length > 0) statement.bind(...params);
+    if (mode === "run") return statement.run();
+    if (mode === "all") return statement.all();
+    return statement.first();
+  }
+  async applyEntry(node, entry) {
+    if (entry.statements.length === 1) {
+      const [only] = entry.statements;
+      await this.runOnNode(node, only.sql, only.params, "run");
+      return;
+    }
+    const local = entry.statements.map((statement) => {
+      const prepared = node.db.prepare(statement.sql);
+      if (statement.params.length > 0) prepared.bind(...statement.params);
+      return prepared;
+    });
+    await node.db.batch(local);
+  }
+  /**
+   * Bring `node` up to `targetSeq` by replaying the journal in commit order.
+   *
+   * Runs on the node's replay chain, so two concurrent requests cannot apply
+   * sequence 7 before sequence 6. Returns false when the node cannot be caught
+   * up (transport failure, or the journal no longer holds the missing entries).
+   */
+  catchUp(node, targetSeq = this.writeSeq) {
+    if (node.appliedSeq >= targetSeq) {
+      if (node.needsFullSync) return Promise.resolve(false);
+      this.clearBehind(node);
+      return Promise.resolve(true);
+    }
+    const run = async () => {
+      while (node.appliedSeq < targetSeq) {
+        const next = this.journal.get(node.appliedSeq + 1);
+        if (!next) {
+          this.markNeedsFullSync(node);
+          return false;
+        }
+        try {
+          await this.applyEntry(node, next);
+        } catch (error) {
+          if (isDuplicateKey(error)) {
+            console.warn(
+              `[db-cluster] node "${node.spec.label}" already had the row from write #${next.seq}; treating the replay as applied`
+            );
+          } else {
+            node.syncErrors += 1;
+            node.lastSyncError = nodeFailureMessage(error);
+            if (isNodeLevelFailure(error)) this.markFailure(node, error);
+            this.markBehind(node);
+            console.warn(
+              `[db-cluster] node "${node.spec.label}" could not be caught up (${nodeFailureMessage(error)}); it stays behind until the replay succeeds or the node is re-synced`
+            );
+            return false;
+          }
+        }
+        node.appliedSeq = next.seq;
+        if (this.isCaughtUp(node)) this.clearBehind(node);
+      }
+      return true;
+    };
+    const chained = node.replayChain.then(run, run);
+    node.replayChain = chained.then(
+      () => void 0,
+      () => void 0
+    );
+    return chained;
+  }
+  /**
+   * Append a committed write to the journal and advance the watermark.
+   *
+   * The sequence is assigned and the entry stored without an `await` in
+   * between, so the journal is always dense (1..writeSeq) and two concurrent
+   * requests cannot interleave their numbering.
+   *
+   * Caveat (S6): the number is the order in which this process *observed* the
+   * commit, which the driver normally reports in commit order but is not
+   * guaranteed to. Two concurrent statements that touch the same row could in
+   * principle be replayed in the opposite order, leaving the standby with the
+   * other value and no error to show for it. Replay is still strictly
+   * sequential and idempotent; making the ordering airtight would need the
+   * server's own commit sequence (binlog position) or a transaction-id column,
+   * which is out of scope for a D1-compatible adapter. Rows written by a single
+   * request are unaffected (they are journalled as one entry).
+   */
+  recordWrite(node, statements) {
+    this.activeWriterId = node.spec.id;
+    this.lastWriteAt = Date.now();
+    if (this.policy.syncMode !== "write-through") return 0;
+    const seq = this.writeSeq + 1;
+    this.writeSeq = seq;
+    node.appliedSeq = seq;
+    this.clearBehind(node);
+    const bytes = estimateBytes(statements);
+    this.journal.set(seq, { seq, statements, bytes });
+    this.journalBytes += bytes;
+    this.trimJournal();
+    return seq;
+  }
+  trimJournal() {
+    while (this.journal.size > WRITE_JOURNAL_MAX_ENTRIES || this.journalBytes > WRITE_JOURNAL_MAX_BYTES) {
+      const oldest = this.journal.keys().next();
+      if (oldest.done) return;
+      const entry = this.journal.get(oldest.value);
+      if (!entry) return;
+      this.journal.delete(oldest.value);
+      this.journalBytes = Math.max(0, this.journalBytes - entry.bytes);
+      for (const node of this.nodes) {
+        if (node.appliedSeq < entry.seq) this.markNeedsFullSync(node);
+      }
+    }
+  }
+  /** Replay sequences up to `seq` on every other node (write-through only). */
+  async replicate(seq, source, failedThisRequest) {
+    if (this.policy.syncMode !== "write-through") return;
+    const now = Date.now();
+    const targets = this.nodes.filter(
+      (node) => node !== source && node.downUntil <= now && node.writeBlockedUntil <= now && !failedThisRequest.has(node.spec.id)
+    );
+    if (targets.length === 0) return;
+    const runs = targets.map((node) => this.catchUp(node, seq));
+    if (this.policy.syncAsync) {
+      void Promise.allSettled(runs);
+      return;
+    }
+    await Promise.allSettled(runs);
+  }
+  async execute(sql, params, mode) {
+    const isRead = mode !== "run" && isReadOnlySql(sql);
+    return isRead ? this.executeRead(sql, params, mode, wantsPrimaryRead(sql)) : this.executeWrite(sql, params, mode);
+  }
+  async executeRead(sql, params, mode, primaryPinned = false) {
+    const candidates = primaryPinned ? this.consistencyCandidates() : this.readCandidates();
+    let lastError = null;
+    for (const node of candidates) {
+      try {
+        const result = await this.runOnNode(node, sql, params, mode);
+        this.markOk(node);
+        return result;
+      } catch (error) {
+        lastError = error;
+        if (!isNodeLevelFailure(error)) throw error;
+        this.markFailure(node, error);
+        console.warn(
+          candidates.length > 1 ? `[db-cluster] read on "${node.spec.label}" failed (${nodeFailureMessage(error)}); trying the next node` : `[db-cluster] read on "${node.spec.label}" failed (${nodeFailureMessage(error)}); no other node is eligible`
+        );
+      }
+    }
+    throw lastError instanceof Error ? lastError : new DbClusterUnavailableError("\u6240\u6709\u6570\u636E\u5E93\u8282\u70B9\u90FD\u65E0\u6CD5\u54CD\u5E94\u8BFB\u8BF7\u6C42\u3002");
+  }
+  async executeWrite(sql, params, mode) {
+    const candidates = this.writeCandidates();
+    let lastError = null;
+    const failedThisRequest = /* @__PURE__ */ new Set();
+    for (const node of candidates) {
+      if (!await this.catchUp(node)) {
+        lastError = new DbClusterUnavailableError(
+          `\u8282\u70B9\u300C${node.spec.label}\u300D\u843D\u540E\u4E8E\u6700\u65B0\u5199\u5165\u4E14\u65E0\u6CD5\u81EA\u52A8\u8865\u9F50\uFF0C\u5DF2\u8DF3\u8FC7\uFF1B\u8BF7\u6267\u884C\u300C\u540C\u6B65\u6570\u636E\u300D\u3002`
+        );
+        continue;
+      }
+      try {
+        const result = await this.runOnNode(node, sql, params, mode);
+        this.markOk(node);
+        const seq = this.recordWrite(node, [{ sql, params }]);
+        await this.replicate(seq, node, failedThisRequest);
+        return result;
+      } catch (error) {
+        lastError = error;
+        if (isNodeLevelFailure(error)) failedThisRequest.add(node.spec.id);
+        this.handleWriteFailure(node, error);
+      }
+    }
+    throw this.finalWriteError(lastError);
+  }
+  /**
+   * Turn whatever the last attempt produced into something the caller can act
+   * on. A raw "The MySQL server is running with the --read-only option" tells the
+   * user nothing about what to do (C-1).
+   */
+  finalWriteError(lastError) {
+    if (isReadOnlyRejection(lastError)) {
+      return new DbClusterUnavailableError(
+        "\u5F53\u524D\u53EA\u80FD\u8FDE\u5230\u53EA\u8BFB\u526F\u672C\uFF0C\u65E0\u6CD5\u5199\u5165\uFF1A\u8BF7\u786E\u8BA4\u4E3B\u5E93\u5728\u7EBF\u5E76\u5DF2\u6062\u590D\uFF0C\u6216\u628A\u526F\u5E93\u540C\u6B65\u65B9\u5F0F\u6539\u4E3A\u300C\u5E94\u7528\u5C42\u5B9E\u65F6\u53CC\u5199\u300D\u540E\u518D\u505A\u6545\u969C\u5207\u6362\u3002"
+      );
+    }
+    if (lastError instanceof Error) return lastError;
+    return new DbClusterUnavailableError("\u6240\u6709\u6570\u636E\u5E93\u8282\u70B9\u90FD\u65E0\u6CD5\u63A5\u53D7\u5199\u5165\u3002");
+  }
+  /**
+   * Decide what a failed write means. May throw (SQL error, unconfirmed write).
+   * Returning normally means "try the next node".
+   */
+  handleWriteFailure(node, error) {
+    if (isReadOnlyRejection(error)) {
+      this.markWriteBlocked(node, error);
+      console.warn(
+        `[db-cluster] node "${node.spec.label}" is read-only; trying the next node for this write`
+      );
+      return;
+    }
+    if (!isNodeLevelFailure(error)) throw error;
+    this.markFailure(node, error);
+    if (isAmbiguousWriteFailure(error)) throw new DbClusterWriteUnconfirmedError(node.spec.label, error);
+    console.warn(
+      `[db-cluster] node "${node.spec.label}" failed (${nodeFailureMessage(error)}); trying the next node`
+    );
+  }
+  prepare(sql) {
+    return new ClusterStatement(this, sql);
+  }
+  async batch(statements) {
+    const entries = statements.map((statement) => {
+      const clusterStatement = statement;
+      if (typeof clusterStatement.getSql !== "function") {
+        throw new Error("[db-cluster] batch() received a statement that was not created by this adapter");
+      }
+      return { sql: clusterStatement.getSql(), params: clusterStatement.getParams() };
+    });
+    const candidates = this.writeCandidates();
+    let lastError = null;
+    const failedThisRequest = /* @__PURE__ */ new Set();
+    for (const node of candidates) {
+      if (!await this.catchUp(node)) {
+        lastError = new DbClusterUnavailableError(
+          `\u8282\u70B9\u300C${node.spec.label}\u300D\u843D\u540E\u4E8E\u6700\u65B0\u5199\u5165\u4E14\u65E0\u6CD5\u81EA\u52A8\u8865\u9F50\uFF0C\u5DF2\u8DF3\u8FC7\uFF1B\u8BF7\u6267\u884C\u300C\u540C\u6B65\u6570\u636E\u300D\u3002`
+        );
+        continue;
+      }
+      try {
+        const local = entries.map((entry) => {
+          const statement = node.db.prepare(entry.sql);
+          if (entry.params.length > 0) statement.bind(...entry.params);
+          return statement;
+        });
+        const results = await node.db.batch(local);
+        this.markOk(node);
+        const seq = this.recordWrite(node, entries);
+        await this.replicate(seq, node, failedThisRequest);
+        return results;
+      } catch (error) {
+        lastError = error;
+        if (isNodeLevelFailure(error)) failedThisRequest.add(node.spec.id);
+        this.handleWriteFailure(node, error);
+      }
+    }
+    throw this.finalWriteError(lastError);
+  }
+  async close() {
+    await Promise.allSettled(this.nodes.map((node) => node.db.close()));
+  }
+};
+function isDuplicateKey(error) {
+  const errno = Number(error?.errno ?? 0);
+  const code = String(error?.code ?? "");
+  if (code) return code === "ER_DUP_ENTRY";
+  if (errno === 1062) return true;
+  return /Duplicate entry .* for key|UNIQUE constraint failed/i.test(nodeFailureMessage(error));
 }
-function maskConfig(config) {
-  return {
-    mode: config.mode,
-    source: config.source,
-    host: config.host,
-    port: config.port,
-    user: config.user,
-    database: config.database,
-    ssl: config.ssl,
-    connectionLimit: config.connectionLimit,
-    passwordSet: !!config.password
-  };
-}
-function hasConfigStore(env) {
-  return getConfigStore(env) !== null;
+function isMySqlClusterDatabase(db) {
+  return !!db && typeof db === "object" && db.clusterNodes !== void 0;
 }
 
 // src/services/storage-factory.ts
 init_storage_mysql();
 var cached = null;
-function cacheKeyFor(config) {
+function cacheKeyFor(cluster) {
   return JSON.stringify([
-    config.mode,
-    config.host,
-    config.port,
-    config.user,
-    config.database,
-    config.ssl,
-    config.connectionLimit,
-    config.password
+    cluster.source,
+    cluster.nodes.map((node) => [
+      node.id,
+      node.role,
+      node.priority,
+      node.host,
+      node.port,
+      node.user,
+      node.database,
+      node.ssl,
+      node.connectionLimit,
+      node.password
+    ]),
+    cluster.policy
   ]);
 }
+function toSpecs(cluster) {
+  return cluster.nodes.map((node) => ({
+    id: node.id,
+    label: node.label,
+    role: node.role,
+    priority: node.priority,
+    host: node.host,
+    port: node.port,
+    user: node.user,
+    password: node.password,
+    database: node.database,
+    ssl: node.ssl,
+    connectionLimit: node.connectionLimit,
+    connectTimeoutMs: 1e4,
+    // Keeps an unsynced standby out of rotation (see ClusterNodeSpec).
+    syncReady: node.syncReady
+  }));
+}
 async function getDatabase(env) {
-  const config = await resolveDbConfig(env);
-  if (config.mode !== "mysql") {
+  const cluster = await resolveDbCluster(env);
+  if (cluster.mode !== "mysql" || cluster.nodes.length === 0) {
+    if (cluster.unavailableReason) {
+      throw new DbClusterUnavailableError(
+        `${cluster.unavailableReason}\u3002\u5E94\u7528\u5F53\u524D\u6CA1\u6709\u4EFB\u4F55\u53EF\u7528\u7684\u6570\u636E\u5E93\uFF1A\u8BF7\u5728 /admin/database \u542F\u7528\u81F3\u5C11\u4E00\u4E2A\u8282\u70B9\u5E76\u4FDD\u5B58\uFF0C\u6216\u6E05\u9664\u914D\u7F6E\u56DE\u9000\u5230\u5185\u7F6E\u6570\u636E\u5E93\u3002`
+      );
+    }
+    if (!env.DB) {
+      throw new DbClusterUnavailableError(
+        "\u5F53\u524D\u8FD0\u884C\u73AF\u5883\u6CA1\u6709\u5185\u7F6E\u6570\u636E\u5E93\uFF08D1\uFF09\uFF0C\u4E5F\u6CA1\u6709\u914D\u7F6E\u5916\u63A5 MySQL\uFF1A\u8BF7\u8BBE\u7F6E DB_* \u73AF\u5883\u53D8\u91CF\uFF0C\u6216\u5728 /admin/database \u914D\u7F6E\u4E00\u4E2A MySQL \u8282\u70B9\u3002"
+      );
+    }
     return env.DB;
   }
-  const cacheKey2 = cacheKeyFor(config);
+  const cacheKey2 = cacheKeyFor(cluster);
   if (cached && cached.cacheKey === cacheKey2) {
+    applySyncReadiness(cached.db, cluster);
     return cached.db;
   }
   if (cached && isMySqlDatabase(cached.db)) {
     await cached.db.close();
   }
-  const db = new MySqlDatabase({
-    host: config.host,
-    port: config.port,
-    user: config.user,
-    password: config.password,
-    database: config.database,
-    ssl: config.ssl,
-    connectionLimit: config.connectionLimit,
-    connectTimeoutMs: 1e4
+  const watermark = await readClusterWatermark(env);
+  const db = new MySqlClusterDatabase(toSpecs(cluster), cluster.policy, void 0, {
+    watermark,
+    onWatermarkChange: (snapshot) => queueWatermark(env, snapshot)
   });
   cached = { cacheKey: cacheKey2, db };
   return cached.db;
 }
+function applySyncReadiness(db, cluster) {
+  const adapter = db;
+  adapter.applySyncReadiness?.(new Map(cluster.nodes.map((node) => [node.id, node.syncReady])));
+}
+var watermarkTimer = null;
+var pendingWatermark = null;
+var watermarkEnv = null;
+function queueWatermark(env, snapshot) {
+  pendingWatermark = snapshot;
+  watermarkEnv = env;
+  if (watermarkTimer) return;
+  const timer = setTimeout(() => {
+    watermarkTimer = null;
+    const next = pendingWatermark;
+    const target = watermarkEnv;
+    pendingWatermark = null;
+    if (!next || !target) return;
+    void saveClusterWatermark(target, next).catch((error) => {
+      console.warn("[db-cluster] could not persist the write watermark:", error);
+    });
+  }, 50);
+  timer.unref?.();
+  watermarkTimer = timer;
+}
 async function resetDatabaseCache() {
+  if (watermarkTimer) {
+    clearTimeout(watermarkTimer);
+    watermarkTimer = null;
+  }
+  pendingWatermark = null;
+  watermarkEnv = null;
   if (cached && isMySqlDatabase(cached.db)) {
     await cached.db.close();
   }
@@ -36008,14 +37544,28 @@ async function getDatabaseStatus(env) {
   let source = "d1";
   let cacheKey2 = "d1";
   try {
-    const config = await resolveDbConfig(env);
-    mode = config.mode;
-    source = config.source;
-    cacheKey2 = [config.mode, config.host, config.port, config.database].join("|");
+    const cluster = await resolveDbCluster(env);
+    mode = cluster.mode;
+    source = cluster.source;
+    cacheKey2 = [
+      cluster.mode,
+      cluster.source,
+      cluster.nodes.map((node) => `${node.id}:${node.host}:${node.port}/${node.database}`).join(",")
+    ].join("|");
     if (statusCache && statusCache.key === cacheKey2 && Date.now() - statusCache.at < STATUS_CACHE_MS) {
       return statusCache.value;
     }
-    if (config.mode === "d1" && !env.DB) {
+    if (cluster.mode === "d1" && cluster.unavailableReason) {
+      const unusable = {
+        mode: "d1",
+        source: "d1",
+        ok: false,
+        error: `${cluster.unavailableReason}\u3002\u8BF7\u542F\u7528\u81F3\u5C11\u4E00\u4E2A\u8282\u70B9\uFF0C\u6216\u6E05\u9664\u914D\u7F6E\u56DE\u9000\u5230\u5185\u7F6E\u6570\u636E\u5E93\u3002`
+      };
+      statusCache = { key: cacheKey2, at: Date.now(), value: unusable };
+      return unusable;
+    }
+    if (cluster.mode === "d1" && !env.DB) {
       const missing = {
         mode: "d1",
         source: "d1",
@@ -36026,9 +37576,20 @@ async function getDatabaseStatus(env) {
       return missing;
     }
     const db = await getDatabase(env);
-    if (config.mode === "mysql") {
+    if (cluster.mode === "mysql") {
       const row = await db.prepare("SELECT VERSION() AS version").first();
-      const status2 = { mode: "mysql", source: config.source, ok: true, version: row?.version };
+      const nodes = db.nodeHealth?.();
+      const degraded = !!nodes?.some(
+        (node) => node.role !== "primary" && (node.syncErrors > 0 || node.needsFullSync || node.lag > 0 || node.syncReady === false)
+      );
+      const status2 = {
+        mode: "mysql",
+        source: cluster.source,
+        ok: true,
+        version: row?.version,
+        nodes,
+        degraded
+      };
       statusCache = { key: cacheKey2, at: Date.now(), value: status2 };
       return status2;
     }
@@ -36045,61 +37606,508 @@ async function getDatabaseStatus(env) {
     };
   }
 }
+function peekClusterHealth() {
+  const db = cached?.db;
+  return db?.nodeHealth?.() ?? null;
+}
+
+// src/services/db-cluster-sync.ts
+function schemaFilter(schema) {
+  const name = (schema ?? "").trim();
+  return name ? { sql: "TABLE_SCHEMA = ?", bind: [name] } : { sql: "TABLE_SCHEMA = DATABASE()", bind: [] };
+}
+function bindAll(statement, params) {
+  return params.length > 0 ? statement.bind(...params) : statement;
+}
+var SYNC_DEFAULTS = {
+  chunkSize: 200,
+  maxRowsPerTable: 2e4,
+  maxDurationMs: 45e3
+};
+var MIN_BUDGET_MS = 250;
+function quoteIdent(name) {
+  return `\`${name.replace(/`/g, "``")}\``;
+}
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function isPacketTooLarge(error) {
+  const errno = Number(error?.errno ?? 0);
+  const code = String(error?.code ?? "");
+  if (errno === 1153 || code === "ER_NET_PACKET_TOO_LARGE") return true;
+  return /max_allowed_packet|Packet for query is too large/i.test(errorMessage(error));
+}
+async function discoverTables(db, schema) {
+  const filter = schemaFilter(schema);
+  const result = await bindAll(
+    db.prepare(
+      `SELECT TABLE_NAME AS name FROM information_schema.TABLES WHERE ${filter.sql} AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME`
+    ),
+    filter.bind
+  ).all();
+  return (result.results ?? []).map((row) => String(row.name ?? "")).filter((name) => name.length > 0);
+}
+async function countBaseTables(db, schema) {
+  try {
+    const filter = schemaFilter(schema);
+    const row = await bindAll(
+      db.prepare(
+        `SELECT COUNT(*) AS n FROM information_schema.TABLES WHERE ${filter.sql} AND TABLE_TYPE = 'BASE TABLE'`
+      ),
+      filter.bind
+    ).first();
+    if (!row) return null;
+    const value = Number(row.n);
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+async function readCreateTable(db, table) {
+  try {
+    const result = await db.prepare(`SHOW CREATE TABLE ${quoteIdent(table)}`).all();
+    const row = (result.results ?? [])[0];
+    if (!row) return null;
+    for (const value of Object.values(row)) {
+      if (typeof value === "string" && /^CREATE TABLE/i.test(value.trim())) return value.trim();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+async function createMissingTables(source, target, tables, schemas = {}) {
+  let targetTables;
+  try {
+    targetTables = await discoverTables(target, schemas.targetSchema);
+  } catch (error) {
+    return { created: [], failed: [] };
+  }
+  const present = new Set(targetTables);
+  const missing = tables.filter((table) => !present.has(table));
+  if (missing.length === 0) return { created: [], failed: [] };
+  const created = [];
+  const failed = [];
+  for (const table of missing) {
+    const ddl = await readCreateTable(source, table);
+    if (!ddl) {
+      failed.push({ table, error: "\u4E3B\u5E93\u6CA1\u6709\u8FD4\u56DE\u8BE5\u8868\u7684\u5EFA\u8868\u8BED\u53E5\uFF08SHOW CREATE TABLE \u5931\u8D25\uFF09\uFF0C\u65E0\u6CD5\u5728\u526F\u5E93\u81EA\u52A8\u5EFA\u8868\u3002" });
+      continue;
+    }
+    const statement = ddl.replace(/^CREATE\s+TABLE\s+/i, "CREATE TABLE IF NOT EXISTS ");
+    try {
+      await target.prepare(statement).run();
+      created.push(table);
+    } catch (error) {
+      failed.push({ table, error: errorMessage(error) });
+    }
+  }
+  return { created, failed };
+}
+async function discoverColumns(db, table, schema) {
+  const filter = schemaFilter(schema);
+  const result = await db.prepare(
+    `SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE ${filter.sql} AND TABLE_NAME = ? AND (EXTRA IS NULL OR EXTRA NOT LIKE '%GENERATED%') ORDER BY ORDINAL_POSITION`
+  ).bind(...filter.bind, table).all();
+  return (result.results ?? []).map((row) => String(row.name ?? "")).filter((name) => name.length > 0);
+}
+async function discoverPrimaryKey(db, table, schema) {
+  try {
+    const filter = schemaFilter(schema);
+    const result = await db.prepare(
+      `SELECT COLUMN_NAME AS name FROM information_schema.KEY_COLUMN_USAGE WHERE ${filter.sql} AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY' ORDER BY ORDINAL_POSITION`
+    ).bind(...filter.bind, table).all();
+    return (result.results ?? []).map((row) => String(row.name ?? "")).filter((name) => name.length > 0);
+  } catch {
+    return [];
+  }
+}
+function buildUpsertSql(table, columns, rowCount, mode) {
+  const columnList = columns.map(quoteIdent).join(", ");
+  const rowPlaceholder = `(${columns.map(() => "?").join(", ")})`;
+  const values = Array.from({ length: rowCount }, () => rowPlaceholder).join(", ");
+  const updates = mode === "overwrite" ? columns.map((column) => `${quoteIdent(column)} = VALUES(${quoteIdent(column)})`).join(", ") : (
+    // No-op update: keeps the existing row untouched. `col = col` is valid in
+    // ON DUPLICATE KEY UPDATE and refers to the stored value.
+    `${quoteIdent(columns[0])} = ${quoteIdent(columns[0])}`
+  );
+  return `INSERT INTO ${quoteIdent(table)} (${columnList}) VALUES ${values} ON DUPLICATE KEY UPDATE ${updates}`;
+}
+function isCursorScalar(value) {
+  return value === null || ["string", "number", "boolean"].includes(typeof value);
+}
+async function countRows(db, table) {
+  try {
+    const row = await db.prepare(`SELECT COUNT(*) AS n FROM ${quoteIdent(table)}`).first();
+    if (!row) return null;
+    const value = Number(row.n);
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+async function readTableEstimates(db, schema) {
+  try {
+    const filter = schemaFilter(schema);
+    const result = await bindAll(
+      db.prepare(
+        `SELECT TABLE_NAME AS name, TABLE_ROWS AS row_count FROM information_schema.TABLES WHERE ${filter.sql} AND TABLE_TYPE = 'BASE TABLE'`
+      ),
+      filter.bind
+    ).all();
+    const estimates = {};
+    for (const row of result.results ?? []) {
+      const name = String(row.name ?? "");
+      const value = Number(row.row_count);
+      if (name && Number.isFinite(value) && value > 0) estimates[name] = value;
+    }
+    return estimates;
+  } catch {
+    return {};
+  }
+}
+async function syncTable(source, target, table, options = {}, startedAt = Date.now()) {
+  const chunkSize = Math.max(1, options.chunkSize ?? SYNC_DEFAULTS.chunkSize);
+  const maxRows = Math.max(1, options.maxRowsPerTable ?? SYNC_DEFAULTS.maxRowsPerTable);
+  const requestedMs = Math.max(MIN_BUDGET_MS, options.maxDurationMs ?? SYNC_DEFAULTS.maxDurationMs);
+  const budgetEnd = Math.min(startedAt + requestedMs, options.deadline ?? Number.POSITIVE_INFINITY);
+  const mode = options.mode === "overwrite" ? "overwrite" : "merge";
+  const verifyCounts = options.verifyCounts !== false;
+  const result = {
+    table,
+    columns: 0,
+    rowsRead: 0,
+    rowsWritten: 0,
+    truncated: false,
+    paging: "keyset"
+  };
+  let targetRowsBefore = null;
+  try {
+    const columns = await discoverColumns(source, table, options.sourceSchema);
+    if (columns.length === 0) {
+      result.error = `no readable columns (table missing on the source${options.sourceSchema ? ` ${options.sourceSchema}` : ""}?)`;
+      return result;
+    }
+    result.columns = columns.length;
+    const keys = await discoverPrimaryKey(source, table, options.sourceSchema);
+    if (keys.length === 0) result.paging = "offset";
+    const selectList = columns.map(quoteIdent).join(", ");
+    const keyList = keys.map(quoteIdent).join(", ");
+    const keyParams = keys.map(() => "?").join(", ");
+    const savedCursor = options.cursors?.[table];
+    let cursor = null;
+    let offset = 0;
+    if (Array.isArray(savedCursor) && savedCursor.length > 0) {
+      if (result.paging === "keyset" && savedCursor.length === keys.length) cursor = savedCursor;
+      else if (result.paging === "offset") offset = Number(savedCursor[0]) || 0;
+    }
+    let limit = Math.min(chunkSize, maxRows);
+    let cursorOut;
+    if (mode === "merge" && verifyCounts) {
+      targetRowsBefore = await countRows(target, table);
+    }
+    for (; ; ) {
+      if (result.rowsRead >= maxRows) {
+        result.truncated = true;
+        break;
+      }
+      if (Date.now() > budgetEnd) {
+        result.truncated = true;
+        break;
+      }
+      limit = Math.max(1, Math.min(limit, chunkSize, maxRows - result.rowsRead));
+      const where = cursor ? `WHERE (${keyList}) > (${keyParams})` : "";
+      const orderBy = result.paging === "keyset" ? `ORDER BY ${keyList}` : "ORDER BY 1";
+      const tail2 = result.paging === "offset" ? ` OFFSET ${offset}` : "";
+      const statement = source.prepare(
+        `SELECT ${selectList} FROM ${quoteIdent(table)}${where ? ` ${where}` : ""} ${orderBy} LIMIT ${limit}${tail2}`
+      );
+      if (where) statement.bind(...cursor);
+      const rows = await statement.all();
+      const batch = rows.results ?? [];
+      if (batch.length === 0) break;
+      const params = [];
+      for (const row of batch) {
+        for (const column of columns) params.push(row[column] ?? null);
+      }
+      try {
+        await target.prepare(buildUpsertSql(table, columns, batch.length, mode)).bind(...params).run();
+      } catch (error) {
+        if (isPacketTooLarge(error) && limit > 1) {
+          limit = Math.max(1, Math.floor(limit / 2));
+          continue;
+        }
+        throw error;
+      }
+      result.rowsRead += batch.length;
+      result.rowsWritten += batch.length;
+      if (result.paging === "keyset") {
+        const last = batch[batch.length - 1];
+        const next = keys.map((key) => last[key] ?? null);
+        cursor = next;
+        cursorOut = next.every(isCursorScalar) ? next : void 0;
+      } else {
+        offset += batch.length;
+        cursorOut = [offset];
+      }
+      if (batch.length < limit) break;
+    }
+    if (result.truncated) result.nextCursor = cursorOut;
+    if (!result.truncated && verifyCounts) {
+      const sourceRows = await countRows(source, table);
+      const targetRows = await countRows(target, table);
+      if (sourceRows !== null) result.sourceRows = sourceRows;
+      if (targetRows !== null) result.targetRows = targetRows;
+      if (sourceRows !== null && targetRows !== null) {
+        result.countMatches = sourceRows === targetRows;
+        if (targetRows > sourceRows) result.orphanRows = targetRows - sourceRows;
+      }
+      if (mode === "merge" && targetRowsBefore !== null && targetRows !== null) {
+        result.rowsInserted = Math.max(0, targetRows - targetRowsBefore);
+      }
+    }
+    return result;
+  } catch (error) {
+    result.error = errorMessage(error);
+    return result;
+  }
+}
+async function syncDatabase(source, target, options = {}) {
+  const startedAt = Date.now();
+  const requestedMs = Math.max(MIN_BUDGET_MS, options.maxDurationMs ?? SYNC_DEFAULTS.maxDurationMs);
+  const deadline = Math.min(startedAt + requestedMs, options.deadline ?? Number.POSITIVE_INFINITY);
+  let tables;
+  let estimates;
+  try {
+    tables = options.tables ?? await discoverTables(source, options.sourceSchema);
+    estimates = await readTableEstimates(source, options.sourceSchema);
+  } catch (error) {
+    return {
+      ok: false,
+      complete: false,
+      tables: [
+        {
+          table: "*",
+          columns: 0,
+          rowsRead: 0,
+          rowsWritten: 0,
+          truncated: false,
+          paging: "keyset",
+          error: errorMessage(error)
+        }
+      ],
+      rowsRead: 0,
+      rowsWritten: 0,
+      truncated: false,
+      durationMs: Date.now() - startedAt,
+      cursors: {},
+      tablesTotal: 0,
+      tablesDone: 0,
+      rowsEstimate: 0,
+      skipped: [],
+      createdTables: []
+    };
+  }
+  if (tables.length === 0) {
+    const label = options.sourceSchema ? `\u6E90\u5E93\u300C${options.sourceSchema}\u300D` : "\u6E90\u5E93";
+    return {
+      ok: false,
+      complete: false,
+      tables: [
+        {
+          table: "*",
+          columns: 0,
+          rowsRead: 0,
+          rowsWritten: 0,
+          truncated: false,
+          paging: "keyset",
+          error: `${label}\u91CC\u6CA1\u6709\u4EFB\u4F55\u57FA\u7840\u8868\uFF08Base Table\uFF09\uFF0C\u6CA1\u6709\u53EF\u590D\u5236\u7684\u5185\u5BB9\uFF1A\u8BF7\u786E\u8BA4\u8282\u70B9\u914D\u7F6E\u91CC\u7684\u5E93\u540D\u662F\u5426\u6B63\u786E\u3001\u8BE5\u5E93\u662F\u5426\u5DF2\u7ECF\u5EFA\u8868\u3002\u526F\u5E93\u4E3A\u7A7A\u65F6\uFF0C\u5148\u5728\u540E\u53F0\u4FDD\u5B58\u4E00\u6B21\u96C6\u7FA4\u914D\u7F6E\u8BA9\u7CFB\u7EDF\u5EFA\u8868\u3002`
+        }
+      ],
+      rowsRead: 0,
+      rowsWritten: 0,
+      truncated: false,
+      durationMs: Date.now() - startedAt,
+      cursors: {},
+      tablesTotal: 0,
+      tablesDone: 0,
+      rowsEstimate: 0,
+      skipped: [],
+      createdTables: []
+    };
+  }
+  const skip = new Set(options.skipTables ?? []);
+  const skipped = tables.filter((table) => skip.has(table));
+  const pending = tables.filter((table) => !skip.has(table));
+  const schemaFix = await createMissingTables(source, target, tables, {
+    sourceSchema: options.sourceSchema,
+    targetSchema: options.targetSchema
+  });
+  const createError = new Map(schemaFix.failed.map((entry) => [entry.table, entry.error]));
+  const results = [];
+  for (const table of pending) {
+    if (Date.now() >= deadline) {
+      results.push({
+        table,
+        columns: 0,
+        rowsRead: 0,
+        rowsWritten: 0,
+        truncated: true,
+        paging: "keyset"
+      });
+      continue;
+    }
+    const tableResult = await syncTable(source, target, table, { ...options, deadline }, Date.now());
+    const estimate = estimates[table];
+    if (estimate !== void 0) tableResult.rowsEstimate = estimate;
+    const ddlError = createError.get(table);
+    if (ddlError && tableResult.error) {
+      tableResult.error = `${tableResult.error}\uFF1B\u526F\u5E93\u7F3A\u5C11\u8BE5\u8868\u4E14\u81EA\u52A8\u5EFA\u8868\u5931\u8D25\uFF1A${ddlError}`;
+    }
+    results.push(tableResult);
+  }
+  const rowsRead = results.reduce((sum, entry) => sum + entry.rowsRead, 0);
+  const rowsWritten = results.reduce((sum, entry) => sum + entry.rowsWritten, 0);
+  const measured = results.filter((entry) => entry.rowsInserted !== void 0);
+  const rowsInserted = measured.length > 0 ? measured.reduce((sum, entry) => sum + (entry.rowsInserted ?? 0), 0) : void 0;
+  const cursors = {};
+  for (const entry of results) {
+    if (entry.nextCursor) cursors[entry.table] = entry.nextCursor;
+  }
+  const ok = results.every((entry) => !entry.error);
+  const tablesDone = skipped.length + results.filter((entry) => !entry.truncated && !entry.error).length;
+  const rowsEstimate = tables.reduce((sum, table) => sum + (estimates[table] ?? 0), 0);
+  const droppedRows = results.filter(
+    (entry) => !entry.truncated && !entry.error && entry.targetRows !== void 0 && entry.targetRows < entry.rowsWritten
+  );
+  const complete = ok && results.every((entry) => !entry.truncated) && droppedRows.length === 0;
+  return {
+    ok,
+    complete,
+    tables: results,
+    rowsRead,
+    rowsWritten,
+    rowsInserted,
+    truncated: results.some((entry) => entry.truncated),
+    durationMs: Date.now() - startedAt,
+    cursors,
+    tablesTotal: tables.length,
+    tablesDone,
+    rowsEstimate,
+    skipped,
+    createdTables: schemaFix.created
+  };
+}
+function advanceSyncResume(input) {
+  const { result, complete } = input;
+  const previous = input.previous ?? null;
+  const finishedNow = result.tables.filter((table) => !table.truncated && !table.error).map((table) => table.table);
+  const doneTables = complete ? void 0 : [.../* @__PURE__ */ new Set([...previous?.doneTables ?? [], ...finishedNow])];
+  const cursors = {
+    ...previous?.cursors ?? {},
+    ...result.cursors
+  };
+  for (const table of [...finishedNow, ...input.skipTables ?? []]) delete cursors[table];
+  return {
+    doneTables,
+    cursors: complete || Object.keys(cursors).length === 0 ? void 0 : cursors,
+    pendingTables: result.tables.filter((table) => table.truncated).map((table) => table.table),
+    failedTables: result.tables.filter((table) => !!table.error).map((table) => ({ table: table.table, error: table.error }))
+  };
+}
 
 // src/services/db-lifecycle.ts
 init_storage();
-var initializedKey = null;
-var dbInitError = null;
+var initializedKeys = /* @__PURE__ */ new Set();
+var dbInitFailure = null;
 var initPromises = /* @__PURE__ */ new Map();
+var RETRY_BASE_MS = 3e4;
+var RETRY_MAX_MS = 5 * 6e4;
+var retryAfter = /* @__PURE__ */ new Map();
+var failureCounts = /* @__PURE__ */ new Map();
 function getDbInitError() {
-  return dbInitError;
+  return dbInitFailure?.message ?? null;
+}
+function getDbInitFailure() {
+  return dbInitFailure;
 }
 function resetDbLifecycle() {
-  initializedKey = null;
-  dbInitError = null;
+  initializedKeys.clear();
+  dbInitFailure = null;
   initPromises.clear();
+  retryAfter.clear();
+  failureCounts.clear();
 }
 function attachDatabase(env, db) {
   env.DB = db;
+}
+function schemaTargets(db) {
+  if (isMySqlClusterDatabase(db)) {
+    return db.nodeDatabases().map((node, index) => ({
+      key: StorageService.schemaKeyFor(node.db),
+      db: node.db,
+      isPrimary: index === 0
+    }));
+  }
+  return [{ key: StorageService.schemaKeyFor(db), db, isPrimary: true }];
+}
+async function initializeTarget(target) {
+  if (initializedKeys.has(target.key)) return;
+  const retryAt = retryAfter.get(target.key);
+  if (retryAt !== void 0 && Date.now() < retryAt) return;
+  let pending = initPromises.get(target.key);
+  if (!pending) {
+    pending = (async () => {
+      await new StorageService(target.db).initializeDatabase();
+      initializedKeys.add(target.key);
+      retryAfter.delete(target.key);
+      failureCounts.delete(target.key);
+      if (target.isPrimary) dbInitFailure = null;
+    })().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      const previous = failureCounts.get(target.key) ?? 0;
+      failureCounts.set(target.key, previous + 1);
+      const delay2 = Math.min(RETRY_BASE_MS * 2 ** previous, RETRY_MAX_MS);
+      retryAfter.set(target.key, Date.now() + delay2);
+      if (target.isPrimary) dbInitFailure = { message };
+      console.error(
+        `[db-lifecycle] schema init failed for ${target.key}${target.isPrimary ? " (primary)" : " (standby)"}; retrying in ${Math.round(delay2 / 1e3)}s:`,
+        error
+      );
+    }).finally(() => {
+      initPromises.delete(target.key);
+    });
+    initPromises.set(target.key, pending);
+  }
+  await pending;
 }
 async function ensureDatabaseInitialized(env, resolve = getDatabase) {
   let db = null;
   try {
     db = await resolve(env);
   } catch (error) {
-    dbInitError = error instanceof Error ? error.message : String(error);
+    const message = error instanceof Error ? error.message : String(error);
+    const status = Number(error?.status ?? 0);
+    dbInitFailure = status === 503 && error instanceof Error && error.name === "DbClusterUnavailableError" ? { message, status } : { message };
     console.error("Failed to resolve database for request env:", error);
     return;
   }
   if (!db) {
-    dbInitError = "No database configured: set DB_* env vars or use /admin/database.";
-    console.error(dbInitError);
+    dbInitFailure = { message: "No database configured: set DB_* env vars or use /admin/database." };
+    console.error(dbInitFailure.message);
     return;
   }
   attachDatabase(env, db);
-  const schemaKey = StorageService.schemaKeyFor(db);
-  if (initializedKey === schemaKey) {
-    if (dbInitError) {
-      dbInitError = null;
+  const targets = schemaTargets(db);
+  const alreadyInitialized = targets.every((target) => initializedKeys.has(target.key));
+  if (alreadyInitialized) {
+    if (dbInitFailure) {
+      dbInitFailure = null;
       console.warn("[db-lifecycle] cleared a stale database init error: the same database resolved successfully again.");
     }
     return;
   }
-  let pending = initPromises.get(schemaKey);
-  if (!pending) {
-    pending = (async () => {
-      await new StorageService(db).initializeDatabase();
-      initializedKey = schemaKey;
-      dbInitError = null;
-    })().catch((error) => {
-      dbInitError = error instanceof Error ? error.message : String(error);
-      console.error("Database initialization failed:", error);
-    }).finally(() => {
-      initPromises.delete(schemaKey);
-    });
-    initPromises.set(schemaKey, pending);
-  }
-  await pending;
+  await Promise.all(targets.map((target) => initializeTarget(target)));
 }
 
 // src/handlers/admin-db-config.ts
@@ -36115,7 +38123,7 @@ async function readJsonBody3(request) {
     return {};
   }
 }
-function ipv4ToInt(address) {
+function ipv4ToInt2(address) {
   const parts = address.split(".");
   if (parts.length !== 4) return null;
   const octets = parts.map((part) => Number(part));
@@ -36148,8 +38156,8 @@ function matchesCidr(address, entry) {
   const [network, bitsRaw] = entry.split("/");
   const bits2 = Number(bitsRaw);
   if (!network || !Number.isInteger(bits2) || bits2 < 0 || bits2 > 32) return false;
-  const ip = ipv4ToInt(address);
-  const base = ipv4ToInt(network);
+  const ip = ipv4ToInt2(address);
+  const base = ipv4ToInt2(network);
   if (ip === null || base === null) return false;
   if (bits2 === 0) return true;
   const mask = 4294967295 << 32 - bits2 >>> 0;
@@ -36234,7 +38242,18 @@ function classifyConnectionError(error) {
   if (/Unknown database/i.test(msg)) return "database";
   return "unknown";
 }
-function normalizeCandidate(body, fallback) {
+function asRecord2(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function newId() {
+  return `node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+function clampInt2(raw, fallback, min, max2) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max2, Math.max(min, Math.floor(n)));
+}
+function normalizeNodeCandidate(body, fallback, index = 0) {
   const host = String(body.host ?? fallback?.host ?? "").trim();
   const user = String(body.user ?? fallback?.user ?? "").trim();
   const database = String(body.database ?? fallback?.database ?? "").trim();
@@ -36242,26 +38261,110 @@ function normalizeCandidate(body, fallback) {
   const clearPassword = body.clearPassword === true;
   const password = clearPassword ? "" : typeof passwordRaw === "string" && passwordRaw.length > 0 ? passwordRaw : fallback?.password ?? "";
   const port = Number(body.port ?? fallback?.port ?? 3306);
-  const connectionLimit = Number(body.connectionLimit ?? fallback?.connectionLimit ?? 5);
-  const ssl = body.ssl === void 0 ? fallback?.ssl !== false : !!body.ssl;
-  if (!host) return { config: fallback ?? { version: 1, mode: "d1" }, error: "host is required" };
-  if (!user) return { config: fallback ?? { version: 1, mode: "d1" }, error: "user is required" };
-  if (!database) return { config: fallback ?? { version: 1, mode: "d1" }, error: "database is required" };
+  const id = String(body.id ?? fallback?.id ?? "").trim() || newId();
+  const role = body.role === "replica" ? "replica" : body.role === "primary" ? "primary" : fallback?.role ?? "primary";
+  const empty = {
+    id,
+    label: String(body.label ?? fallback?.label ?? (index === 0 ? "\u4E3B\u5E93" : `\u8282\u70B9 ${index + 1}`)).trim(),
+    role,
+    priority: clampInt2(body.priority ?? fallback?.priority, index + 1, 1, 99),
+    enabled: body.enabled === void 0 ? fallback?.enabled ?? true : body.enabled !== false,
+    host,
+    port: Number.isFinite(port) ? Math.floor(port) : 3306,
+    user,
+    password,
+    database,
+    ssl: body.ssl === void 0 ? fallback?.ssl !== false : !!body.ssl,
+    connectionLimit: clampInt2(
+      body.connectionLimit ?? fallback?.connectionLimit,
+      5,
+      CLUSTER_LIMITS.minConnectionLimit,
+      CLUSTER_LIMITS.maxConnectionLimit
+    )
+  };
+  if (!host && empty.enabled) return { node: empty, error: `\u8282\u70B9 ${index + 1}\uFF1Ahost is required` };
+  if (empty.enabled && !user) return { node: empty, error: `\u8282\u70B9 ${index + 1}\uFF1Auser is required` };
+  if (empty.enabled && !database) return { node: empty, error: `\u8282\u70B9 ${index + 1}\uFF1Adatabase is required` };
   if (!Number.isFinite(port) || port <= 0 || port > 65535) {
-    return { config: fallback ?? { version: 1, mode: "d1" }, error: "invalid port" };
+    return { node: empty, error: `\u8282\u70B9 ${index + 1}\uFF1Ainvalid port` };
   }
-  return {
-    config: {
-      version: 1,
-      mode: "mysql",
-      host,
-      port: Math.floor(port),
-      user,
-      password,
-      database,
-      ssl,
-      connectionLimit: Number.isFinite(connectionLimit) && connectionLimit > 0 ? Math.floor(connectionLimit) : 5
+  return { node: empty };
+}
+function looksLikeLegacyBody(body) {
+  return !Array.isArray(body.nodes) && typeof body.host === "string";
+}
+function normalizeClusterCandidate(body, stored) {
+  const fallbackNodes = stored?.nodes ?? [];
+  const rawNodes = looksLikeLegacyBody(body) ? [body] : body.nodes;
+  if (!Array.isArray(rawNodes) || rawNodes.length === 0) {
+    return {
+      cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+      error: "at least one database node is required"
+    };
+  }
+  if (rawNodes.length > CLUSTER_LIMITS.maxNodes) {
+    return {
+      cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+      error: `at most ${CLUSTER_LIMITS.maxNodes} database nodes are supported`
+    };
+  }
+  const nodes = [];
+  const seenIds = /* @__PURE__ */ new Set();
+  for (const [index, rawNode] of rawNodes.entries()) {
+    const record = asRecord2(rawNode) ?? {};
+    const id = String(record.id ?? "").trim();
+    const fallback = id ? fallbackNodes.find((node2) => node2.id === id) : looksLikeLegacyBody(body) ? fallbackNodes[0] : void 0;
+    const { node, error } = normalizeNodeCandidate(record, fallback, index);
+    if (error) {
+      return {
+        cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+        error
+      };
     }
+    if (seenIds.has(node.id)) {
+      return {
+        cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+        error: `duplicate node id: ${node.id}`
+      };
+    }
+    seenIds.add(node.id);
+    nodes.push(node);
+  }
+  const enabled = nodes.filter((node) => node.enabled);
+  if (enabled.length === 0) {
+    return {
+      cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+      error: "at least one node must be enabled"
+    };
+  }
+  const primaries = enabled.filter((node) => node.role === "primary");
+  if (primaries.length === 0) {
+    return {
+      cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+      error: "one node must be the primary"
+    };
+  }
+  if (primaries.length > 1) {
+    return {
+      cluster: { version: 2, mode: "mysql", nodes: [], policy: { ...DEFAULT_CLUSTER_POLICY } },
+      error: "only one node may be the primary"
+    };
+  }
+  const policy = body.policy === void 0 && stored ? stored.policy : normalizePolicy(body.policy);
+  return { cluster: { version: 2, mode: "mysql", nodes, policy } };
+}
+async function probeNode(node, env) {
+  const result = await testMySqlConnection(node, env);
+  return {
+    id: node.id,
+    label: node.label,
+    role: node.role,
+    ok: result.ok,
+    latencyMs: result.latencyMs,
+    version: result.version,
+    schemaState: result.schemaState,
+    error: result.error,
+    errorKind: result.errorKind
   };
 }
 async function testMySqlConnection(config, env) {
@@ -36316,39 +38419,62 @@ async function testMySqlConnection(config, env) {
       errorKind: kind
     };
   } finally {
-    await db.close();
+    await closeQuietly(db, "probe");
   }
 }
 async function handleAdminGetDbConfig(request, env, actorUser) {
   void request;
   void actorUser;
+  const cluster = await resolveDbCluster(env);
   const resolved = await resolveDbConfig(env);
+  const stored = await resolveStoredCluster(env);
+  const health = peekClusterHealth();
   return jsonResponse({
+    cluster: maskCluster(cluster),
+    storedCluster: stored ? maskCluster(stored) : null,
+    storedClusterActive: cluster.source === "runtime",
+    // Compatibility: the previous UI read `config` for a single connection.
     config: maskConfig(resolved),
+    health: health ?? [],
     runtimeConfigStored: !!await loadRuntimeConfig(env),
     configStoreAvailable: hasConfigStore(env),
-    envOverrideActive: !!resolveDbConfigFromEnv(env)
+    envOverrideActive: !!resolveDbConfigFromEnv(env),
+    limits: CLUSTER_LIMITS,
+    defaultPolicy: DEFAULT_CLUSTER_POLICY
   });
 }
 async function handleAdminTestDbConfig(request, env, actorUser) {
   void actorUser;
   const body = await readJsonBody3(request);
   const stored = await loadRuntimeConfig(env);
-  const resolved = await resolveDbConfig(env);
-  const fallback = stored ?? (resolved.mode === "mysql" ? {
-    version: 1,
-    mode: "mysql",
-    host: resolved.host,
-    port: resolved.port,
-    user: resolved.user,
-    password: resolved.password,
-    database: resolved.database,
-    ssl: resolved.ssl,
-    connectionLimit: resolved.connectionLimit
+  const resolved = await resolveDbCluster(env);
+  const storedFallbackFor = (id) => (id ? stored?.nodes.find((node2) => node2.id === id) : void 0) ?? (resolved.nodes[0] ? {
+    ...resolved.nodes[0],
+    id: resolved.nodes[0].id
   } : null);
-  const { config, error } = normalizeCandidate(body, fallback);
+  const single = asRecord2(body.node);
+  const list = Array.isArray(body.nodes) ? body.nodes : null;
+  if (single) {
+    const id = typeof single.id === "string" ? single.id : void 0;
+    const { node: node2, error: error2 } = normalizeNodeCandidate(single, storedFallbackFor(id), 0);
+    if (error2) return errorResponse(error2, 400);
+    const result2 = await probeNode(node2, env);
+    return jsonResponse({ ...result2, ok: result2.ok }, result2.ok ? 200 : 502);
+  }
+  if (list && list.length > 0) {
+    const candidates = list.map((raw, index) => {
+      const record = asRecord2(raw) ?? {};
+      const id = typeof record.id === "string" ? record.id : void 0;
+      return normalizeNodeCandidate(record, storedFallbackFor(id), index);
+    });
+    const invalid = candidates.find((entry) => entry.error);
+    if (invalid) return errorResponse(invalid.error ?? "invalid node", 400);
+    const results = await Promise.all(candidates.map((entry) => probeNode(entry.node, env)));
+    return jsonResponse({ ok: results.every((result2) => result2.ok), results }, results.every((r) => r.ok) ? 200 : 502);
+  }
+  const { node, error } = normalizeNodeCandidate(body, storedFallbackFor(void 0), 0);
   if (error) return errorResponse(error, 400);
-  const result = await testMySqlConnection(config, env);
+  const result = await probeNode(node, env);
   return jsonResponse(result, result.ok ? 200 : 502);
 }
 async function bootstrapSchemaOnCandidate(config) {
@@ -36370,11 +38496,38 @@ async function bootstrapSchemaOnCandidate(config) {
     console.error("[db-config] schema bootstrap on candidate database failed:", initError);
     return { ok: false, error: message };
   } finally {
-    await probe.close();
+    await closeQuietly(probe, "schema bootstrap");
+  }
+}
+async function hasUserRows(node) {
+  const db = new MySqlDatabase({
+    host: node.host || "",
+    port: node.port || 3306,
+    user: node.user || "",
+    password: node.password || "",
+    database: node.database || "",
+    ssl: node.ssl !== false,
+    connectionLimit: 1,
+    connectTimeoutMs: 8e3
+  });
+  try {
+    const row = await db.prepare("SELECT 1 AS present FROM users LIMIT 1").first();
+    return !!row;
+  } catch {
+    return null;
+  } finally {
+    await closeQuietly(db, "probe");
   }
 }
 function clearingWouldLeaveNoDatabase(env) {
   return !resolveDbConfigFromEnv(env) && !env.DB;
+}
+async function closeQuietly(pool, label) {
+  try {
+    await pool.close();
+  } catch (error) {
+    console.warn(`[db-config] closing the ${label} pool failed:`, error);
+  }
 }
 function wantsForce(request) {
   try {
@@ -36395,32 +38548,51 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
     await clearRuntimeConfig(env);
     await resetDatabaseCache();
     resetDbLifecycle();
+    await clearSyncStates(env);
     await auditDbConfigChange(env, actorUser, "admin.db_config.cleared", null);
     return jsonResponse({ ok: true, mode: "d1", effective: true });
   }
   const stored = await loadRuntimeConfig(env);
-  const { config, error } = normalizeCandidate(body, stored);
+  const { cluster, error } = normalizeClusterCandidate(body, stored);
   if (error) return errorResponse(error, 400);
-  const test = await testMySqlConnection(config, env);
-  if (!test.ok) {
-    return jsonResponse({ ok: false, error: test.error ?? "connection test failed", errorKind: test.errorKind }, 502);
+  const enabled = cluster.nodes.filter((node) => node.enabled);
+  const probes = await Promise.all(enabled.map((node) => probeNode(node, env)));
+  const failedProbe = probes.find((result) => !result.ok);
+  if (failedProbe) {
+    return jsonResponse(
+      {
+        ok: false,
+        saved: false,
+        error: `\u8282\u70B9\u300C${failedProbe.label}\u300D\u8FDE\u63A5\u5931\u8D25\uFF1A${failedProbe.error ?? "unknown error"}`,
+        errorKind: failedProbe.errorKind ?? "connection",
+        nodes: probes
+      },
+      502
+    );
   }
-  if (test.schemaState !== "ready") {
-    const bootstrap = await bootstrapSchemaOnCandidate(config);
-    if (!bootstrap.ok) {
-      return jsonResponse(
-        {
-          ok: false,
-          saved: false,
-          error: `Connected, but creating the schema failed, so the configuration was NOT saved and the current database is still in use. Grant CREATE/ALTER/INDEX on this schema (or import the schema manually).`,
-          schemaError: bootstrap.error,
-          errorKind: "schema"
-        },
-        502
-      );
-    }
+  const bootstraps = await Promise.all(
+    enabled.map(async (node) => {
+      const probe = probes.find((result2) => result2.id === node.id);
+      if (probe?.schemaState === "ready") return { id: node.id, label: node.label, ok: true };
+      const result = await bootstrapSchemaOnCandidate(node);
+      return { id: node.id, label: node.label, ok: result.ok, error: result.error };
+    })
+  );
+  const failedBootstrap = bootstraps.find((result) => !result.ok);
+  if (failedBootstrap) {
+    return jsonResponse(
+      {
+        ok: false,
+        saved: false,
+        error: `\u8282\u70B9\u300C${failedBootstrap.label}\u300D\u8FDE\u63A5\u6210\u529F\uFF0C\u4F46\u5EFA\u8868\u5931\u8D25\uFF0C\u914D\u7F6E\u672A\u4FDD\u5B58\uFF0C\u5F53\u524D\u6570\u636E\u5E93\u4ECD\u5728\u6B63\u5E38\u4F7F\u7528\u3002\u8BF7\u4E3A\u8BE5\u5E93\u8D26\u53F7\u6388\u4E88 CREATE/ALTER/INDEX \u6743\u9650\uFF08\u6216\u624B\u52A8\u5BFC\u5165\u8868\u7ED3\u6784\uFF09\u540E\u91CD\u8BD5\u3002`,
+        schemaError: failedBootstrap.error,
+        errorKind: "schema",
+        nodes: probes
+      },
+      502
+    );
   }
-  const saved = await saveRuntimeConfig(env, config);
+  const saved = await saveRuntimeConfig(env, cluster);
   if (!saved && !hasConfigStore(env)) {
     return errorResponse(
       "No config store available. Bind SETTINGS_KV (or ATTACHMENTS) or set DB_* environment variables instead.",
@@ -36429,6 +38601,22 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
   }
   if (!saved) {
     return errorResponse("Failed to persist database config", 500);
+  }
+  const previousNodes = stored?.nodes ?? [];
+  const staleSyncIds = previousNodes.filter((previous) => {
+    const next = cluster.nodes.find((node) => node.id === previous.id);
+    return !next || nodeFingerprint(previous) !== nodeFingerprint(next);
+  }).map((node) => node.id);
+  await deleteNodeSyncStates(env, [...new Set(staleSyncIds)]);
+  const emptyStandbys = [];
+  if (cluster.policy.syncMode === "native") {
+    const replicas = enabled.filter((node) => node.role === "replica");
+    const primaryCandidate = enabled.find((node) => node.role === "primary");
+    if (replicas.length > 0 && primaryCandidate && await hasUserRows(primaryCandidate)) {
+      for (const replica of replicas) {
+        if (await hasUserRows(replica) === false) emptyStandbys.push(replica.label);
+      }
+    }
   }
   await resetDatabaseCache();
   resetDbLifecycle();
@@ -36445,17 +38633,480 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
     console.error("[db-config] schema bootstrap failed after save:", initError);
   }
   const envOverride = !!resolveDbConfigFromEnv(env);
-  await auditDbConfigChange(env, actorUser, "admin.db_config.saved", config);
+  await auditDbConfigChange(env, actorUser, "admin.db_config.saved", cluster);
+  let syncPending = [];
+  if (cluster.policy.syncMode === "write-through") {
+    const states = await readSyncStates(env);
+    syncPending = cluster.nodes.filter((node) => {
+      if (!node.enabled || node.role !== "replica") return false;
+      const state2 = states[node.id];
+      if (!state2 || state2.complete !== true) return true;
+      return !!state2.fingerprint && state2.fingerprint !== nodeFingerprint(node);
+    }).map((node) => node.id);
+  }
+  const syncWarning = syncPending.length > 0 ? `${syncPending.length} \u4E2A\u526F\u5E93\u5C1A\u672A\u5B8C\u6210\u540C\u6B65\uFF0C\u6545\u969C\u5207\u6362\u524D\u8BF7\u5148\u70B9\u300C\u540C\u6B65\u6570\u636E\u5230\u526F\u5E93\u300D\uFF0C\u5426\u5219\u63A5\u7BA1\u65F6\u4F1A\u7F3A\u5C11\u5386\u53F2\u6570\u636E\u3002` : void 0;
+  const standbyWarning = emptyStandbys.length > 0 ? `\u526F\u5E93\u300C${emptyStandbys.join("\u300D\u300C")}\u300D\u91CC\u4E00\u6761\u8D26\u53F7\u6570\u636E\u90FD\u6CA1\u6709\uFF0C\u800C\u4E3B\u5E93\u6709\u6570\u636E\uFF1A\u5F53\u524D\u526F\u5E93\u540C\u6B65\u65B9\u5F0F\u662F\u300C\u6570\u636E\u5E93\u81EA\u8EAB\u590D\u5236\u300D\uFF0C\u5982\u679C\u8BE5\u5E93\u5E76\u6CA1\u6709\u771F\u6B63\u63A5\u5165 MySQL \u4E3B\u4ECE\u590D\u5236\uFF0C\u4E3B\u5E93\u6545\u969C\u540E\u5207\u6362\u8FC7\u53BB\u5C06\u770B\u4E0D\u5230\u4EFB\u4F55\u8D26\u53F7\u3002\u8BF7\u5148\u786E\u8BA4\u590D\u5236\u5DF2\u751F\u6548\uFF0C\u6216\u6539\u4E3A\u300C\u5E94\u7528\u5C42\u5B9E\u65F6\u53CC\u5199\u300D\u5E76\u70B9\u4E00\u6B21\u300C\u540C\u6B65\u6570\u636E\u5230\u526F\u5E93\u300D\u3002` : void 0;
+  const warning = [
+    envOverride ? "DB_* \u73AF\u5883\u53D8\u91CF\u4F18\u5148\u4E8E\u8FD0\u884C\u65F6\u914D\u7F6E\uFF1A\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5F53\u524D\u751F\u6548\u7684\u4ECD\u662F\u73AF\u5883\u53D8\u91CF\u6307\u5411\u7684\u6570\u636E\u5E93\u3002" : null,
+    schemaError ? `\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5EFA\u8868\u5931\u8D25\uFF1A${schemaError}` : null,
+    syncWarning,
+    standbyWarning
+  ].filter((entry) => !!entry).join(" ");
   return jsonResponse({
     ok: true,
     mode: "mysql",
     saved: true,
     effective: !envOverride && schemaReady,
-    warning: envOverride ? "DB_* \u73AF\u5883\u53D8\u91CF\u4F18\u5148\u4E8E\u8FD0\u884C\u65F6\u914D\u7F6E\uFF1A\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5F53\u524D\u751F\u6548\u7684\u4ECD\u662F\u73AF\u5883\u53D8\u91CF\u6307\u5411\u7684\u6570\u636E\u5E93\u3002" : schemaError ? `\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u5EFA\u8868\u5931\u8D25\uFF1A${schemaError}` : void 0,
+    warning: warning || void 0,
     schemaReady,
-    latencyMs: test.latencyMs,
-    version: test.version
+    syncPending: syncPending.length > 0 ? syncPending : void 0,
+    emptyStandbys: emptyStandbys.length > 0 ? emptyStandbys : void 0,
+    latencyMs: Math.max(...probes.map((result) => result.latencyMs), 0),
+    version: probes.find((result) => result.role === "primary")?.version,
+    nodes: probes,
+    cluster: maskCluster({
+      mode: "mysql",
+      source: "runtime",
+      nodes: cluster.nodes.map((node) => ({ ...node, source: "runtime", syncStatus: void 0 })),
+      policy: cluster.policy
+    })
   });
+}
+function buildSyncProgress(input) {
+  const tableFraction = input.tablesTotal > 0 ? input.tablesDone / input.tablesTotal : input.done ? 1 : 0;
+  const rowFraction = input.rowsEstimate > 0 ? input.rowsCopied / input.rowsEstimate : 0;
+  const fraction = Math.max(tableFraction, Math.min(rowFraction, 0.99));
+  return {
+    startedAt: input.startedAt,
+    percent: input.done ? 100 : Math.max(0, Math.min(99, Math.floor(fraction * 100))),
+    done: input.done,
+    tablesTotal: input.tablesTotal,
+    tablesDone: input.tablesDone,
+    rowsCopied: input.rowsCopied,
+    rowsEstimate: input.rowsEstimate
+  };
+}
+function combineProgress(reports) {
+  const measured = reports.map((report) => report.progress).filter((entry) => !!entry);
+  if (measured.length === 0) return void 0;
+  return buildSyncProgress({
+    startedAt: Math.min(...measured.map((entry) => entry.startedAt)),
+    rowsCopied: measured.reduce((sum, entry) => sum + entry.rowsCopied, 0),
+    rowsEstimate: measured.reduce((sum, entry) => sum + entry.rowsEstimate, 0),
+    tablesTotal: measured.reduce((sum, entry) => sum + entry.tablesTotal, 0),
+    tablesDone: measured.reduce((sum, entry) => sum + entry.tablesDone, 0),
+    done: reports.every((report) => report.progress?.done === true)
+  });
+}
+async function handleAdminSyncDbCluster(request, env, actorUser) {
+  const body = await readJsonBody3(request);
+  const requested = Array.isArray(body.targetIds) ? body.targetIds.map((id) => String(id)) : null;
+  const requestedSource = typeof body.sourceId === "string" && body.sourceId.trim() ? body.sourceId.trim() : null;
+  const mode = body.mode === "overwrite" ? "overwrite" : "merge";
+  const forced = wantsForce(request) || body.force === true;
+  const requestedBudget = Number(body.budgetMs);
+  const budgetMs = Number.isFinite(requestedBudget) && requestedBudget > 0 ? Math.min(3e4, Math.max(3e3, Math.round(requestedBudget))) : null;
+  const envPrimary = resolveDbConfigFromEnv(env);
+  if (envPrimary && resolveStandbysFromEnv(env).length === 0) {
+    const stored = await resolveStoredCluster(env);
+    const savedStandbys = (stored?.nodes ?? []).filter((node) => node.id !== "env-primary").length;
+    return errorResponse(
+      "\u5F53\u524D\u751F\u6548\u7684\u662F\u73AF\u5883\u53D8\u91CF\u91CC\u7684\u90A3\u4E00\u4E2A\u5E93\uFF08\u5355\u8282\u70B9\uFF09\uFF0C\u6CA1\u6709\u53EF\u540C\u6B65\u7684\u76EE\u6807\u5E93\u3002\u8981\u540C\u6B65\u5230\u526F\u5E93\uFF0C\u8BF7\u7ED9\u51FD\u6570\u52A0\u4E0A DB_STANDBY_NODES\uFF0C\u503C\u662F\u4E00\u4E2A\u526F\u5E93\u6E05\u5355\uFF08\u9017\u53F7\u5206\u9694\uFF0C\u6570\u91CF\u4E0D\u9650\uFF09\uFF1A\u540C\u5B9E\u4F8B\u7684\u5E93\u53EA\u5199\u5E93\u540D\uFF0C\u5982 DB_STANDBY_NODES=\u6863\u6848\u5E93,\u79BB\u7EBF\u5E93\uFF1B\u5728\u53E6\u4E00\u53F0\u670D\u52A1\u5668\u7684\u5E93\u5199\u5B8C\u6574\u8FDE\u63A5\u4E32\uFF0C\u5982 DB_STANDBY_NODES=mysql://user:pass@10.0.0.5:3306/nodewarden_bak\u3002" + (savedStandbys > 0 ? `\u540E\u53F0\u5DF2\u4FDD\u5B58\u7684 ${savedStandbys} \u4E2A\u526F\u5E93\u8282\u70B9\u88AB DB_* \u73AF\u5883\u53D8\u91CF\u6321\u4F4F\u4E86\uFF0C\u4E0D\u4F1A\u53C2\u4E0E\u540C\u6B65\u3002` : ""),
+      409
+    );
+  }
+  const cluster = await resolveDbCluster(env);
+  if (cluster.mode !== "mysql" || cluster.nodes.length === 0) {
+    return errorResponse("\u5F53\u524D\u6CA1\u6709\u914D\u7F6E\u5916\u63A5 MySQL \u8282\u70B9\uFF0C\u65E0\u9700\u540C\u6B65\u3002", 400);
+  }
+  const manualEnvStandby = cluster.source === "env" && cluster.nodes.length > 1;
+  if (cluster.policy.syncMode !== "write-through" && !manualEnvStandby) {
+    return errorResponse(
+      "\u5F53\u524D\u526F\u5E93\u540C\u6B65\u65B9\u5F0F\u662F\u300C\u6570\u636E\u5E93\u81EA\u8EAB\u590D\u5236\u300D\uFF0C\u6570\u636E\u7531\u6570\u636E\u5E93\u8D1F\u8D23\uFF0C\u5E94\u7528\u5C42\u4E0D\u9700\u8981\u4E5F\u4E0D\u5E94\u8BE5\u5199\u5165\u526F\u5E93\u3002\u5982\u9700\u5E94\u7528\u5C42\u53CC\u5199\uFF0C\u8BF7\u5148\u5207\u6362\u5230\u300C\u5E94\u7528\u5C42\u5B9E\u65F6\u53CC\u5199\u300D\u5E76\u4FDD\u5B58\u3002",
+      400
+    );
+  }
+  const db = await getDatabase(env);
+  if (!isMySqlClusterDatabase(db)) {
+    return errorResponse("\u5F53\u524D\u6570\u636E\u5E93\u4E0D\u662F MySQL \u96C6\u7FA4\uFF0C\u65E0\u6CD5\u540C\u6B65\u3002", 400);
+  }
+  const handles = db.nodeDatabases();
+  const primaryId = primaryNodeOf(cluster)?.id;
+  const primaryHandle = handles.find((node) => node.id === primaryId) ?? handles[0];
+  if (!primaryHandle) return errorResponse("\u627E\u4E0D\u5230\u4E3B\u5E93\u8282\u70B9\u3002", 400);
+  const sourceId = requestedSource ?? primaryHandle.id;
+  const source = handles.find((node) => node.id === sourceId);
+  if (!source) {
+    return errorResponse(`\u672A\u77E5\u7684\u540C\u6B65\u6E90\u8282\u70B9\uFF1A${sourceId}`, 400);
+  }
+  const sourceSpec = cluster.nodes.find((node) => node.id === source.id);
+  if (sourceSpec && sourceSpec.enabled === false) {
+    return errorResponse(`\u540C\u6B65\u6E90\u8282\u70B9\u300C${sourceSpec.label}\u300D\u5DF2\u505C\u7528\u3002`, 400);
+  }
+  const targets = handles.filter(
+    (node) => node.id !== source.id && (!requested || requested.includes(node.id))
+  );
+  if (targets.length === 0) {
+    return errorResponse("\u6CA1\u6709\u53EF\u540C\u6B65\u7684\u76EE\u6807\u8282\u70B9\uFF08\u6E90\u8282\u70B9\u4E0D\u80FD\u540C\u65F6\u4F5C\u4E3A\u76EE\u6807\uFF0C\u8BF7\u5148\u6DFB\u52A0\u5E76\u542F\u7528\u526F\u5E93\uFF09\u3002", 400);
+  }
+  const watermarks = db.writeWatermarks();
+  const appliedOf = (id) => watermarks.nodes.find((node) => node.id === id)?.appliedSeq ?? 0;
+  const sourceSeq = appliedOf(source.id);
+  if (mode === "overwrite" && !forced) {
+    const newer = targets.find((target) => appliedOf(target.id) > sourceSeq);
+    if (newer) {
+      const newerLabel = cluster.nodes.find((node) => node.id === newer.id)?.label ?? newer.id;
+      const sourceLabel = sourceSpec?.label ?? source.id;
+      return errorResponse(
+        `\u76EE\u6807\u8282\u70B9\u300C${newerLabel}\u300D\u6BD4\u6E90\u8282\u70B9\u300C${sourceLabel}\u300D\u66F4\u65B0\uFF1A\u5B83\u5DF2\u7ECF\u63A5\u6536\u4E86\u6E90\u8282\u70B9\u6CA1\u6709\u7684\u5199\u5165\u3002\u7528\u300C\u8986\u76D6\u5DF2\u6709\u884C\u300D\u4F1A\u628A\u8F83\u65B0\u7684\u6570\u636E\u6539\u56DE\u65E7\u503C\u3002\u8BF7\u6539\u7528\u9ED8\u8BA4\u7684\u300C\u53EA\u8865\u7F3A\u5931\u884C\u300D\uFF0C\u6216\u628A\u540C\u6B65\u6E90\u6539\u6210\u300C` + newerLabel + "\u300D\uFF0C\u786E\u8BA4\u65E0\u8BEF\u540E\u518D\u52A0 ?force=1 \u5F3A\u5236\u8986\u76D6\u3002",
+        409
+      );
+    }
+  }
+  const storedStates = await readSyncStates(env);
+  const syncedThroughSeq = watermarks.writeSeq;
+  const perTargetMs = budgetMs ?? 45e3;
+  const deadline = Date.now() + (budgetMs ? Math.min(9e4, perTargetMs * targets.length + 1e4) : 9e4);
+  const reports = [];
+  for (const target of targets) {
+    const spec = cluster.nodes.find((node) => node.id === target.id);
+    const remaining = deadline - Date.now();
+    if (remaining < 3e3) {
+      reports.push({
+        id: target.id,
+        label: spec?.label ?? target.id,
+        ok: false,
+        complete: false,
+        rowsRead: 0,
+        rowsWritten: 0,
+        truncated: false,
+        durationMs: 0,
+        tables: [],
+        error: "\u65F6\u95F4\u9884\u7B97\u5DF2\u7528\u5B8C\uFF0C\u8BE5\u8282\u70B9\u672C\u6B21\u672A\u540C\u6B65\uFF0C\u8BF7\u7A0D\u540E\u5355\u72EC\u91CD\u8BD5\u3002"
+      });
+      continue;
+    }
+    const previous = storedStates[target.id];
+    const restart = body.restart === true;
+    const resuming = !restart && !!previous && !previous.complete && previous.sourceId === source.id && (previous.mode ?? "merge") === mode;
+    const cursors = resuming ? previous.cursors : void 0;
+    const skipTables = resuming ? previous.doneTables : void 0;
+    const targetTableCount = await countBaseTables(target.db, spec?.database);
+    if ((targetTableCount === 0 || targetTableCount === null) && spec) {
+      const bootstrap = await bootstrapSchemaOnCandidate(spec);
+      if (!bootstrap.ok) {
+        const detail = bootstrap.error ?? "unknown error";
+        const missingDatabase = /unknown database|1049/i.test(detail);
+        reports.push({
+          id: target.id,
+          label: spec.label,
+          ok: false,
+          complete: false,
+          rowsRead: 0,
+          rowsWritten: 0,
+          truncated: false,
+          durationMs: 0,
+          tables: [],
+          error: missingDatabase ? `\u526F\u5E93\u300C${spec.label}\u300D\u6307\u5411\u7684\u6570\u636E\u5E93\u300C${spec.database}\u300D\u5728\u670D\u52A1\u5668\u4E0A\u4E0D\u5B58\u5728\uFF08${detail}\uFF09\u3002\u8BF7\u5148\u6267\u884C CREATE DATABASE \`${spec.database}\`\uFF08\u5B57\u7B26\u96C6\u5EFA\u8BAE utf8mb4\uFF09\uFF0C\u8868\u7ED3\u6784\u4F1A\u5728\u4E0B\u4E00\u6B21\u70B9\u300C\u540C\u6B65\u6570\u636E\u5230\u526F\u5E93\u300D\u65F6\u81EA\u52A8\u5EFA\u597D\u3002` : `\u526F\u5E93\u300C${spec.label}\u300D\u91CC\u6CA1\u6709\u4EFB\u4F55\u6570\u636E\u8868\uFF0C\u81EA\u52A8\u5EFA\u8868\u4E5F\u5931\u8D25\u4E86\uFF08${detail}\uFF09\u3002\u8BF7\u7ED9\u8BE5\u5E93\u8D26\u53F7\u6388\u4E88 CREATE/ALTER/INDEX \u6743\u9650\uFF0C\u6216\u624B\u52A8\u5BFC\u5165\u8868\u7ED3\u6784\u540E\u91CD\u8BD5\u3002`
+        });
+        continue;
+      }
+      console.info("[db-config] created the missing schema on standby before syncing:", spec.label);
+    }
+    const result = await syncDatabase(source.db, target.db, {
+      maxDurationMs: Math.min(perTargetMs, remaining),
+      deadline,
+      mode,
+      cursors,
+      skipTables,
+      // Explicit schema: `information_schema … = DATABASE()` returns nothing
+      // when the connection has no default database, which used to look like a
+      // finished sync of zero tables.
+      sourceSchema: cluster.nodes.find((node) => node.id === source.id)?.database || void 0,
+      targetSchema: spec?.database || void 0
+    });
+    if (result.createdTables.length > 0) {
+      console.info(
+        "[db-config] created tables missing on the standby before copying:",
+        spec?.label ?? target.id,
+        result.createdTables.join(", ")
+      );
+    }
+    const complete = result.ok && result.complete;
+    const countsMismatch = result.tables.filter((table) => table.countMatches === false).map((table) => table.table);
+    const behindRows = result.tables.reduce(
+      (sum, table) => sum + (table.sourceRows !== void 0 && table.targetRows !== void 0 && table.sourceRows > table.targetRows ? table.sourceRows - table.targetRows : 0),
+      0
+    );
+    const orphanRows = result.tables.reduce((sum, table) => sum + (table.orphanRows ?? 0), 0);
+    const progress = buildSyncProgress({
+      startedAt: resuming && previous.progress ? previous.progress.startedAt : Date.now(),
+      rowsCopied: (resuming ? previous.progress?.rowsCopied ?? 0 : 0) + result.rowsRead,
+      rowsEstimate: result.rowsEstimate,
+      tablesTotal: result.tablesTotal,
+      tablesDone: result.tablesDone,
+      done: complete
+    });
+    const resume = advanceSyncResume({
+      previous: resuming ? previous : null,
+      result,
+      complete,
+      skipTables
+    });
+    const { doneTables, cursors: nextCursors, pendingTables, failedTables } = resume;
+    await saveNodeSyncState(env, target.id, {
+      at: Date.now(),
+      complete,
+      truncated: result.truncated,
+      rowsWritten: result.rowsWritten,
+      tables: result.tablesTotal,
+      sourceId: source.id,
+      fingerprint: spec ? nodeFingerprint(spec) : void 0,
+      cursors: nextCursors,
+      mode,
+      doneTables,
+      progress
+    });
+    if (complete) db.markNodeSynced(target.id, syncedThroughSeq);
+    reports.push({
+      id: target.id,
+      label: spec?.label ?? target.id,
+      ok: result.ok,
+      complete,
+      rowsRead: result.rowsRead,
+      rowsWritten: result.rowsWritten,
+      rowsInserted: result.rowsInserted,
+      truncated: result.truncated,
+      durationMs: result.durationMs,
+      tables: result.tables,
+      failedTables: failedTables.length > 0 ? failedTables : void 0,
+      pendingTables: pendingTables.length > 0 ? pendingTables : void 0,
+      createdTables: result.createdTables.length > 0 ? result.createdTables : void 0,
+      countsMismatch: countsMismatch.length > 0 ? countsMismatch : void 0,
+      behindRows: behindRows > 0 ? behindRows : void 0,
+      orphanRows: orphanRows > 0 ? orphanRows : void 0,
+      progress
+    });
+  }
+  const ok = reports.every((report) => report.ok);
+  await auditDbConfigChange(env, actorUser, "admin.db_config.synced", {
+    version: 2,
+    mode: "mysql",
+    nodes: cluster.nodes.map((node) => ({ ...node })),
+    policy: cluster.policy
+  });
+  return jsonResponse(
+    {
+      ok,
+      source: { id: source.id, label: sourceSpec?.label ?? source.id },
+      mode,
+      complete: reports.every((report) => report.complete),
+      targets: reports,
+      rowsWritten: reports.reduce((sum, report) => sum + report.rowsWritten, 0),
+      // Only meaningful when every target measured it; a partial sum would
+      // understate the copy without saying so.
+      rowsInserted: reports.every((report) => report.rowsInserted !== void 0) ? reports.reduce((sum, report) => sum + (report.rowsInserted ?? 0), 0) : void 0,
+      truncated: reports.some((report) => report.truncated),
+      /** One bar for the page; per-target detail stays in `targets[].progress`. */
+      progress: combineProgress(reports)
+    },
+    ok ? 200 : 502
+  );
+}
+async function probeWritability(node) {
+  const db = new MySqlDatabase({
+    host: node.host || "",
+    port: node.port || 3306,
+    user: node.user || "",
+    password: node.password || "",
+    database: node.database || "",
+    ssl: node.ssl !== false,
+    connectionLimit: 1,
+    connectTimeoutMs: 8e3
+  });
+  try {
+    const row = await db.prepare("SELECT @@GLOBAL.read_only AS ro").first();
+    const readOnly = Number(row?.ro ?? 0) === 1;
+    let superReadOnly = false;
+    try {
+      const extra = await db.prepare("SELECT @@GLOBAL.super_read_only AS sro").first();
+      superReadOnly = Number(extra?.sro ?? 0) === 1;
+    } catch {
+    }
+    return readOnly || superReadOnly ? "read-only" : "writable";
+  } catch (error) {
+    console.warn("[db-config] could not read the read_only flag:", error);
+    return "unknown";
+  } finally {
+    await closeQuietly(db, "probe");
+  }
+}
+async function handleAdminPromoteDbNode(request, env, actorUser) {
+  const body = await readJsonBody3(request);
+  const targetId = String(body.nodeId ?? "").trim();
+  const forced = wantsForce(request) || body.force === true;
+  if (!targetId) return errorResponse("\u7F3A\u5C11 nodeId\uFF1A\u8BF7\u6307\u5B9A\u8981\u63D0\u5347\u4E3A\u4E3B\u5E93\u7684\u8282\u70B9\u3002", 400);
+  if (resolveDbConfigFromEnv(env)) {
+    const standbys = resolveStandbysFromEnv(env);
+    const pickedIndex = standbys.findIndex((_, index) => `env-standby-${index + 1}` === targetId);
+    const picked = pickedIndex >= 0 ? standbys[pickedIndex] : null;
+    const onSameServer = picked ? picked.host === resolveDbConfigFromEnv(env)?.host : false;
+    return errorResponse(
+      "\u4E3B\u5E93\u7531\u73AF\u5883\u53D8\u91CF\u51B3\u5B9A\uFF0C\u9875\u9762\u4E0A\u7684\u5207\u6362\u4E0D\u4F1A\u751F\u6548\u3002" + (picked ? `\u8981\u628A\u5199\u5165\u5207\u5230\u300C${picked.database}\u300D\uFF1A\u628A DB_NAME \u6539\u6210\u5B83\uFF0C\u5E76\u628A\u5B83\u4ECE DB_STANDBY_NODES \u91CC\u5220\u6389` + (onSameServer ? "\uFF1B\u540C\u4E00\u53F0\u670D\u52A1\u5668\u4E0A DB_HOST / DB_PORT \u4E0D\u7528\u52A8" : "\uFF1B\u5B83\u539F\u6765\u5728\u53E6\u4E00\u53F0\u670D\u52A1\u5668\uFF0C\u6240\u4EE5 DB_HOST / DB_PORT / DB_USER / DB_PASSWORD \u4E5F\u8981\u6539\u6210\u5B83\u7684") + "\uFF0C\u91CD\u542F\u5373\u53EF\u3002" : "\u8981\u6362\u4E3B\u5E93\uFF0C\u8BF7\u6539 DB_HOST / DB_NAME \u540E\u91CD\u542F\uFF1B\u60F3\u5148\u6709\u51E0\u4E2A\u53EF\u540C\u6B65\u7684\u526F\u5E93\uFF0C\u52A0 DB_STANDBY_NODES=\u5E93\u540D1,\u5E93\u540D2\u3002"),
+      409
+    );
+  }
+  const stored = await loadRuntimeConfig(env);
+  if (!stored) {
+    return errorResponse("\u5F53\u524D\u6CA1\u6709\u53EF\u7F16\u8F91\u7684\u8FD0\u884C\u65F6\u914D\u7F6E\uFF08\u6570\u636E\u5E93\u7531 D1 \u6216\u73AF\u5883\u53D8\u91CF\u63D0\u4F9B\uFF09\uFF0C\u65E0\u9700\u5207\u6362\u3002", 400);
+  }
+  const target = stored.nodes.find((node) => node.id === targetId);
+  if (!target) return errorResponse(`\u672A\u77E5\u7684\u8282\u70B9\uFF1A${targetId}`, 404);
+  if (!target.enabled) {
+    return errorResponse(`\u8282\u70B9\u300C${target.label}\u300D\u5DF2\u505C\u7528\uFF0C\u542F\u7528\u540E\u624D\u80FD\u63A5\u7BA1\u5199\u5165\u3002`, 409);
+  }
+  if (target.role === "primary") {
+    return errorResponse(`\u8282\u70B9\u300C${target.label}\u300D\u5DF2\u7ECF\u662F\u4E3B\u5E93\u3002`, 400);
+  }
+  const currentPrimary = stored.nodes.find((node) => node.role === "primary" && node.enabled) ?? null;
+  const probe = await testMySqlConnection(target, env);
+  if (!probe.ok) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: `\u8282\u70B9\u300C${target.label}\u300D\u8FDE\u63A5\u5931\u8D25\uFF08${probe.error ?? "unknown error"}\uFF09\uFF0C\u4E0D\u80FD\u5207\u6362\u3002`,
+        errorKind: probe.errorKind ?? "connection"
+      },
+      502
+    );
+  }
+  const writability = await probeWritability(target);
+  if (writability === "read-only" && !forced) {
+    return jsonResponse(
+      {
+        ok: false,
+        blocked: true,
+        error: `\u8282\u70B9\u300C${target.label}\u300D\u76EE\u524D\u662F\u53EA\u8BFB\u526F\u672C\uFF08@@read_only=1\uFF09\uFF1A\u73B0\u5728\u5207\u8FC7\u53BB\uFF0C\u6240\u6709\u5199\u5165\u90FD\u4F1A\u5931\u8D25\u3002\u8BF7\u5148\u5728\u6570\u636E\u5E93\u4FA7\u628A\u5B83\u63D0\u5347\u4E3A\u4E3B\u5E93\uFF08\u505C\u6B62\u590D\u5236\u5E76\u5F00\u653E\u5199\u5165\uFF09\uFF0C\u518D\u56DE\u6765\u6267\u884C\u5207\u6362\u3002\u786E\u8BA4\u5B83\u5176\u5B9E\u53EF\u5199\u65F6\uFF0C\u53EF\u9009\u62E9\u300C\u5F3A\u5236\u5207\u6362\u300D\u3002`
+      },
+      409
+    );
+  }
+  const notes = [];
+  let lagAtPromote = 0;
+  let watermarks = null;
+  if (stored.policy.syncMode === "write-through") {
+    const states = await readSyncStates(env);
+    const state2 = states[target.id];
+    const sameDatabase = !state2?.fingerprint || state2.fingerprint === nodeFingerprint(target);
+    if (state2?.complete !== true || !sameDatabase) notes.push("\u8BE5\u526F\u5E93\u6CA1\u6709\u5B8C\u6210\u8FC7\u4E00\u6B21\u6570\u636E\u540C\u6B65");
+    try {
+      const db2 = await getDatabase(env);
+      if (isMySqlClusterDatabase(db2)) {
+        watermarks = db2.writeWatermarks();
+        const applied = watermarks.nodes.find((node) => node.id === target.id)?.appliedSeq ?? 0;
+        lagAtPromote = Math.max(0, watermarks.writeSeq - applied);
+        if (lagAtPromote > 0) notes.push(`\u843D\u540E ${lagAtPromote} \u6761\u5199\u5165`);
+        if (db2.nodeHealth().find((node) => node.id === target.id)?.needsFullSync) {
+          notes.push("\u8865\u5199\u65E5\u5FD7\u5DF2\u4E0D\u8986\u76D6\u7F3A\u53E3");
+        }
+      }
+    } catch (error) {
+      console.warn("[db-config] could not read write watermarks during promote:", error);
+      notes.push("\u65E0\u6CD5\u8BFB\u53D6\u5F53\u524D\u5199\u5165\u6C34\u4F4D");
+    }
+    if (notes.length > 0 && !forced) {
+      return jsonResponse(
+        {
+          ok: false,
+          blocked: true,
+          reasons: notes,
+          error: `\u8282\u70B9\u300C${target.label}\u300D\u8FD8\u4E0D\u80FD\u65E0\u635F\u63A5\u7BA1\uFF1A${notes.join("\uFF1B")}\u3002\u8BF7\u5148\u4FDD\u5B58\u914D\u7F6E\u5E76\u70B9\u300C\u540C\u6B65\u6570\u636E\u5230\u526F\u5E93\u300D\u8865\u9F50\uFF0C\u518D\u5207\u6362\u3002\u786E\u77E5\u8FD9\u90E8\u5206\u6570\u636E\u53EF\u4EE5\u653E\u5F03\u65F6\uFF0C\u53EF\u9009\u62E9\u300C\u5F3A\u5236\u5207\u6362\u300D\u3002`
+        },
+        409
+      );
+    }
+  }
+  const promoted = { ...target, role: "primary", priority: 1 };
+  const rest = stored.nodes.filter((node) => node.id !== target.id).sort((a, b) => (a.role === "primary" ? -1 : a.priority) - (b.role === "primary" ? -1 : b.priority)).map((node, index) => ({
+    ...node,
+    role: node.role === "primary" ? "replica" : node.role,
+    priority: index + 2
+  }));
+  const nextCluster = {
+    version: 2,
+    mode: "mysql",
+    nodes: [promoted, ...rest],
+    policy: stored.policy
+  };
+  const saved = await saveRuntimeConfig(env, nextCluster);
+  if (!saved) {
+    return errorResponse("\u5207\u6362\u68C0\u67E5\u5DF2\u901A\u8FC7\uFF0C\u4F46\u914D\u7F6E\u5199\u5165\u5931\u8D25\uFF08\u914D\u7F6E\u5B58\u50A8\u4E0D\u53EF\u7528\uFF1F\uFF09\u3002\u5F53\u524D\u4E3B\u5E93\u672A\u6539\u53D8\u3002", 500);
+  }
+  const demotedSeq = currentPrimary ? watermarks?.nodes.find((node) => node.id === currentPrimary.id)?.appliedSeq ?? null : null;
+  const demotedLevel = currentPrimary !== null && watermarks !== null && demotedSeq !== null && demotedSeq >= watermarks.writeSeq;
+  if (currentPrimary && demotedLevel) {
+    await saveNodeSyncState(env, currentPrimary.id, {
+      at: Date.now(),
+      complete: true,
+      truncated: false,
+      rowsWritten: 0,
+      tables: 0,
+      sourceId: target.id,
+      fingerprint: nodeFingerprint(currentPrimary)
+    });
+  }
+  await resetDatabaseCache();
+  resetDbLifecycle();
+  let db;
+  try {
+    db = await getDatabase(env);
+  } catch (error) {
+    return jsonResponse(
+      {
+        ok: false,
+        error: `\u4E3B\u5E93\u5DF2\u5207\u6362\u4E3A\u300C${target.label}\u300D\uFF0C\u4F46\u91CD\u5EFA\u8FDE\u63A5\u5931\u8D25\uFF1A${error instanceof Error ? error.message : String(error)}\u3002\u8BF7\u5237\u65B0\u672C\u9875\u786E\u8BA4\u8282\u70B9\u72B6\u6001\u3002`
+      },
+      502
+    );
+  }
+  env.DB = db;
+  let schemaReady = false;
+  let schemaError;
+  try {
+    await new StorageService(db).initializeDatabase();
+    schemaReady = true;
+  } catch (initError) {
+    schemaError = initError instanceof Error ? initError.message : String(initError);
+    console.error("[db-config] schema init on the promoted node failed:", initError);
+  }
+  if (isMySqlClusterDatabase(db)) {
+    db.markNodeSynced(target.id);
+  }
+  await auditDbConfigChange(env, actorUser, "admin.db_config.promoted", nextCluster);
+  const warnings = [];
+  if (notes.length > 0) {
+    warnings.push(
+      `\u5DF2\u5F3A\u5236\u5207\u6362\uFF0C\u4F46\u65B0\u4E3B\u5E93\u7F3A\u5C11 ${notes.join("\u3001")}\uFF1A\u8FD9\u90E8\u5206\u6570\u636E\u53EA\u5B58\u5728\u4E8E\u539F\u4E3B\u5E93\u300C${currentPrimary?.label ?? "\u65E7\u4E3B\u5E93"}\u300D\u4E0A\u3002\u8BF7\u5C3D\u5FEB\u4EE5\u539F\u4E3B\u5E93\u4E3A\u6E90\u70B9\u300C\u540C\u6B65\u6570\u636E\u5230\u526F\u5E93\u300D\uFF0C\u628A\u5B83\u4EEC\u8865\u5230\u65B0\u4E3B\u5E93\u3002`
+    );
+  }
+  if (writability === "read-only") {
+    warnings.push(`\u300C${target.label}\u300D\u4ECD\u7136\u62A5\u544A\u4E3A\u53EA\u8BFB\uFF08@@read_only=1\uFF09\uFF0C\u5199\u5165\u53EF\u80FD\u7EE7\u7EED\u5931\u8D25\uFF0C\u8BF7\u5728\u6570\u636E\u5E93\u4FA7\u786E\u8BA4\u5DF2\u5F00\u653E\u5199\u5165\u3002`);
+  }
+  if (stored.policy.syncMode === "native") {
+    warnings.push("\u5F53\u524D\u662F\u300C\u6570\u636E\u5E93\u81EA\u8EAB\u590D\u5236\u300D\uFF1A\u5E94\u7528\u53EA\u6539\u4E86\u5199\u5165\u8DEF\u7531\uFF0C\u4E3B\u4ECE\u5173\u7CFB\u7684\u63D0\u5347\u4ECD\u9700\u5728\u6570\u636E\u5E93\u4FA7\u5B8C\u6210\u3002");
+  }
+  if (schemaError) warnings.push(`\u914D\u7F6E\u5DF2\u5207\u6362\uFF0C\u4F46\u5EFA\u8868\u5931\u8D25\uFF1A${schemaError}`);
+  const result = {
+    ok: true,
+    promoted: { id: target.id, label: target.label },
+    demoted: currentPrimary ? { id: currentPrimary.id, label: currentPrimary.label } : null,
+    syncMode: stored.policy.syncMode,
+    lagAtPromote,
+    forced: forced && (notes.length > 0 || writability === "read-only"),
+    schemaReady,
+    warning: warnings.length > 0 ? warnings.join(" ") : void 0
+  };
+  return jsonResponse(result);
 }
 async function handleAdminClearDbConfig(request, env, actorUser) {
   if (clearingWouldLeaveNoDatabase(env) && !wantsForce(request)) {
@@ -36467,12 +39118,14 @@ async function handleAdminClearDbConfig(request, env, actorUser) {
   await clearRuntimeConfig(env);
   await resetDatabaseCache();
   resetDbLifecycle();
+  await clearSyncStates(env);
   await auditDbConfigChange(env, actorUser, "admin.db_config.cleared", null);
   return jsonResponse({ ok: true, mode: "d1" });
 }
-async function auditDbConfigChange(env, actorUser, action, config) {
+async function auditDbConfigChange(env, actorUser, action, cluster) {
   if (!env.DB) return;
-  const target = config ? `${config.host}:${config.port ?? 3306}/${config.database ?? ""}` : "d1";
+  const primary = cluster?.nodes.find((node) => node.role === "primary" && node.enabled);
+  const target = primary ? `${primary.host}:${primary.port}/${primary.database}${cluster.nodes.length > 1 ? ` (+${cluster.nodes.length - 1})` : ""}` : "d1";
   try {
     await writeAuditEvent(new StorageService(env.DB), {
       actorUserId: actorUser.id,
@@ -36481,7 +39134,13 @@ async function auditDbConfigChange(env, actorUser, action, config) {
       level: "security",
       targetType: "database",
       targetId: target,
-      metadata: { destinationName: target, destinationType: config ? "mysql" : "d1", status: "ok" }
+      metadata: {
+        destinationName: target,
+        destinationType: cluster ? "mysql" : "d1",
+        status: "ok",
+        nodeCount: cluster?.nodes.length ?? 0,
+        syncMode: cluster?.policy.syncMode
+      }
     });
   } catch (error) {
     console.error("[db-config] audit write failed:", error);
@@ -36490,60 +39149,66 @@ async function auditDbConfigChange(env, actorUser, action, config) {
 
 // src/router-admin.ts
 init_response();
-function isKnownAdminPath(path2) {
-  return path2 === "/api/admin/users" || path2 === "/api/admin/logs" || path2 === "/api/admin/logs/settings" || path2 === "/api/admin/invites" || path2 === "/api/admin/db-config" || path2 === "/api/admin/db-config/test" || path2.startsWith("/api/admin/backup") || /^\/api\/admin\/invites\/[^/]+$/i.test(path2) || /^\/api\/admin\/users\/[a-f0-9-]+(?:\/status)?$/i.test(path2);
+function isKnownAdminPath(path4) {
+  return path4 === "/api/admin/users" || path4 === "/api/admin/logs" || path4 === "/api/admin/logs/settings" || path4 === "/api/admin/invites" || path4 === "/api/admin/db-config" || path4 === "/api/admin/db-config/test" || path4 === "/api/admin/db-config/sync" || path4 === "/api/admin/db-config/promote" || path4.startsWith("/api/admin/backup") || /^\/api\/admin\/invites\/[^/]+$/i.test(path4) || /^\/api\/admin\/users\/[a-f0-9-]+(?:\/status)?$/i.test(path4);
 }
 function isActiveAdmin(user) {
   return user.role === "admin" && user.status === "active";
 }
-async function handleAdminRoute(request, env, actorUser, path2, method) {
-  if (!isKnownAdminPath(path2)) {
+async function handleAdminRoute(request, env, actorUser, path4, method) {
+  if (!isKnownAdminPath(path4)) {
     return null;
   }
   if (!isActiveAdmin(actorUser)) {
     return errorResponse("Forbidden", 403);
   }
-  if (path2 === "/api/admin/users" && method === "GET") {
+  if (path4 === "/api/admin/users" && method === "GET") {
     return handleAdminListUsers(request, env, actorUser);
   }
-  if (path2 === "/api/admin/logs" && method === "GET") {
+  if (path4 === "/api/admin/logs" && method === "GET") {
     return handleAdminListAuditLogs(request, env, actorUser);
   }
-  if (path2 === "/api/admin/logs" && method === "DELETE") {
+  if (path4 === "/api/admin/logs" && method === "DELETE") {
     return handleAdminClearAuditLogs(request, env, actorUser);
   }
-  if (path2 === "/api/admin/logs/settings") {
+  if (path4 === "/api/admin/logs/settings") {
     if (method === "GET") return handleAdminGetAuditLogSettings(request, env, actorUser);
     if (method === "PUT" || method === "POST") return handleAdminUpdateAuditLogSettings(request, env, actorUser);
     return null;
   }
-  if (path2 === "/api/admin/db-config") {
+  if (path4 === "/api/admin/db-config") {
     if (method === "GET") return handleAdminGetDbConfig(request, env, actorUser);
     if (method === "POST" || method === "PUT") return handleAdminSaveDbConfig(request, env, actorUser);
     if (method === "DELETE") return handleAdminClearDbConfig(request, env, actorUser);
     return null;
   }
-  if (path2 === "/api/admin/db-config/test" && method === "POST") {
+  if (path4 === "/api/admin/db-config/test" && method === "POST") {
     return handleAdminTestDbConfig(request, env, actorUser);
   }
-  const adminBackupResponse = await handleAdminBackupRoute(request, env, actorUser, path2, method);
+  if (path4 === "/api/admin/db-config/sync" && method === "POST") {
+    return handleAdminSyncDbCluster(request, env, actorUser);
+  }
+  if (path4 === "/api/admin/db-config/promote" && method === "POST") {
+    return handleAdminPromoteDbNode(request, env, actorUser);
+  }
+  const adminBackupResponse = await handleAdminBackupRoute(request, env, actorUser, path4, method);
   if (adminBackupResponse) return adminBackupResponse;
-  if (path2 === "/api/admin/invites") {
+  if (path4 === "/api/admin/invites") {
     if (method === "GET") return handleAdminListInvites(request, env, actorUser);
     if (method === "POST") return handleAdminCreateInvite(request, env, actorUser);
     if (method === "DELETE") return handleAdminDeleteAllInvites(request, env, actorUser);
     return null;
   }
-  const adminInviteMatch = path2.match(/^\/api\/admin\/invites\/([^/]+)$/i);
+  const adminInviteMatch = path4.match(/^\/api\/admin\/invites\/([^/]+)$/i);
   if (adminInviteMatch && method === "DELETE") {
     const inviteCode = decodeURIComponent(adminInviteMatch[1]);
     return handleAdminDeleteInvite(request, env, actorUser, inviteCode);
   }
-  const adminUserStatusMatch = path2.match(/^\/api\/admin\/users\/([a-f0-9-]+)\/status$/i);
+  const adminUserStatusMatch = path4.match(/^\/api\/admin\/users\/([a-f0-9-]+)\/status$/i);
   if (adminUserStatusMatch && (method === "PUT" || method === "POST")) {
     return handleAdminSetUserStatus(request, env, actorUser, adminUserStatusMatch[1]);
   }
-  const adminUserDeleteMatch = path2.match(/^\/api\/admin\/users\/([a-f0-9-]+)$/i);
+  const adminUserDeleteMatch = path4.match(/^\/api\/admin\/users\/([a-f0-9-]+)$/i);
   if (adminUserDeleteMatch && method === "DELETE") {
     return handleAdminDeleteUser(request, env, actorUser, adminUserDeleteMatch[1]);
   }
@@ -45096,7 +47761,7 @@ async function handleUpdateAuthRequest(request, env, userId, id) {
 }
 
 // src/router-authenticated.ts
-async function handleAuthenticatedRoute(request, env, userId, currentUser, path2, method) {
+async function handleAuthenticatedRoute(request, env, userId, currentUser, path4, method) {
   if (method === "POST" || method === "PUT" || method === "DELETE") {
     const blockedAccountPaths = /* @__PURE__ */ new Set([
       "/api/accounts/set-password",
@@ -45104,11 +47769,11 @@ async function handleAuthenticatedRoute(request, env, userId, currentUser, path2
       "/api/accounts/delete-account",
       "/api/accounts/delete-vault"
     ]);
-    if (blockedAccountPaths.has(path2)) {
+    if (blockedAccountPaths.has(path4)) {
       return errorResponse("Not implemented", 501);
     }
   }
-  if ((path2 === "/api/accounts/kdf" || path2 === "/accounts/kdf") && (method === "POST" || method === "PUT")) {
+  if ((path4 === "/api/accounts/kdf" || path4 === "/accounts/kdf") && (method === "POST" || method === "PUT")) {
     return unsupportedResponse("KDF changes are not supported by this server.");
   }
   const mailBackedAccountPaths = /* @__PURE__ */ new Set([
@@ -45123,7 +47788,7 @@ async function handleAuthenticatedRoute(request, env, userId, currentUser, path2
     "/api/accounts/verify-otp",
     "/accounts/verify-otp"
   ]);
-  if (mailBackedAccountPaths.has(path2) && (method === "POST" || method === "PUT")) {
+  if (mailBackedAccountPaths.has(path4) && (method === "POST" || method === "PUT")) {
     return unsupportedResponse("Email delivery is not supported by this server.");
   }
   const emailTwoFactorPaths = /* @__PURE__ */ new Set([
@@ -45136,142 +47801,142 @@ async function handleAuthenticatedRoute(request, env, userId, currentUser, path2
     "/api/two-factor/email",
     "/two-factor/email"
   ]);
-  if (emailTwoFactorPaths.has(path2) && (method === "POST" || method === "PUT" || method === "DELETE")) {
+  if (emailTwoFactorPaths.has(path4) && (method === "POST" || method === "PUT" || method === "DELETE")) {
     return unsupportedResponse("Email two-step login is not supported by this server.");
   }
-  if (path2 === "/api/accounts/profile") {
+  if (path4 === "/api/accounts/profile") {
     if (method === "GET") return handleGetProfile(request, env, userId);
     if (method === "PUT") return handleUpdateProfile(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if ((path2 === "/api/accounts/password" || path2 === "/api/accounts/change-password") && (method === "POST" || method === "PUT")) {
+  if ((path4 === "/api/accounts/password" || path4 === "/api/accounts/change-password") && (method === "POST" || method === "PUT")) {
     return handleChangePassword(request, env, userId);
   }
-  if (path2 === "/api/accounts/keys") {
+  if (path4 === "/api/accounts/keys") {
     if (method === "GET") return handleGetKeys(request, env, userId);
     if (method === "POST") return handleSetKeys(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/accounts/totp") {
+  if (path4 === "/api/accounts/totp") {
     if (method === "GET") return handleGetTotpStatus(request, env, userId);
     if (method === "PUT" || method === "POST") return handleSetTotpStatus(request, env, userId);
     return null;
   }
-  if ((path2 === "/api/accounts/totp/recovery-code" || path2 === "/api/two-factor/get-recover") && method === "POST") {
+  if ((path4 === "/api/accounts/totp/recovery-code" || path4 === "/api/two-factor/get-recover") && method === "POST") {
     return handleGetTotpRecoveryCode(request, env, userId);
   }
-  if (path2 === "/api/two-factor") {
+  if (path4 === "/api/two-factor") {
     if (method === "GET") return handleGetTwoFactorProviders(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/two-factor/get-authenticator" && method === "POST") {
+  if (path4 === "/api/two-factor/get-authenticator" && method === "POST") {
     return handleGetTwoFactorAuthenticator(request, env, userId);
   }
-  if ((path2 === "/api/two-factor/get-yubikey" || path2 === "/api/two-factor/get-yubi-key") && method === "POST") {
+  if ((path4 === "/api/two-factor/get-yubikey" || path4 === "/api/two-factor/get-yubi-key") && method === "POST") {
     return handleGetTwoFactorYubiKey(request, env, userId);
   }
-  if (path2 === "/api/two-factor/get-device-verification-settings" && method === "POST") {
+  if (path4 === "/api/two-factor/get-device-verification-settings" && method === "POST") {
     return handleGetDeviceVerificationSettings(request, env, userId);
   }
-  if (path2 === "/api/two-factor/device-verification-settings") {
+  if (path4 === "/api/two-factor/device-verification-settings") {
     if (method === "PUT" || method === "POST") return handlePutDeviceVerificationSettings(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/two-factor/get-webauthn" && method === "POST") {
+  if (path4 === "/api/two-factor/get-webauthn" && method === "POST") {
     return handleGetTwoFactorWebAuthn(request, env, userId, currentUser);
   }
-  if (path2 === "/api/two-factor/get-webauthn-challenge" && method === "POST") {
+  if (path4 === "/api/two-factor/get-webauthn-challenge" && method === "POST") {
     return handleGetTwoFactorWebAuthnChallenge(request, env, userId, currentUser);
   }
-  if (path2 === "/api/two-factor/authenticator") {
+  if (path4 === "/api/two-factor/authenticator") {
     if (method === "PUT" || method === "POST") return handlePutTwoFactorAuthenticator(request, env, userId);
     if (method === "DELETE") return handleDisableTwoFactorProvider(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/two-factor/yubikey" || path2 === "/api/two-factor/yubi-key") {
+  if (path4 === "/api/two-factor/yubikey" || path4 === "/api/two-factor/yubi-key") {
     if (method === "PUT" || method === "POST") return handlePutTwoFactorYubiKey(request, env, userId);
     if (method === "DELETE") return handleDisableTwoFactorProvider(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/two-factor/webauthn") {
+  if (path4 === "/api/two-factor/webauthn") {
     if (method === "PUT" || method === "POST") return handlePutTwoFactorWebAuthn(request, env, userId, currentUser);
     if (method === "DELETE") return handleDeleteTwoFactorWebAuthn(request, env, userId, currentUser);
     return errorResponse("Method not allowed", 405);
   }
-  if ((path2 === "/api/two-factor/yubikey/config" || path2 === "/api/two-factor/yubi-key/config") && (method === "PUT" || method === "POST")) {
+  if ((path4 === "/api/two-factor/yubikey/config" || path4 === "/api/two-factor/yubi-key/config") && (method === "PUT" || method === "POST")) {
     return handlePutTwoFactorYubiKeyConfig(request, env, userId);
   }
-  if ((path2 === "/api/two-factor/yubikey/bootstrap" || path2 === "/api/two-factor/yubi-key/bootstrap") && method === "POST") {
+  if ((path4 === "/api/two-factor/yubikey/bootstrap" || path4 === "/api/two-factor/yubi-key/bootstrap") && method === "POST") {
     return handleBootstrapTwoFactorYubiKeyConfig(request, env, userId);
   }
-  if (path2 === "/api/two-factor/disable" && (method === "PUT" || method === "POST")) {
+  if (path4 === "/api/two-factor/disable" && (method === "PUT" || method === "POST")) {
     return handleDisableTwoFactorProvider(request, env, userId);
   }
-  if (path2 === "/api/accounts/revision-date" && method === "GET") {
+  if (path4 === "/api/accounts/revision-date" && method === "GET") {
     return handleGetRevisionDate(request, env, userId);
   }
-  if (path2 === "/api/accounts/verify-password" && method === "POST") {
+  if (path4 === "/api/accounts/verify-password" && method === "POST") {
     return handleVerifyPassword(request, env, userId);
   }
-  if (path2 === "/api/accounts/verify-devices" && (method === "PUT" || method === "POST")) {
+  if (path4 === "/api/accounts/verify-devices" && (method === "PUT" || method === "POST")) {
     return handleSetVerifyDevices(request, env, userId);
   }
-  if ((path2 === "/api/accounts/api-key" || path2 === "/api/accounts/api_key") && method === "POST") {
+  if ((path4 === "/api/accounts/api-key" || path4 === "/api/accounts/api_key") && method === "POST") {
     return handleGetApiKey(request, env, userId);
   }
-  if ((path2 === "/api/accounts/rotate-api-key" || path2 === "/api/accounts/rotate_api_key") && method === "POST") {
+  if ((path4 === "/api/accounts/rotate-api-key" || path4 === "/api/accounts/rotate_api_key") && method === "POST") {
     return handleRotateApiKey(request, env, userId);
   }
-  if (path2 === "/api/webauthn" || path2 === "/webauthn") {
+  if (path4 === "/api/webauthn" || path4 === "/webauthn") {
     if (method === "GET") return handleGetAccountPasskeyCredentials(request, env, userId);
     if (method === "POST") return handleCreateAccountPasskeyCredential(request, env, userId);
     if (method === "PUT") return handleUpdateAccountPasskeyEncryption(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if ((path2 === "/api/webauthn/attestation-options" || path2 === "/webauthn/attestation-options") && method === "POST") {
+  if ((path4 === "/api/webauthn/attestation-options" || path4 === "/webauthn/attestation-options") && method === "POST") {
     return handleGetAccountPasskeyAttestationOptions(request, env, userId, currentUser);
   }
-  if ((path2 === "/api/webauthn/assertion-options" || path2 === "/webauthn/assertion-options") && method === "POST") {
+  if ((path4 === "/api/webauthn/assertion-options" || path4 === "/webauthn/assertion-options") && method === "POST") {
     return handleGetAccountPasskeyUpdateAssertionOptions(request, env, userId, currentUser);
   }
-  const accountPasskeyDeleteMatch = path2.match(/^\/api\/webauthn\/([^/]+)\/delete$/i) || path2.match(/^\/webauthn\/([^/]+)\/delete$/i);
+  const accountPasskeyDeleteMatch = path4.match(/^\/api\/webauthn\/([^/]+)\/delete$/i) || path4.match(/^\/webauthn\/([^/]+)\/delete$/i);
   if (accountPasskeyDeleteMatch && method === "POST") {
     return handleDeleteAccountPasskeyCredential(request, env, userId, accountPasskeyDeleteMatch[1], currentUser);
   }
-  if (path2 === "/api/sync" && method === "GET") {
+  if (path4 === "/api/sync" && method === "GET") {
     return handleSync(request, env, userId);
   }
-  if (path2.startsWith("/notifications/")) {
+  if (path4.startsWith("/notifications/")) {
     return errorResponse("Not found", 404);
   }
-  if (path2 === "/api/ciphers" || path2 === "/api/ciphers/create") {
+  if (path4 === "/api/ciphers" || path4 === "/api/ciphers/create") {
     if (method === "GET") return handleGetCiphers(request, env, userId);
     if (method === "POST") return handleCreateCipher(request, env, userId);
-    if (path2 === "/api/ciphers" && method === "DELETE") return handleBulkPermanentDeleteCiphers(request, env, userId);
+    if (path4 === "/api/ciphers" && method === "DELETE") return handleBulkPermanentDeleteCiphers(request, env, userId);
     return null;
   }
-  if (path2 === "/api/ciphers/import" && method === "POST") {
+  if (path4 === "/api/ciphers/import" && method === "POST") {
     return handleCiphersImport(request, env, userId);
   }
-  if (path2 === "/api/ciphers/delete" && (method === "PUT" || method === "POST")) {
+  if (path4 === "/api/ciphers/delete" && (method === "PUT" || method === "POST")) {
     return handleBulkDeleteCiphers(request, env, userId);
   }
-  if (path2 === "/api/ciphers/delete-permanent" && method === "POST") {
+  if (path4 === "/api/ciphers/delete-permanent" && method === "POST") {
     return handleBulkPermanentDeleteCiphers(request, env, userId);
   }
-  if (path2 === "/api/ciphers/restore" && (method === "PUT" || method === "POST")) {
+  if (path4 === "/api/ciphers/restore" && (method === "PUT" || method === "POST")) {
     return handleBulkRestoreCiphers(request, env, userId);
   }
-  if (path2 === "/api/ciphers/archive" && (method === "PUT" || method === "POST")) {
+  if (path4 === "/api/ciphers/archive" && (method === "PUT" || method === "POST")) {
     return handleBulkArchiveCiphers(request, env, userId);
   }
-  if (path2 === "/api/ciphers/unarchive" && (method === "PUT" || method === "POST")) {
+  if (path4 === "/api/ciphers/unarchive" && (method === "PUT" || method === "POST")) {
     return handleBulkUnarchiveCiphers(request, env, userId);
   }
-  if (path2 === "/api/ciphers/move" && (method === "POST" || method === "PUT")) {
+  if (path4 === "/api/ciphers/move" && (method === "POST" || method === "PUT")) {
     return handleBulkMoveCiphers(request, env, userId);
   }
-  const cipherMatch = path2.match(/^\/api\/ciphers\/([a-f0-9-]+)(\/.*)?$/i);
+  const cipherMatch = path4.match(/^\/api\/ciphers\/([a-f0-9-]+)(\/.*)?$/i);
   if (cipherMatch) {
     const cipherId = cipherMatch[1];
     const subPath = cipherMatch[2] || "";
@@ -45306,63 +47971,63 @@ async function handleAuthenticatedRoute(request, env, userId, currentUser, path2
       return handleDeleteAttachment(request, env, userId, cipherId, attachmentDeleteMatch[1]);
     }
   }
-  if (path2 === "/api/folders") {
+  if (path4 === "/api/folders") {
     if (method === "GET") return handleGetFolders(request, env, userId);
     if (method === "POST") return handleCreateFolder(request, env, userId);
     return null;
   }
-  if (path2 === "/api/folders/delete" && method === "POST") {
+  if (path4 === "/api/folders/delete" && method === "POST") {
     return handleBulkDeleteFolders(request, env, userId);
   }
-  const folderMatch = path2.match(/^\/api\/folders\/([a-f0-9-]+)$/i);
+  const folderMatch = path4.match(/^\/api\/folders\/([a-f0-9-]+)$/i);
   if (folderMatch) {
     const folderId = folderMatch[1];
     if (method === "GET") return handleGetFolder(request, env, userId, folderId);
     if (method === "PUT") return handleUpdateFolder(request, env, userId, folderId);
     if (method === "DELETE") return handleDeleteFolder(request, env, userId, folderId);
   }
-  if (path2 === "/api/auth-requests" || path2 === "/api/auth-requests/" || path2 === "/auth-requests" || path2 === "/auth-requests/") {
+  if (path4 === "/api/auth-requests" || path4 === "/api/auth-requests/" || path4 === "/auth-requests" || path4 === "/auth-requests/") {
     if (method === "GET") return handleListAuthRequests(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/auth-requests/pending" || path2 === "/auth-requests/pending") {
+  if (path4 === "/api/auth-requests/pending" || path4 === "/auth-requests/pending") {
     if (method === "GET") return handleListPendingAuthRequests(request, env, userId);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/auth-requests/admin-request" || path2 === "/auth-requests/admin-request") {
+  if (path4 === "/api/auth-requests/admin-request" || path4 === "/auth-requests/admin-request") {
     if (method === "POST") return handleCreateAdminAuthRequest(request, env, userId, currentUser.email);
     return errorResponse("Method not allowed", 405);
   }
-  const authRequestMatch = path2.match(/^\/(?:api\/)?auth-requests\/([a-f0-9-]+)$/i);
+  const authRequestMatch = path4.match(/^\/(?:api\/)?auth-requests\/([a-f0-9-]+)$/i);
   if (authRequestMatch) {
     if (method === "GET") return handleGetAuthRequest(request, env, userId, authRequestMatch[1]);
     if (method === "PUT") return handleUpdateAuthRequest(request, env, userId, authRequestMatch[1]);
     return errorResponse("Method not allowed", 405);
   }
-  if (path2 === "/api/collections" || path2.startsWith("/api/collections/")) {
+  if (path4 === "/api/collections" || path4.startsWith("/api/collections/")) {
     if (method === "GET") {
       return jsonResponse({ data: [], object: "list", continuationToken: null });
     }
     return null;
   }
-  if (path2 === "/api/organizations" || path2.startsWith("/api/organizations/")) {
+  if (path4 === "/api/organizations" || path4.startsWith("/api/organizations/")) {
     if (method === "GET") {
       return jsonResponse({ data: [], object: "list", continuationToken: null });
     }
     return null;
   }
-  if (path2 === "/api/sends") {
+  if (path4 === "/api/sends") {
     if (method === "GET") return handleGetSends(request, env, userId);
     if (method === "POST") return handleCreateSend(request, env, userId);
     return null;
   }
-  if (path2 === "/api/sends/file/v2" && method === "POST") {
+  if (path4 === "/api/sends/file/v2" && method === "POST") {
     return handleCreateFileSendV2(request, env, userId);
   }
-  if (path2 === "/api/sends/delete" && method === "POST") {
+  if (path4 === "/api/sends/delete" && method === "POST") {
     return handleBulkDeleteSends(request, env, userId);
   }
-  const sendMatch = path2.match(/^\/api\/sends\/([^/]+)(\/.*)?$/i);
+  const sendMatch = path4.match(/^\/api\/sends\/([^/]+)(\/.*)?$/i);
   if (sendMatch) {
     const sendId = sendMatch[1];
     const subPath = sendMatch[2] || "";
@@ -45384,20 +48049,20 @@ async function handleAuthenticatedRoute(request, env, userId, currentUser, path2
       if (method === "POST" || method === "PUT") return handleUploadSendFile(request, env, userId, sendId, fileId);
     }
   }
-  if (path2 === "/api/policies" || path2.startsWith("/api/policies/")) {
+  if (path4 === "/api/policies" || path4.startsWith("/api/policies/")) {
     if (method === "GET") {
       return jsonResponse({ data: [], object: "list", continuationToken: null });
     }
     return null;
   }
-  if (path2 === "/api/settings/domains" || path2 === "/settings/domains") {
+  if (path4 === "/api/settings/domains" || path4 === "/settings/domains") {
     if (method === "GET") return handleGetDomains(env, userId);
     if (method === "PUT" || method === "POST") return handleUpdateDomains(request, env, userId);
     return null;
   }
-  const authenticatedDeviceResponse = await handleAuthenticatedDeviceRoute(request, env, userId, path2, method);
+  const authenticatedDeviceResponse = await handleAuthenticatedDeviceRoute(request, env, userId, path4, method);
   if (authenticatedDeviceResponse) return authenticatedDeviceResponse;
-  const adminResponse = await handleAdminRoute(request, env, currentUser, path2, method);
+  const adminResponse = await handleAdminRoute(request, env, currentUser, path4, method);
   if (adminResponse) return adminResponse;
   return null;
 }
@@ -46226,8 +48891,24 @@ async function handleToken(request, env) {
       unofficialServer: true
     });
   } else if (grantType === "refresh_token") {
-    const refreshToken = String(body.refresh_token || "").trim() || (shouldUseWebSession(request) ? parseCookieValue(request, WEB_REFRESH_COOKIE) : null);
+    const webSession = shouldUseWebSession(request);
+    const cookieToken = webSession ? parseCookieValue(request, WEB_REFRESH_COOKIE) : null;
+    const refreshToken = String(body.refresh_token || "").trim() || cookieToken || "";
     if (!refreshToken) {
+      await safeWriteAuditEvent(env, {
+        action: "auth.refresh.failed.missing_token",
+        category: "auth",
+        level: "warn",
+        targetType: "refreshToken",
+        metadata: {
+          grantType,
+          reason: "missing_token",
+          webSession,
+          cookieHeader: String(request.headers.get("Cookie") || "").trim() ? "present" : "absent",
+          webCookie: cookieToken ? "present" : "absent",
+          ...auditRequestMetadata(request)
+        }
+      });
       return identityErrorResponse("Refresh token is required", "invalid_request", 400);
     }
     const refreshTokenHash = await sha256Hex3(refreshToken);
@@ -46242,12 +48923,12 @@ async function handleToken(request, env) {
       ) : null;
       const rejected = !sessionLimit.allowed ? sessionLimit : ipLimit && !ipLimit.allowed ? ipLimit : null;
       if (rejected) {
-        const retryAfter = Math.max(1, rejected.retryAfterSeconds || 1);
+        const retryAfter2 = Math.max(1, rejected.retryAfterSeconds || 1);
         return identityErrorResponse(
-          `Rate limit exceeded. Try again in ${retryAfter} seconds.`,
+          `Rate limit exceeded. Try again in ${retryAfter2} seconds.`,
           "temporarily_unavailable",
           429,
-          { "Retry-After": String(retryAfter) }
+          { "Retry-After": String(retryAfter2) }
         );
       }
     } catch (error) {
@@ -46303,6 +48984,9 @@ async function handleToken(request, env) {
         metadata: {
           grantType,
           reason: result.reason,
+          stage: result.stage,
+          tokenRows: result.tokenRows,
+          newestTokenAt: result.newestTokenAt,
           webSession: shouldUseWebSession(request),
           ...auditRequestMetadata(request)
         }
@@ -46822,8 +49506,8 @@ async function buildWebBootstrapResponse(env) {
     websiteIconsEnabled: isWebsiteIconProxyEnabled(env)
   };
 }
-async function handlePublicRoute(request, env, path2, method, enforcePublicRateLimit) {
-  if (path2 === "/.well-known/appspecific/com.chrome.devtools.json" && method === "GET") {
+async function handlePublicRoute(request, env, path4, method, enforcePublicRateLimit) {
+  if (path4 === "/.well-known/appspecific/com.chrome.devtools.json" && method === "GET") {
     return new Response("{}", {
       status: 200,
       headers: {
@@ -46832,117 +49516,117 @@ async function handlePublicRoute(request, env, path2, method, enforcePublicRateL
       }
     });
   }
-  if ((path2 === "/api/web-bootstrap" || path2 === "/web-bootstrap") && method === "GET") {
+  if ((path4 === "/api/web-bootstrap" || path4 === "/web-bootstrap") && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-read", LIMITS.rateLimit.publicReadRequestsPerMinute);
     if (blocked) return blocked;
     return jsonResponse(await buildWebBootstrapResponse(env));
   }
-  if (path2 === "/fill-assist/manifest.json" && method === "GET") {
+  if (path4 === "/fill-assist/manifest.json" && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-read", LIMITS.rateLimit.publicReadRequestsPerMinute);
     if (blocked) return blocked;
     return handleFillAssistManifest();
   }
-  if ((path2 === "/v1/assetlinks:check" || path2 === "/api/v1/assetlinks:check") && method === "GET") {
+  if ((path4 === "/v1/assetlinks:check" || path4 === "/api/v1/assetlinks:check") && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-read", LIMITS.rateLimit.publicReadRequestsPerMinute);
     if (blocked) return blocked;
     return handleDigitalAssetLinkCheck();
   }
-  const fillAssistFormsMatch = path2.match(/^\/fill-assist\/([^/]+)$/i);
+  const fillAssistFormsMatch = path4.match(/^\/fill-assist\/([^/]+)$/i);
   if (fillAssistFormsMatch && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-read", LIMITS.rateLimit.publicReadRequestsPerMinute);
     if (blocked) return blocked;
     return handleFillAssistForms(fillAssistFormsMatch[1]);
   }
-  const iconMatch = path2.match(/^\/icons\/([^/]+)\/icon\.png$/i);
+  const iconMatch = path4.match(/^\/icons\/([^/]+)\/icon\.png$/i);
   if (iconMatch && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-icon", LIMITS.rateLimit.publicIconRequestsPerMinute);
     if (blocked) return blocked;
     const fallbackMode = new URL(request.url).searchParams.get("fallback") === "404" ? "not-found" : "default";
     return handleWebsiteIcon(env, iconMatch[1], fallbackMode);
   }
-  const publicAttachmentMatch = path2.match(/^\/api\/attachments\/([a-f0-9-]+)\/([a-f0-9-]+)$/i);
+  const publicAttachmentMatch = path4.match(/^\/api\/attachments\/([a-f0-9-]+)\/([a-f0-9-]+)$/i);
   if (publicAttachmentMatch && method === "GET") {
     return handlePublicDownloadAttachment(request, env, publicAttachmentMatch[1], publicAttachmentMatch[2]);
   }
-  const publicAttachmentUploadMatch = path2.match(/^\/api\/ciphers\/([a-f0-9-]+)\/attachment\/([a-f0-9-]+)$/i);
+  const publicAttachmentUploadMatch = path4.match(/^\/api\/ciphers\/([a-f0-9-]+)\/attachment\/([a-f0-9-]+)$/i);
   if (publicAttachmentUploadMatch && (method === "POST" || method === "PUT") && new URL(request.url).searchParams.has("token")) {
     return handlePublicUploadAttachment(request, env, publicAttachmentUploadMatch[1], publicAttachmentUploadMatch[2]);
   }
-  const publicSendUploadMatch = path2.match(/^\/api\/sends\/([^/]+)\/file\/([^/]+)\/?$/i);
+  const publicSendUploadMatch = path4.match(/^\/api\/sends\/([^/]+)\/file\/([^/]+)\/?$/i);
   if (publicSendUploadMatch && (method === "POST" || method === "PUT") && new URL(request.url).searchParams.has("token")) {
     return handlePublicUploadSendFile(request, env, publicSendUploadMatch[1], publicSendUploadMatch[2]);
   }
-  const sendAccessMatch = path2.match(/^\/api\/sends\/access\/([^/]+)$/i);
+  const sendAccessMatch = path4.match(/^\/api\/sends\/access\/([^/]+)$/i);
   if (sendAccessMatch && method === "POST") {
     const blocked = await enforcePublicRateLimit();
     if (blocked) return blocked;
     return handleAccessSend(request, env, sendAccessMatch[1]);
   }
-  if (path2 === "/api/sends/access" && method === "POST") {
+  if (path4 === "/api/sends/access" && method === "POST") {
     const blocked = await enforcePublicRateLimit();
     if (blocked) return blocked;
     return handleAccessSendV2(request, env);
   }
-  const sendAccessFileV2Match = path2.match(/^\/api\/sends\/access\/file\/([^/]+)\/?$/i);
+  const sendAccessFileV2Match = path4.match(/^\/api\/sends\/access\/file\/([^/]+)\/?$/i);
   if (sendAccessFileV2Match && method === "POST") {
     const blocked = await enforcePublicRateLimit();
     if (blocked) return blocked;
     return handleAccessSendFileV2(request, env, sendAccessFileV2Match[1]);
   }
-  const sendAccessFileMatch = path2.match(/^\/api\/sends\/([^/]+)\/access\/file\/([^/]+)\/?$/i);
+  const sendAccessFileMatch = path4.match(/^\/api\/sends\/([^/]+)\/access\/file\/([^/]+)\/?$/i);
   if (sendAccessFileMatch && method === "POST") {
     const blocked = await enforcePublicRateLimit();
     if (blocked) return blocked;
     return handleAccessSendFile(request, env, sendAccessFileMatch[1], sendAccessFileMatch[2]);
   }
-  const sendDownloadMatch = path2.match(/^\/api\/sends\/([^/]+)\/([^/]+)\/?$/i);
+  const sendDownloadMatch = path4.match(/^\/api\/sends\/([^/]+)\/([^/]+)\/?$/i);
   if (sendDownloadMatch && method === "GET") {
     return handleDownloadSendFile(request, env, sendDownloadMatch[1], sendDownloadMatch[2]);
   }
-  if ((path2 === "/api/auth-requests" || path2 === "/api/auth-requests/" || path2 === "/auth-requests" || path2 === "/auth-requests/") && method === "POST") {
+  if ((path4 === "/api/auth-requests" || path4 === "/api/auth-requests/" || path4 === "/auth-requests" || path4 === "/auth-requests/") && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handleCreateAuthRequest(request, env);
   }
-  const authRequestResponseMatch = path2.match(/^\/(?:api\/)?auth-requests\/([a-f0-9-]+)\/response$/i);
+  const authRequestResponseMatch = path4.match(/^\/(?:api\/)?auth-requests\/([a-f0-9-]+)\/response$/i);
   if (authRequestResponseMatch && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handleGetAuthRequestResponse(request, env, authRequestResponseMatch[1]);
   }
-  if (path2 === "/identity/connect/token" && method === "POST") {
+  if (path4 === "/identity/connect/token" && method === "POST") {
     return handleToken(request, env);
   }
-  if (path2 === "/api/devices/knowndevice" && method === "GET") {
+  if (path4 === "/api/devices/knowndevice" && method === "GET") {
     const blocked = await enforcePublicRateLimit();
     if (blocked) return jsonResponse(false);
     return handleKnownDevice(request, env);
   }
-  const clearDeviceTokenMatch = path2.match(/^\/api\/devices\/identifier\/([^/]+)\/clear-token$/i);
+  const clearDeviceTokenMatch = path4.match(/^\/api\/devices\/identifier\/([^/]+)\/clear-token$/i);
   if (clearDeviceTokenMatch && (method === "PUT" || method === "POST")) {
     return new Response(null, { status: 200 });
   }
-  if ((path2 === "/identity/connect/revocation" || path2 === "/identity/connect/revoke") && method === "POST") {
+  if ((path4 === "/identity/connect/revocation" || path4 === "/identity/connect/revoke") && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handleRevocation(request, env);
   }
-  if (path2 === "/identity/accounts/prelogin" && method === "POST") {
+  if (path4 === "/identity/accounts/prelogin" && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handlePrelogin(request, env);
   }
-  if (path2 === "/identity/accounts/prelogin/password" && method === "POST") {
+  if (path4 === "/identity/accounts/prelogin/password" && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handlePrelogin(request, env);
   }
-  if (path2 === "/identity/accounts/webauthn/assertion-options" && method === "GET") {
+  if (path4 === "/identity/accounts/webauthn/assertion-options" && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handleGetAccountPasskeyAssertionOptions(request, env);
   }
-  if ((path2 === "/identity/accounts/recover-2fa" || path2 === "/api/accounts/recover-2fa") && method === "POST") {
+  if ((path4 === "/identity/accounts/recover-2fa" || path4 === "/api/accounts/recover-2fa") && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handleRecoverTwoFactor(request, env);
@@ -46964,12 +49648,12 @@ async function handlePublicRoute(request, env, path2, method, enforcePublicRateL
     "/api/two-factor/send-email-login",
     "/two-factor/send-email-login"
   ]);
-  if (publicMailBackedPaths.has(path2) && method === "POST") {
+  if (publicMailBackedPaths.has(path4) && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return unsupportedResponse("Email delivery is not supported by this server.");
   }
-  if (path2 === "/api/accounts/password-hint" && method === "POST") {
+  if (path4 === "/api/accounts/password-hint" && method === "POST") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     if (!isSameOriginWriteRequest(request)) {
@@ -46980,18 +49664,18 @@ async function handlePublicRoute(request, env, path2, method, enforcePublicRateL
     }
     return handleGetPasswordHint(request, env);
   }
-  if ((path2 === "/config" || path2 === "/api/config") && method === "GET") {
+  if ((path4 === "/config" || path4 === "/api/config") && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-read", LIMITS.rateLimit.publicReadRequestsPerMinute);
     if (blocked) return blocked;
     const origin = new URL(request.url).origin;
     return jsonResponse(buildConfigResponse(origin), 200, { "Cache-Control": "no-store" });
   }
-  if (path2 === "/api/version" && method === "GET") {
+  if (path4 === "/api/version" && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-read", LIMITS.rateLimit.publicReadRequestsPerMinute);
     if (blocked) return blocked;
     return jsonResponse(LIMITS.compatibility.bitwardenServerVersion);
   }
-  if (path2 === "/api/accounts/register" && method === "POST") {
+  if (path4 === "/api/accounts/register" && method === "POST") {
     const blocked = await enforcePublicRateLimit("register", LIMITS.rateLimit.registerRequestsPerMinute);
     if (blocked) return blocked;
     if (!isSameOriginWriteRequest(request)) {
@@ -47002,13 +49686,13 @@ async function handlePublicRoute(request, env, path2, method, enforcePublicRateL
     }
     return handleRegister(request, env);
   }
-  if (path2 === "/notifications/hub/negotiate" && method === "POST") {
+  if (path4 === "/notifications/hub/negotiate" && method === "POST") {
     return handleNotificationsNegotiate(request, env);
   }
-  if (path2 === "/notifications/hub" && method === "GET") {
+  if (path4 === "/notifications/hub" && method === "GET") {
     return handleNotificationsHub(request, env);
   }
-  if (path2 === "/notifications/anonymous-hub" && method === "GET") {
+  if (path4 === "/notifications/anonymous-hub" && method === "GET") {
     const blocked = await enforcePublicRateLimit("public-sensitive", LIMITS.rateLimit.sensitivePublicRequestsPerMinute);
     if (blocked) return blocked;
     return handleAnonymousNotificationsHub(request, env);
@@ -47023,32 +49707,32 @@ function jwtSecretUnsafeReason2(env) {
   if (secret.length < LIMITS.auth.jwtSecretMinLength) return "too_short";
   return null;
 }
-function canServeWithUnsafeJwtSecret(path2, method) {
+function canServeWithUnsafeJwtSecret(path4, method) {
   if (method === "OPTIONS") return true;
-  if (method === "GET" && (path2 === "/api/web-bootstrap" || path2 === "/web-bootstrap")) return true;
-  if (method === "GET" && (path2 === "/config" || path2 === "/api/config" || path2 === "/api/version")) return true;
-  if (method === "GET" && path2 === "/.well-known/appspecific/com.chrome.devtools.json") return true;
-  if (method === "GET" && path2 === "/fill-assist/manifest.json") return true;
-  if (method === "GET" && /^\/fill-assist\/[^/]+$/i.test(path2)) return true;
-  if (method === "GET" && (path2 === "/v1/assetlinks:check" || path2 === "/api/v1/assetlinks:check")) return true;
-  if (method === "GET" && /^\/icons\/[^/]+\/icon\.png$/i.test(path2)) return true;
+  if (method === "GET" && (path4 === "/api/web-bootstrap" || path4 === "/web-bootstrap")) return true;
+  if (method === "GET" && (path4 === "/config" || path4 === "/api/config" || path4 === "/api/version")) return true;
+  if (method === "GET" && path4 === "/.well-known/appspecific/com.chrome.devtools.json") return true;
+  if (method === "GET" && path4 === "/fill-assist/manifest.json") return true;
+  if (method === "GET" && /^\/fill-assist\/[^/]+$/i.test(path4)) return true;
+  if (method === "GET" && (path4 === "/v1/assetlinks:check" || path4 === "/api/v1/assetlinks:check")) return true;
+  if (method === "GET" && /^\/icons\/[^/]+\/icon\.png$/i.test(path4)) return true;
   return false;
 }
-function isImportBypassRequest(request, path2, method) {
+function isImportBypassRequest(request, path4, method) {
   if (request.headers.get("X-NodeWarden-Import") !== "1") return false;
   if (method === "POST") {
-    if (path2 === "/api/ciphers/import") return true;
-    if (/^\/api\/ciphers\/[a-f0-9-]+\/attachment\/v2$/i.test(path2)) return true;
-    if (/^\/api\/ciphers\/[a-f0-9-]+\/attachment\/[a-f0-9-]+$/i.test(path2)) return true;
+    if (path4 === "/api/ciphers/import") return true;
+    if (/^\/api\/ciphers\/[a-f0-9-]+\/attachment\/v2$/i.test(path4)) return true;
+    if (/^\/api\/ciphers\/[a-f0-9-]+\/attachment\/[a-f0-9-]+$/i.test(path4)) return true;
   }
   return false;
 }
 var BODY_LIMIT_METHODS = /* @__PURE__ */ new Set(["POST", "PUT", "PATCH", "DELETE"]);
-function isLargeUploadPath(path2) {
-  return /^\/api\/ciphers\/[a-f0-9-]+\/attachment\/[a-f0-9-]+$/i.test(path2) || /^\/api\/sends\/[a-f0-9-]+\/file\/[a-f0-9-]+$/i.test(path2) || path2 === "/api/admin/backup/import";
+function isLargeUploadPath(path4) {
+  return /^\/api\/ciphers\/[a-f0-9-]+\/attachment\/[a-f0-9-]+$/i.test(path4) || /^\/api\/sends\/[a-f0-9-]+\/file\/[a-f0-9-]+$/i.test(path4) || path4 === "/api/admin/backup/import";
 }
-async function enforceRequestBodyLimit(request, path2, method) {
-  if (!BODY_LIMIT_METHODS.has(method) || isLargeUploadPath(path2) || !request.body) {
+async function enforceRequestBodyLimit(request, path4, method) {
+  if (!BODY_LIMIT_METHODS.has(method) || isLargeUploadPath(path4) || !request.body) {
     return request;
   }
   const contentLengthRaw = request.headers.get("Content-Length");
@@ -47093,7 +49777,7 @@ async function enforceRequestBodyLimit(request, path2, method) {
 }
 async function handleRequest(request, env) {
   const url = new URL(request.url);
-  const path2 = url.pathname;
+  const path4 = url.pathname;
   const method = request.method;
   const clientId = getClientIdentifier(request);
   async function enforcePublicRateLimit(category = "public", maxRequests = LIMITS.rateLimit.publicRequestsPerMinute) {
@@ -47132,16 +49816,16 @@ async function handleRequest(request, env) {
     return handleCors(request, env);
   }
   try {
-    const bodyLimitResult = await enforceRequestBodyLimit(request, path2, method);
+    const bodyLimitResult = await enforceRequestBodyLimit(request, path4, method);
     if (bodyLimitResult instanceof Response) {
       return bodyLimitResult;
     }
     request = bodyLimitResult;
     const secretIssue = jwtSecretUnsafeReason2(env);
-    if (secretIssue && !canServeWithUnsafeJwtSecret(path2, method)) {
+    if (secretIssue && !canServeWithUnsafeJwtSecret(path4, method)) {
       return errorResponse("Server configuration error: JWT_SECRET is not set or too weak", 500);
     }
-    const publicResponse = await handlePublicRoute(request, env, path2, method, enforcePublicRateLimit);
+    const publicResponse = await handlePublicRoute(request, env, path4, method, enforcePublicRateLimit);
     if (publicResponse) return publicResponse;
     const auth = new AuthService(env);
     const authHeader = request.headers.get("Authorization");
@@ -47160,7 +49844,7 @@ async function handleRequest(request, env) {
     if (currentUser.status !== "active") {
       return errorResponse("Account is disabled", 403);
     }
-    if (!isImportBypassRequest(request, path2, method)) {
+    if (!isImportBypassRequest(request, path4, method)) {
       const rateLimit = new RateLimitService(env.DB);
       const rateLimitCheck = await rateLimit.consumeBudget(`${userId}:api`, LIMITS.rateLimit.apiRequestsPerMinute);
       if (!rateLimitCheck.allowed) {
@@ -47180,7 +49864,7 @@ async function handleRequest(request, env) {
         );
       }
     }
-    const authenticatedResponse = await handleAuthenticatedRoute(request, env, userId, currentUser, path2, method);
+    const authenticatedResponse = await handleAuthenticatedRoute(request, env, userId, currentUser, path4, method);
     if (authenticatedResponse) return authenticatedResponse;
     return errorResponse("Not found", 404);
   } catch (error) {
@@ -47188,12 +49872,18 @@ async function handleRequest(request, env) {
       console.warn("Request rejected: duplicate key", error instanceof Error ? error.message : error);
       return conflictResponse(conflictMessageFor(error));
     }
+    const clusterStatus = Number(error?.status ?? 0);
+    if (clusterStatus === 503 && error instanceof Error) {
+      console.error("[db-cluster] request failed:", error.message);
+      return errorResponse(error.message, 503);
+    }
     console.error("Request error:", error);
     return errorResponse("Internal server error", 500);
   }
 }
 
 // server/node-runtime.ts
+init_storage_schema();
 init_response();
 
 // src/web-vault-visibility.ts
@@ -47217,9 +49907,9 @@ var BACKEND_EXACT_PATHS = /* @__PURE__ */ new Set([
   "/settings/domains"
 ]);
 function isBackendRequestPath(pathname) {
-  const path2 = pathname.toLowerCase();
-  if (BACKEND_EXACT_PATHS.has(path2)) return true;
-  return BACKEND_PATH_PREFIXES.some((prefix) => path2 === prefix || path2.startsWith(`${prefix}/`));
+  const path4 = pathname.toLowerCase();
+  if (BACKEND_EXACT_PATHS.has(path4)) return true;
+  return BACKEND_PATH_PREFIXES.some((prefix) => path4 === prefix || path4.startsWith(`${prefix}/`));
 }
 function isWebVaultHidden(env) {
   return String(env.HIDE_WEB_VAULT || "").trim() === "1";
@@ -47436,8 +50126,8 @@ var BackupTransferRunner = class {
       const storage = new StorageService(this.env.DB);
       const settings = await loadBackupSettings(storage, this.env, "UTC");
       const destination = requireBackupDestination(settings, body.destinationId || null);
-      const path2 = ensureRemoteRestoreCandidate(String(body.path || ""));
-      const restoreFileNameFromPath = path2.split("/").pop() || path2;
+      const path4 = ensureRemoteRestoreCandidate(String(body.path || ""));
+      const restoreFileNameFromPath = path4.split("/").pop() || path4;
       const targetDeviceIdentifier = String(body.targetDeviceIdentifier || "").trim() || null;
       const replaceExisting = !!body.replaceExisting;
       await notifyUserBackupRestoreProgress(
@@ -47454,8 +50144,8 @@ var BackupTransferRunner = class {
         },
         targetDeviceIdentifier
       );
-      const remoteFile = await downloadRemoteBackupFile(destination, path2);
-      const checksumOk = await verifyBackupArchiveFileNameChecksum(remoteFile.bytes, remoteFile.fileName || path2);
+      const remoteFile = await downloadRemoteBackupFile(destination, path4);
+      const checksumOk = await verifyBackupArchiveFileNameChecksum(remoteFile.bytes, remoteFile.fileName || path4);
       if (!checksumOk && !body.allowChecksumMismatch) {
         return badRequest("Remote backup file checksum does not match its filename");
       }
@@ -47465,7 +50155,7 @@ var BackupTransferRunner = class {
         actorUserId,
         remoteFile,
         destination,
-        path2,
+        path4,
         replaceExisting,
         !checksumOk,
         body.auditMetadata || null,
@@ -47542,9 +50232,9 @@ var BackupTransferRunner = class {
         const blobName = blobNames[i2];
         const file = await downloadRemoteBackupFile(body2.destination, `attachments/${blobName}`).catch(() => null);
         if (!file) continue;
-        const path2 = `files/${i2}.bin`;
-        entries.push({ blobName, path: path2 });
-        files[path2] = file.bytes;
+        const path4 = `files/${i2}.bin`;
+        entries.push({ blobName, path: path4 });
+        files[path4] = file.bytes;
       }
       files["manifest.json"] = encoder.encode(JSON.stringify({ version: 1, entries }));
       return new Response(zipSync(files), {
@@ -47669,11 +50359,11 @@ var MemoryDurableObjectStorage = class {
   arm() {
     this.disarm();
     if (this.alarmAt === null) return;
-    const delay = Math.min(Math.max(this.alarmAt - Date.now(), 0), 2147483647);
+    const delay2 = Math.min(Math.max(this.alarmAt - Date.now(), 0), 2147483647);
     this.alarmTimer = setTimeout(() => {
       this.alarmTimer = null;
       void this.fire();
-    }, delay);
+    }, delay2);
     this.alarmTimer.unref?.();
   }
   async fire() {
@@ -47829,32 +50519,247 @@ function createLocalBackupRunnerNamespace(getEnv) {
   );
 }
 
+// server/fs-r2.ts
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import path from "node:path";
+import { Readable as Readable2, Transform as Transform2 } from "node:stream";
+import { pipeline } from "node:stream/promises";
+var DEFAULT_CONTENT_TYPE2 = "application/octet-stream";
+function classifyReadError(error) {
+  const code = String(error?.code ?? "");
+  if (code === "ENOENT" || code === "ENOTDIR") return "missing";
+  return "fatal";
+}
+function resolveObjectPath(attachmentsDir, key) {
+  const normalized = String(key || "").replace(/^[/\\]+/, "");
+  const full = path.resolve(attachmentsDir, normalized);
+  const rel = path.relative(attachmentsDir, full);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error("Invalid object key");
+  return full;
+}
+function sidecarPath(full) {
+  return `${full}.meta.json`;
+}
+async function writeSidecar(full, meta) {
+  await fsp.writeFile(sidecarPath(full), JSON.stringify(meta));
+}
+async function discard(full) {
+  await Promise.all([
+    fsp.rm(full, { force: true }).catch((error) => {
+      console.warn("[attachments] could not remove a partial object:", full, error);
+    }),
+    fsp.rm(sidecarPath(full), { force: true }).catch((error) => {
+      console.warn("[attachments] could not remove a partial sidecar:", sidecarPath(full), error);
+    })
+  ]);
+}
+function toNodeReadable(value) {
+  if (value instanceof Readable2) return value;
+  if (typeof ReadableStream !== "undefined" && value instanceof ReadableStream) {
+    return Readable2.fromWeb(value);
+  }
+  return null;
+}
+function toBytes(value) {
+  if (typeof value === "string") return new TextEncoder().encode(value);
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  return null;
+}
+async function writeBody(full, value) {
+  const bytes = toBytes(value);
+  if (bytes) {
+    await fsp.writeFile(full, bytes);
+    return bytes.byteLength;
+  }
+  const source = toNodeReadable(value);
+  if (!source) {
+    await fsp.writeFile(full, new Uint8Array(0));
+    return 0;
+  }
+  let size = 0;
+  const counter = new Transform2({
+    transform(chunk, _encoding, callback) {
+      size += chunk.length;
+      callback(null, chunk);
+    }
+  });
+  await pipeline(source, counter, fs.createWriteStream(full));
+  return size;
+}
+function createFsR2(attachmentsDir) {
+  return {
+    async put(key, value, options) {
+      const full = resolveObjectPath(attachmentsDir, key);
+      const contentType = options?.httpMetadata?.contentType || DEFAULT_CONTENT_TYPE2;
+      const customMetadata = options?.customMetadata || {};
+      await fsp.mkdir(path.dirname(full), { recursive: true });
+      await writeSidecar(full, { contentType, customMetadata, incomplete: true });
+      try {
+        const size = await writeBody(full, value);
+        await writeSidecar(full, { contentType, customMetadata, size });
+      } catch (error) {
+        await discard(full);
+        throw error;
+      }
+    },
+    async get(key) {
+      const full = resolveObjectPath(attachmentsDir, key);
+      let stat;
+      try {
+        stat = await fsp.stat(full);
+      } catch (error) {
+        if (classifyReadError(error) === "missing") return null;
+        console.error("[attachments] stat failed; the attachment disk may be unavailable:", error);
+        throw error;
+      }
+      let meta = {};
+      try {
+        meta = JSON.parse(await fsp.readFile(sidecarPath(full), "utf8"));
+      } catch (error) {
+        if (classifyReadError(error) === "fatal") {
+          console.warn("[attachments] metadata for", key, "is unreadable; continuing without it:", error);
+        }
+      }
+      if (meta.incomplete) {
+        console.warn(`[attachments] refusing an unfinished object "${key}": the upload never completed`);
+        return null;
+      }
+      if (typeof meta.size === "number" && Number.isFinite(meta.size) && meta.size !== stat.size) {
+        console.warn(
+          `[attachments] refusing a truncated object "${key}": expected ${meta.size} bytes, found ${stat.size}`
+        );
+        return null;
+      }
+      const stream = fs.createReadStream(full);
+      return {
+        body: Readable2.toWeb(stream),
+        size: stat.size,
+        httpMetadata: { contentType: meta.contentType || DEFAULT_CONTENT_TYPE2 },
+        customMetadata: meta.customMetadata || {}
+      };
+    },
+    async delete(key) {
+      const full = resolveObjectPath(attachmentsDir, key);
+      await fsp.rm(full, { force: true });
+      await fsp.rm(sidecarPath(full), { force: true });
+    }
+  };
+}
+
+// server/attachments-probe.ts
+import fsp2 from "node:fs/promises";
+import path2 from "node:path";
+var PROBE_FILE = ".nodewarden-write-probe";
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function messageOf(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+async function isSeparateMount(dir) {
+  try {
+    const [self2, parent] = await Promise.all([fsp2.stat(dir), fsp2.stat(path2.dirname(dir))]);
+    if (!Number.isFinite(self2.dev) || !Number.isFinite(parent.dev)) return null;
+    return self2.dev !== parent.dev;
+  } catch {
+    return null;
+  }
+}
+async function probeOnce(dir, expectMount) {
+  try {
+    const stat = await fsp2.stat(dir);
+    if (!stat.isDirectory()) {
+      return { dir, status: "missing", detail: "path exists but is not a directory" };
+    }
+    if (expectMount) {
+      const separate = await isSeparateMount(dir);
+      if (separate === false) {
+        return {
+          dir,
+          status: "not-mounted",
+          detail: "the directory is on the container filesystem, not on a mount"
+        };
+      }
+    }
+    const file = path2.join(dir, `${PROBE_FILE}-${process.pid}`);
+    const payload = `nodewarden ${Date.now()}`;
+    await fsp2.writeFile(file, payload);
+    const echo = await fsp2.readFile(file, "utf8");
+    await fsp2.rm(file, { force: true });
+    if (echo !== payload) {
+      return { dir, status: "unwritable", detail: "wrote a probe file and read back different bytes" };
+    }
+    return { dir, status: "ok" };
+  } catch (error) {
+    const code = String(error?.code ?? "");
+    if (code === "ENOENT") return { dir, status: "missing", detail: "directory does not exist" };
+    return { dir, status: "unwritable", detail: messageOf(error) };
+  }
+}
+async function probeAttachmentsDir(dir, options = {}) {
+  const attempts = Math.max(1, options.attempts ?? 1);
+  const delayMs = Math.max(0, options.delayMs ?? 0);
+  let result = await probeOnce(dir, options.expectMount !== false);
+  for (let attempt = 1; attempt < attempts && result.status === "missing"; attempt += 1) {
+    if (delayMs > 0) await sleep(delayMs);
+    result = await probeOnce(dir, options.expectMount !== false);
+  }
+  return result;
+}
+function describeAttachmentsProblem(result) {
+  switch (result.status) {
+    case "ok":
+      return null;
+    case "missing":
+      return `ATTACHMENTS_DIR=${result.dir} is unusable (${result.detail || "missing"}). Attachments will be stored on the container filesystem and lost on the next redeploy \u2014 mount the bucket (ossfs/cosfs/rclone) before starting the app, or unset ATTACHMENTS_DIR.`;
+    case "not-mounted":
+      return `ATTACHMENTS_DIR=${result.dir} exists but is not a mount point (${result.detail}). Either the object-store mount failed to come up, or ATTACHMENTS_DIR points at a plain directory: everything uploaded now lives on the container disk and disappears on redeploy.`;
+    case "unwritable":
+      return `ATTACHMENTS_DIR=${result.dir} rejected a write (${result.detail}). Check the mount permissions (ossfs/cosfs mounts are often read-only after a credential error).`;
+    default:
+      return `ATTACHMENTS_DIR=${result.dir} reported an unknown state.`;
+  }
+}
+
 // server/node-runtime.ts
-var __dirname = path.dirname(fileURLToPath(import.meta.url));
+var __dirname = path3.dirname(fileURLToPath(import.meta.url));
 var state = null;
 var sharedEnv = null;
+var attachmentsProbe = null;
+var attachmentsProbeRun = null;
 function isInsideDirectory(child, parent) {
-  const rel = path.relative(parent, child);
-  return !rel.startsWith("..") && !path.isAbsolute(rel);
+  const rel = path3.relative(parent, child);
+  return !rel.startsWith("..") && !path3.isAbsolute(rel);
+}
+function isDataDirEphemeral(dataDir) {
+  return isInsideDirectory(dataDir, os.tmpdir());
 }
 function resolveState(options) {
   const assets = options.assets || "disk";
-  let dataDir = path.resolve(
+  let dataDir = path3.resolve(
     options.dataDir || process.env.DATA_DIR || defaultDataDir(assets)
   );
   if (assets === "stub" && !isInsideDirectory(dataDir, os.tmpdir())) {
-    dataDir = path.join(os.tmpdir(), "nodewarden");
+    dataDir = path3.join(os.tmpdir(), "nodewarden");
   }
+  const defaultAttachments = path3.join(dataDir, "attachments");
+  const configuredAttachments = process.env.ATTACHMENTS_DIR;
+  const attachmentsFromEnv = !!configuredAttachments && path3.resolve(configuredAttachments) !== path3.resolve(defaultAttachments);
   return {
     assets,
     dataDir,
-    attachmentsDir: path.resolve(process.env.ATTACHMENTS_DIR || path.join(dataDir, "attachments")),
-    distDir: path.resolve(process.env.DIST_DIR || path.join(__dirname, "..", "dist"))
+    attachmentsDir: path3.resolve(configuredAttachments || defaultAttachments),
+    attachmentsFromEnv,
+    distDir: path3.resolve(process.env.DIST_DIR || path3.join(__dirname, "..", "dist"))
   };
 }
 function defaultDataDir(assets) {
-  if (assets === "stub") return path.join(os.tmpdir(), "nodewarden");
-  return path.join(__dirname, "..", "data");
+  if (assets === "stub") return path3.join(os.tmpdir(), "nodewarden");
+  return path3.join(__dirname, "..", "data");
 }
 function configureNodeRuntime(options = {}) {
   if (state) {
@@ -47866,24 +50771,46 @@ function configureNodeRuntime(options = {}) {
     return state;
   }
   state = resolveState(options);
-  fs.mkdirSync(state.dataDir, { recursive: true });
-  fs.mkdirSync(state.attachmentsDir, { recursive: true });
+  fs2.mkdirSync(state.dataDir, { recursive: true });
+  fs2.mkdirSync(state.attachmentsDir, { recursive: true });
   globalThis.caches = cachesShim;
   installDurableObjectGlobals();
   return state;
 }
+async function ensureAttachmentsProbe() {
+  const runtime2 = configureNodeRuntime();
+  if (attachmentsProbe) return attachmentsProbe;
+  if (!attachmentsProbeRun) {
+    attachmentsProbeRun = probeAttachmentsDir(runtime2.attachmentsDir, {
+      expectMount: runtime2.attachmentsFromEnv,
+      // A FUSE mount is often still connecting when the entry module runs.
+      attempts: runtime2.attachmentsFromEnv ? 6 : 1,
+      delayMs: 500
+    }).then((result) => {
+      attachmentsProbe = result;
+      const problem = describeAttachmentsProblem(result);
+      if (!problem) {
+        console.log(`[attachments] storage ready at ${result.dir}`);
+      } else {
+        console.error(`[attachments] ${problem}`);
+      }
+      return result;
+    });
+  }
+  return attachmentsProbeRun;
+}
 function readKvFile(kvFile) {
   try {
-    return JSON.parse(fs.readFileSync(kvFile, "utf8"));
+    return JSON.parse(fs2.readFileSync(kvFile, "utf8"));
   } catch {
     return {};
   }
 }
 function writeKvFile(kvFile, data) {
-  fs.writeFileSync(kvFile, JSON.stringify(data), "utf8");
+  fs2.writeFileSync(kvFile, JSON.stringify(data), "utf8");
 }
 function createFileKv(dataDir) {
-  const kvFile = path.join(dataDir, "kv-store.json");
+  const kvFile = path3.join(dataDir, "kv-store.json");
   return {
     async get(key) {
       const data = readKvFile(kvFile);
@@ -47898,62 +50825,6 @@ function createFileKv(dataDir) {
       const data = readKvFile(kvFile);
       delete data[key];
       writeKvFile(kvFile, data);
-    }
-  };
-}
-function safeObjectPath(attachmentsDir, key) {
-  const normalized = key.replace(/^[/\\]+/, "");
-  const full = path.resolve(attachmentsDir, normalized);
-  const rel = path.relative(attachmentsDir, full);
-  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error("Invalid object key");
-  return full;
-}
-function createFsR2(attachmentsDir) {
-  return {
-    async put(key, value, options) {
-      const full = safeObjectPath(attachmentsDir, key);
-      fs.mkdirSync(path.dirname(full), { recursive: true });
-      let bytes;
-      if (typeof value === "string") bytes = new TextEncoder().encode(value);
-      else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
-      else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-      else if (value instanceof ReadableStream) {
-        const buf = await new Response(value).arrayBuffer();
-        bytes = new Uint8Array(buf);
-      } else {
-        bytes = new Uint8Array(0);
-      }
-      await fsp.writeFile(full, bytes);
-      const meta = {
-        contentType: options?.httpMetadata?.contentType || "application/octet-stream",
-        customMetadata: options?.customMetadata || {}
-      };
-      await fsp.writeFile(`${full}.meta.json`, JSON.stringify(meta));
-    },
-    async get(key) {
-      const full = safeObjectPath(attachmentsDir, key);
-      try {
-        const stat = await fsp.stat(full);
-        let meta = {};
-        try {
-          meta = JSON.parse(await fsp.readFile(`${full}.meta.json`, "utf8"));
-        } catch {
-        }
-        const stream = fs.createReadStream(full);
-        return {
-          body: Readable.toWeb(stream),
-          size: stat.size,
-          httpMetadata: { contentType: meta.contentType || "application/octet-stream" },
-          customMetadata: meta.customMetadata || {}
-        };
-      } catch {
-        return null;
-      }
-    },
-    async delete(key) {
-      const full = safeObjectPath(attachmentsDir, key);
-      await fsp.rm(full, { force: true });
-      await fsp.rm(`${full}.meta.json`, { force: true });
     }
   };
 }
@@ -48015,21 +50886,21 @@ async function serveAssets(request) {
     return new Response("Bad Request", { status: 400, headers: { "Content-Type": "text/plain; charset=utf-8" } });
   }
   if (rel === "/" || rel === "") rel = "/index.html";
-  const full = path.resolve(runtime2.distDir, rel.replace(/^[/\\]+/, ""));
-  const contained = path.relative(runtime2.distDir, full);
-  if (!contained || contained.startsWith("..") || path.isAbsolute(contained)) {
+  const full = path3.resolve(runtime2.distDir, rel.replace(/^[/\\]+/, ""));
+  const contained = path3.relative(runtime2.distDir, full);
+  if (!contained || contained.startsWith("..") || path3.isAbsolute(contained)) {
     return new Response("Forbidden", { status: 403 });
   }
   try {
-    const bytes = await fsp.readFile(full);
-    const ext = path.extname(full).toLowerCase();
+    const bytes = await fsp3.readFile(full);
+    const ext = path3.extname(full).toLowerCase();
     return new Response(bytes, {
       status: 200,
       headers: { "Content-Type": MIME[ext] || "application/octet-stream", "Cache-Control": ext === ".html" ? "no-cache" : "public, max-age=31536000, immutable" }
     });
   } catch {
     try {
-      const index = await fsp.readFile(path.join(runtime2.distDir, "index.html"));
+      const index = await fsp3.readFile(path3.join(runtime2.distDir, "index.html"));
       return new Response(index, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" } });
     } catch {
       return new Response("Web vault not built. Run `npm run build` first.", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } });
@@ -48067,6 +50938,19 @@ function buildNodeEnv() {
     DB_NAME: process.env.DB_NAME,
     DB_SSL: process.env.DB_SSL,
     DB_CONN_LIMIT: process.env.DB_CONN_LIMIT,
+    // Optional env-declared standbys. Listed explicitly because this object is a
+    // whitelist: a variable that is not copied here does not exist as far as
+    // src/ is concerned, which is exactly how "I set DB_STANDBY_NODES and
+    // nothing happened" would look.
+    DB_STANDBY_NODES: process.env.DB_STANDBY_NODES,
+    DB_STANDBYS: process.env.DB_STANDBYS,
+    DB_STANDBY_NAME: process.env.DB_STANDBY_NAME,
+    DB_STANDBY_HOST: process.env.DB_STANDBY_HOST,
+    DB_STANDBY_PORT: process.env.DB_STANDBY_PORT,
+    DB_STANDBY_USER: process.env.DB_STANDBY_USER,
+    DB_STANDBY_PASSWORD: process.env.DB_STANDBY_PASSWORD,
+    DB_STANDBY_SSL: process.env.DB_STANDBY_SSL,
+    DB_STANDBY_CONN_LIMIT: process.env.DB_STANDBY_CONN_LIMIT,
     DB_CONFIG_KEY: process.env.DB_CONFIG_KEY
   };
   sharedEnv = env;
@@ -48077,15 +50961,28 @@ async function handleHealthz(env) {
   if (status.error) {
     console.error("[healthz] database unavailable:", status.error);
   }
+  const attachments = await ensureAttachmentsProbe().catch(() => null);
+  const repaired = getLastSchemaRepair();
   return jsonResponse(
-    { ok: status.ok, db: status.ok ? "up" : "down", mode: status.mode, source: status.source, runtime: "node" },
+    {
+      ok: status.ok,
+      db: status.ok ? "up" : "down",
+      mode: status.mode,
+      source: status.source,
+      runtime: "node",
+      attachments: attachments?.status ?? "unknown",
+      // Only present when this process actually had to widen an old table, so a
+      // clean install keeps the same shape it always had.
+      ...repaired.length > 0 ? { schemaRepair: repaired } : {}
+    },
     status.ok ? 200 : 503
   );
 }
-async function pipeline(request, env) {
+async function pipeline2(request, env) {
   const url = new URL(request.url);
   let pathname = url.pathname;
   if (pathname.length > 1) pathname = pathname.replace(/\/+$/, "");
+  await ensureAttachmentsProbe();
   if (pathname === "/internal/cron/backup" && request.method === "POST") {
     return handleCronTick(request, env);
   }
@@ -48099,20 +50996,33 @@ async function pipeline(request, env) {
     return applyCors(request, await serveAssets(request), env);
   }
   await ensureDatabaseInitialized(env);
-  const dbInitError2 = getDbInitError();
-  if (dbInitError2) {
-    const resp2 = jsonResponse(
-      {
-        error: "Database not initialized",
-        error_description: "Database initialization failed. Check server logs for details.",
-        ErrorModel: { Message: "Service temporarily unavailable", Object: "error" }
-      },
-      500
-    );
-    return applyCors(request, resp2, env);
-  }
+  const dbFailure = dbInitFailureResponse();
+  if (dbFailure) return applyCors(request, dbFailure, env);
   const resp = await handleRequest(request, env);
   return applyCors(request, resp, env);
+}
+function dbInitFailureResponse() {
+  const failure = getDbInitFailure();
+  if (!failure) return null;
+  console.error("DB init error:", failure.message);
+  if (failure.status) {
+    return jsonResponse(
+      {
+        error: failure.message,
+        error_description: failure.message,
+        ErrorModel: { Message: failure.message, Object: "error" }
+      },
+      failure.status
+    );
+  }
+  return jsonResponse(
+    {
+      error: "Database not initialized",
+      error_description: "Database initialization failed. Check server logs for details.",
+      ErrorModel: { Message: "Service temporarily unavailable", Object: "error" }
+    },
+    500
+  );
 }
 function getCronSecret() {
   return process.env.CRON_SECRET || "";
@@ -48133,9 +51043,9 @@ async function handleCronTick(request, env) {
     return jsonResponse({ error: "Unauthorized" }, 401);
   }
   await ensureDatabaseInitialized(env);
-  const dbInitError2 = getDbInitError();
-  if (dbInitError2) {
-    console.error("Skipping scheduled backup because DB init failed:", dbInitError2);
+  const dbInitError = getDbInitError();
+  if (dbInitError) {
+    console.error("Skipping scheduled backup because DB init failed:", dbInitError);
     return jsonResponse({ ok: false, error: "database unavailable" }, 503);
   }
   const { runScheduledBackupIfDue: runScheduledBackupIfDue2 } = await Promise.resolve().then(() => (init_backup(), backup_exports));
@@ -48146,7 +51056,7 @@ async function handleCronTick(request, env) {
 // server/index.ts
 var runtime = configureNodeRuntime({ assets: "disk" });
 var PORT = Number(process.env.PORT || 8787);
-function nodeRequestToRequest(req, body) {
+function nodeRequestToRequest(req) {
   const protocol = req.headers["x-forwarded-proto"] || "http";
   const host = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${PORT}`;
   const url = `${protocol}://${host}${req.url || "/"}`;
@@ -48158,8 +51068,11 @@ function nodeRequestToRequest(req, body) {
   }
   const method = (req.method || "GET").toUpperCase();
   const init = { method, headers };
-  if (!["GET", "HEAD"].includes(method) && body.length > 0) {
-    init.body = body;
+  if (!["GET", "HEAD"].includes(method)) {
+    const body = createLimitedBody(req, MAX_BODY_BYTES);
+    req.bodyTooLarge = body.exceeded;
+    init.body = body.stream;
+    init.duplex = "half";
   }
   return new Request(url, init);
 }
@@ -48179,7 +51092,7 @@ async function writeResponse(res, response, requestMethod = "GET") {
     res.end();
     return;
   }
-  const nodeStream = Readable2.fromWeb(response.body);
+  const nodeStream = Readable3.fromWeb(response.body);
   nodeStream.on("error", () => res.destroy());
   res.on("close", () => nodeStream.destroy());
   nodeStream.pipe(res);
@@ -48194,45 +51107,42 @@ var MAX_BODY_BYTES = (() => {
   }
   return Math.floor(megabytes * 1024 * 1024);
 })();
-var server = http.createServer((req, res) => {
-  const chunks = [];
-  let received = 0;
-  let rejected = false;
-  req.on("data", (chunk) => {
-    if (rejected) return;
-    received += chunk.length;
-    if (received > MAX_BODY_BYTES) {
-      rejected = true;
-      res.writeHead(413, { "Content-Type": "application/json; charset=utf-8", Connection: "close" });
-      res.end(JSON.stringify({ error: "Payload too large" }));
-      req.destroy();
+async function serveRequest(req, res) {
+  const declared = Number(req.headers["content-length"] ?? NaN);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    const payload = JSON.stringify({ error: "Payload too large" });
+    res.writeHead(413, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Length": Buffer.byteLength(payload),
+      Connection: "close"
+    });
+    res.end(payload, () => req.destroy());
+    return;
+  }
+  try {
+    const env = buildNodeEnv();
+    const request = nodeRequestToRequest(req);
+    const response = await pipeline2(request, env);
+    if (req.bodyTooLarge?.()) {
+      await writeResponse(res, jsonResponse({ error: "Payload too large" }, 413), request.method);
       return;
     }
-    chunks.push(chunk);
-  });
-  req.on("end", () => {
-    if (rejected) return;
-    void (async () => {
-      try {
-        const env = buildNodeEnv();
-        const body = Buffer.concat(chunks);
-        const request = nodeRequestToRequest(req, body);
-        const response = await pipeline(request, env);
-        await writeResponse(res, response, request.method);
-      } catch (error) {
-        console.error("Unhandled request error:", error);
-        try {
-          await writeResponse(res, jsonResponse({ error: "Internal server error" }, 500), req.method || "GET");
-        } catch {
-          res.destroy();
-        }
-      }
-    })();
-  });
+    await writeResponse(res, response, request.method);
+  } catch (error) {
+    console.error("Unhandled request error:", error);
+    try {
+      await writeResponse(res, jsonResponse({ error: "Internal server error" }, 500), req.method || "GET");
+    } catch {
+      res.destroy();
+    }
+  }
+}
+var server = http.createServer((req, res) => {
   req.on("error", (error) => {
     console.error("Request stream error:", error);
     res.destroy();
   });
+  void serveRequest(req, res);
 });
 server.requestTimeout = Number(process.env.REQUEST_TIMEOUT_MS || 3e5);
 server.headersTimeout = Number(process.env.HEADERS_TIMEOUT_MS || 6e4);
@@ -48270,7 +51180,18 @@ server.listen(PORT, () => {
   console.log(`  attachments:    ${runtime.attachmentsDir}`);
   console.log(`  web vault:      ${runtime.distDir}`);
   console.log(`  database:       ${process.env.DB_HOST ? `MySQL ${process.env.DB_HOST}:${process.env.DB_PORT || 3306}/${process.env.DB_NAME || ""}` : "configured via env DB_* or admin UI (/admin/database)"}`);
+  const standbys = resolveStandbysFromEnv(buildNodeEnv());
+  if (standbys.length > 0) {
+    console.log(
+      `  standbys:       ${standbys.length} \xB7 ${standbys.map((node) => `${node.database}@${node.host}:${node.port}`).join(", ")}`
+    );
+  }
   console.log(`  cron:           POST /internal/cron/backup (x-cron-secret)${cronSecret ? "" : " \u2014 CRON_SECRET not set, endpoint disabled"}`);
+  if (isDataDirEphemeral(runtime.dataDir)) {
+    console.warn(
+      `  WARNING:        data dir ${runtime.dataDir} is inside the temporary directory. A database cluster saved in the admin page, node sync records and write watermarks are lost when the instance is recycled. Mount NAS (or set DATA_DIR to a persistent path) before removing the DB_* variables.`
+    );
+  }
 });
 /*! Bundled license information:
 
