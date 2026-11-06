@@ -6440,7 +6440,7 @@ var APP_VERSION;
 var init_app_version = __esm({
   "shared/app-version.ts"() {
     "use strict";
-    APP_VERSION = "1.8.15";
+    APP_VERSION = "1.8.16";
   }
 });
 
@@ -38236,6 +38236,13 @@ function checkPeerAddress(peer, env) {
   if (!isPrivateAddress(peer)) return true;
   return allowlistAllowsAddress(hostAllowlist(env), peer);
 }
+var SYSTEM_SCHEMAS = /* @__PURE__ */ new Set([
+  "sys",
+  "mysql",
+  "information_schema",
+  "performance_schema",
+  "metrics_schema"
+]);
 function classifyConnectionError(error) {
   const code = String(error?.code ?? "");
   const msg = error instanceof Error ? error.message : String(error);
@@ -38243,6 +38250,7 @@ function classifyConnectionError(error) {
   if (code === "ETIMEDOUT" || /ETIMEDOUT|timeout/i.test(msg)) return "timeout";
   if (code === "ENOTFOUND" || /ENOTFOUND/.test(msg)) return "dns";
   if (/Access denied/i.test(msg)) return "auth";
+  if (/command denied|permission denied|ALTER command denied|DROP command denied/i.test(msg)) return "permission";
   if (/certificate|TLS|SSL|self[- ]signed/i.test(msg)) return "tls";
   if (/Unknown database/i.test(msg)) return "database";
   return "unknown";
@@ -38387,6 +38395,9 @@ function connectionHint(kind, passwordSource, config) {
     }
     return "\u670D\u52A1\u7AEF\u62D2\u7EDD\u8BA4\u8BC1\uFF1A\u8BF7\u6838\u5BF9\u8D26\u53F7\u5BC6\u7801\uFF08\u4E91\u5E73\u53F0\u91CD\u7F6E\u540E\u65E7\u503C\u7ACB\u5373\u5931\u6548\uFF09\u3001\u8D26\u53F7\u662F\u5426\u88AB\u9501\u5B9A\uFF0C\u4EE5\u53CA\u6765\u6E90 IP \u767D\u540D\u5355 / \u662F\u5426\u5F3A\u5236 SSL\u3002";
   }
+  if (kind === "permission") {
+    return "\u670D\u52A1\u7AEF\u62D2\u7EDD\u4E86\u5EFA\u8868\uFF08CREATE command denied\uFF09\uFF1A\u5E93\u540D\u591A\u534A\u662F TiDB Cloud Connect \u5BF9\u8BDD\u6846\u9ED8\u8BA4\u7ED9\u7684 sys\uFF0C\u90A3\u662F\u53EA\u8BFB\u7CFB\u7EDF\u5E93\uFF0C\u4E0D\u5141\u8BB8\u5EFA\u8868\u3002\u8BF7\u5728\u63A7\u5236\u53F0\u65B0\u5EFA\u4E00\u4E2A\u4E1A\u52A1\u5E93\uFF08\u5982 CREATE DATABASE nodewarden\uFF09\uFF0C\u628A DB_NAME\uFF08\u53CA DB_STANDBY_NODES \u91CC\u7684\u5E93\u540D\uFF09\u6539\u8FC7\u53BB\uFF1B\u540C\u65F6\u786E\u8BA4\u8BE5\u8D26\u53F7\u6709 CREATE \u6743\u9650\uFF08TiDB Cloud Starter \u9700\u5728 SQL Users \u91CC\u5F00 DDL \u6743\u9650\uFF09\u3002";
+  }
   if (kind === "tls") {
     return "TLS \u63E1\u624B\u5931\u8D25\uFF1A\u81EA\u7B7E\u8BC1\u4E66\u53EF\u52A0 DB_SSL_INSECURE=1\uFF1B\u82E5\u670D\u52A1\u7AEF\u4E0D\u652F\u6301 TLS\uFF0C\u628A\u8BE5\u8282\u70B9 URL \u6539\u4E3A ?ssl=false\u3002";
   }
@@ -38415,6 +38426,21 @@ async function testMySqlConnection(config, env, passwordSource) {
   });
   try {
     const versionRow = await db.prepare("SELECT VERSION() AS version").first();
+    const schemaRow = await db.prepare("SELECT DATABASE() AS db").first();
+    const currentSchema = String(schemaRow?.db ?? config.database ?? "").toLowerCase();
+    if (SYSTEM_SCHEMAS.has(currentSchema)) {
+      console.error("[db-config] connection test rejected a system schema", {
+        host: config.host,
+        database: currentSchema
+      });
+      return {
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        error: "connection failed (permission)",
+        errorKind: "permission",
+        hint: `\u5F53\u524D\u8FDE\u63A5\u7684\u5E93 "${currentSchema}" \u662F\u7CFB\u7EDF\u5E93\uFF0C\u4E0D\u5141\u8BB8\u5EFA\u8868\uFF08\u5E94\u7528\u542F\u52A8\u65F6\u4F1A\u62A5 CREATE command denied\uFF09\u3002\u8BF7\u5728\u63A7\u5236\u53F0\u65B0\u5EFA\u4E00\u4E2A\u4E1A\u52A1\u5E93\uFF0C\u4F8B\u5982 CREATE DATABASE nodewarden;\uFF0C\u7136\u540E\u628A DB_NAME\uFF08\u6216\u526F\u5E93 URL \u91CC\u7684\u5E93\u540D\uFF09\u6539\u8FC7\u53BB\u3002TiDB Cloud \u7684 Connect \u5BF9\u8BDD\u6846\u9ED8\u8BA4\u7ED9\u7684\u662F sys\uFF0C\u4E0D\u8981\u76F4\u63A5\u7528\u3002`
+      };
+    }
     const peer = await db.peerAddress();
     if (peer && !checkPeerAddress(peer, env)) {
       console.error("[db-config] connection peer is a private address, refusing", { host: config.host });

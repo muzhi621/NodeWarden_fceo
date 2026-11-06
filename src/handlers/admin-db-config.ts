@@ -242,6 +242,15 @@ function checkPeerAddress(peer: string, env: unknown): boolean {
   return allowlistAllowsAddress(hostAllowlist(env), peer);
 }
 
+/** Schemas that accept connections but reject all application DDL. */
+const SYSTEM_SCHEMAS = new Set([
+  'sys',
+  'mysql',
+  'information_schema',
+  'performance_schema',
+  'metrics_schema',
+]);
+
 /** Coarse failure class: useful for an admin, useless for a port scanner. */
 function classifyConnectionError(error: unknown): string {
   const code = String((error as { code?: string })?.code ?? '');
@@ -250,6 +259,11 @@ function classifyConnectionError(error: unknown): string {
   if (code === 'ETIMEDOUT' || /ETIMEDOUT|timeout/i.test(msg)) return 'timeout';
   if (code === 'ENOTFOUND' || /ENOTFOUND/.test(msg)) return 'dns';
   if (/Access denied/i.test(msg)) return 'auth';
+  // Serverless MySQL (TiDB Cloud Starter et al.) refuses DDL on system schemas
+  // with "CREATE command denied ... for table 'config'". It contains neither
+  // "Access denied" nor "Unknown database", so it used to fall through to the
+  // useless `unknown` bucket even though the fix is a one-character DB name.
+  if (/command denied|permission denied|ALTER command denied|DROP command denied/i.test(msg)) return 'permission';
   if (/certificate|TLS|SSL|self[- ]signed/i.test(msg)) return 'tls';
   if (/Unknown database/i.test(msg)) return 'database';
   return 'unknown';
@@ -460,6 +474,9 @@ function connectionHint(kind: string, passwordSource: string | undefined, config
     }
     return '服务端拒绝认证：请核对账号密码（云平台重置后旧值立即失效）、账号是否被锁定，以及来源 IP 白名单 / 是否强制 SSL。';
   }
+  if (kind === 'permission') {
+    return '服务端拒绝了建表（CREATE command denied）：库名多半是 TiDB Cloud Connect 对话框默认给的 sys，那是只读系统库，不允许建表。请在控制台新建一个业务库（如 CREATE DATABASE nodewarden），把 DB_NAME（及 DB_STANDBY_NODES 里的库名）改过去；同时确认该账号有 CREATE 权限（TiDB Cloud Starter 需在 SQL Users 里开 DDL 权限）。';
+  }
   if (kind === 'tls') {
     return 'TLS 握手失败：自签证书可加 DB_SSL_INSECURE=1；若服务端不支持 TLS，把该节点 URL 改为 ?ssl=false。';
   }
@@ -506,6 +523,26 @@ async function testMySqlConnection(
   });
   try {
     const versionRow = await db.prepare('SELECT VERSION() AS version').first<{ version: string }>();
+    // `SELECT VERSION()` succeeds even on a read-only system schema, so a probe
+    // used to report a healthy green node while the app then died at startup on
+    // its very first `CREATE TABLE config`. TiDB Cloud's Connect dialog offers
+    // `sys` as the default database; that is a system schema and cannot hold
+    // application tables. Catch it here with an actionable message instead.
+    const schemaRow = await db.prepare('SELECT DATABASE() AS db').first<{ db: string | null }>();
+    const currentSchema = String(schemaRow?.db ?? config.database ?? '').toLowerCase();
+    if (SYSTEM_SCHEMAS.has(currentSchema)) {
+      console.error('[db-config] connection test rejected a system schema', {
+        host: config.host,
+        database: currentSchema,
+      });
+      return {
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        error: 'connection failed (permission)',
+        errorKind: 'permission',
+        hint: `当前连接的库 "${currentSchema}" 是系统库，不允许建表（应用启动时会报 CREATE command denied）。请在控制台新建一个业务库，例如 CREATE DATABASE nodewarden;，然后把 DB_NAME（或副库 URL 里的库名）改过去。TiDB Cloud 的 Connect 对话框默认给的是 sys，不要直接用。`,
+      };
+    }
     // The pool is capped at one connection, so this reads the very socket the
     // query above used.
     const peer = await db.peerAddress();
@@ -1755,4 +1792,7 @@ export const __testing = {
   checkPeerAddress,
   normalizeClusterCandidate,
   maskNode,
+  classifyConnectionError,
+  connectionHint,
+  SYSTEM_SCHEMAS,
 };
