@@ -1,12 +1,33 @@
 # NodeWarden BYO-DB — 阿里云 FC 部署说明
 
 > 本文件在**仓库根目录**与**部署 ZIP 根目录**各存一份，内容一致。
-> 部署包是为「阿里云函数计算 FC · Web 函数」准备的可直接上传 ZIP，版本 **v1.8.15**。
+> 部署包是为「阿里云函数计算 FC · Web 函数」准备的可直接上传 ZIP，版本 **v1.8.16**。
 > 代码来源：`main` 分支（BYO-DB + Node 运行时 + 多轮代码审查修复）。
 >
 > 注：下文的「包内容」以 **ZIP 包**为准。仓库里的 `node_modules/` 是完整开发依赖，
 > `dist/`、`server/index.mjs` 需自行构建（见第九节）；`fc-entry.mjs` 在仓库根目录，
 > 组包时原样复制到包根即可。
+>
+> **从 v1.8.15 升级**：替换 `dist/`、`server/index.mjs`（及 `node-functions/`，若用 EdgeOne）
+> 与根目录文档即可，**数据库不用动，环境变量也不用改**。这一版修掉一个「测试」按钮的假阴性——
+> 环境变量副库明明配置正确，后台点「测试」却一直报 `connection failed (auth)`：
+>
+> - **根因是测试接口拿错了密码**：副库卡片（`env-standby-1`）在后台保存的集群里查不到，旧代码
+>   就回退到生效集群的**第 0 个节点 = 主库**，于是拿主库密码去连另一台服务器上的副库，
+>   必然 `Access denied`。实际运行时的读写链路走的是副库自己的密码，**不受影响**；
+>   但「保存集群」路径有同样漏洞，会把空密码写进去。
+> - 现在按 id 先在生效集群里找（环境变量优先于旧的后台保存记录），探测失败还会返回
+>   **可执行的中文提示 + 脱敏后的原始 MySQL 错误**，不必再翻 FC 日志。
+> - **副库密码没显式设置时会静默沿用主库 `DB_PASSWORD`**（跨服务器时必然认证失败）。现在启动日志
+>   会告警一次，节点卡片上也会显示红色「密码沿用主库」标记。
+> - **主库用 TiDB Cloud Serverless 的必看**：Connect 对话框默认的 `sys` 是只读系统库，
+>   直接填进 `DB_NAME` 会连得上却建不了表，日志刷
+>   `DB init error: CREATE command denied ... for table 'config'`，之后**全站 500**。
+>   现在探测会提前报 `connection failed (permission)` 并给出中文修法，不再假绿。
+> - 配套新增 **[DB-STANDBY-TUTORIAL.md](DB-STANDBY-TUTORIAL.md)**：以 TiDB 主库 + 免费副库为例，
+>   讲清建业务库、`<prefix>.root` 用户名、环境变量写法、URL 百分号编码、TLS、同步门禁与错误码对照表。
+>
+> 升级后点副库「测试」时**密码框请留空**（留空才会用环境变量里的密码，手填会绕过真实配置）。
 >
 > **从 v1.8.14 升级**：替换 `dist/`、`server/index.mjs`（及 `node-functions/`，若用 EdgeOne）
 > 与根目录文档即可，**数据库不用动，环境变量也不用改**。这一版修掉「同步数据到副库」永远停在
@@ -150,6 +171,12 @@
 > 注意：**环境变量优先于后台配置**。两者都配时，后台保存会提示「已保存但未生效」。
 
 ## 三之一、用环境变量配一组可同步的副库（v1.8.12+）
+
+> **完整实操教程见 [DB-STANDBY-TUTORIAL.md](DB-STANDBY-TUTORIAL.md)**：以 TiDB Cloud Serverless
+> 主库 + 免费副库为例，从建业务库到点「测试」变绿，含 `<prefix>.root` 用户名、密码百分号编码、
+> TLS、IP 访问列表、「尚未同步（不可接管）」门禁，以及 `(permission)` / `(auth)` / `(tls)` /
+> `(unknown)` 错误码对照表。**主库库名千万别用 `sys`**（详见教程第「零之一」节）。
+> 本节是规则速查，教程是照着做。
 
 以前「保存了副库却切不过去、同步永远 0%」的根因是：**生效的集群是环境变量那一台**，后台保存的
 副库被挡住；而要让后台配置生效，又得先有能挺过冷启动的 `DATA_DIR`（NAS）。如果部署就想保持
@@ -362,15 +389,18 @@ npx esbuild server/index.ts --bundle --platform=node --format=esm \
 `iconv-lite`、`is-property`、`long`、`lru.min`、`named-placeholders`、`safer-buffer`、`sql-escaper` 等）：
 
 ```
-FC-DEPLOY.md
-DEPLOY.md
+FC-DEPLOY.md                 # 本文档
+DEPLOY.md                    # 通用部署说明
+DB-STANDBY-TUTORIAL.md       # 副库配置实操教程（v1.8.16+）
 fc-entry.mjs
 package.json
+package-lock.json
 dist/
 server/index.mjs
 server/register-cf-stub.mjs
 server/cf-stub-loader.mjs
-node_modules/            # 只放 mysql2 及其依赖
+node_modules/                # 只放 mysql2 及其依赖
 ```
 
+> 三份 MD 与部署 ZIP 根目录的副本内容一致；升级时可以直接替换根目录文档，不用改环境变量。
 > `server/index.mjs` 在仓库中是跟踪文件，重新构建后请一并提交，避免包内 bundle 与源码不一致。

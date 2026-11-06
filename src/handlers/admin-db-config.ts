@@ -242,6 +242,15 @@ function checkPeerAddress(peer: string, env: unknown): boolean {
   return allowlistAllowsAddress(hostAllowlist(env), peer);
 }
 
+/** Schemas that accept connections but reject all application DDL. */
+const SYSTEM_SCHEMAS = new Set([
+  'sys',
+  'mysql',
+  'information_schema',
+  'performance_schema',
+  'metrics_schema',
+]);
+
 /** Coarse failure class: useful for an admin, useless for a port scanner. */
 function classifyConnectionError(error: unknown): string {
   const code = String((error as { code?: string })?.code ?? '');
@@ -250,6 +259,11 @@ function classifyConnectionError(error: unknown): string {
   if (code === 'ETIMEDOUT' || /ETIMEDOUT|timeout/i.test(msg)) return 'timeout';
   if (code === 'ENOTFOUND' || /ENOTFOUND/.test(msg)) return 'dns';
   if (/Access denied/i.test(msg)) return 'auth';
+  // Serverless MySQL (TiDB Cloud Starter et al.) refuses DDL on system schemas
+  // with "CREATE command denied ... for table 'config'". It contains neither
+  // "Access denied" nor "Unknown database", so it used to fall through to the
+  // useless `unknown` bucket even though the fix is a one-character DB name.
+  if (/command denied|permission denied|ALTER command denied|DROP command denied/i.test(msg)) return 'permission';
   if (/certificate|TLS|SSL|self[- ]signed/i.test(msg)) return 'tls';
   if (/Unknown database/i.test(msg)) return 'database';
   return 'unknown';
@@ -332,7 +346,8 @@ function looksLikeLegacyBody(body: Record<string, unknown>): boolean {
 
 function normalizeClusterCandidate(
   body: Record<string, unknown>,
-  stored: DbRuntimeConfigV2 | null
+  stored: DbRuntimeConfigV2 | null,
+  effectiveNodes: readonly DbNodeConfig[] = []
 ): { cluster: DbRuntimeConfigV2; error?: string } {
   const fallbackNodes = stored?.nodes ?? [];
   const rawNodes = looksLikeLegacyBody(body) ? [body] : body.nodes;
@@ -354,10 +369,14 @@ function normalizeClusterCandidate(
   for (const [index, rawNode] of rawNodes.entries()) {
     const record = asRecord(rawNode) ?? {};
     const id = String(record.id ?? '').trim();
+    // A `DB_*`-described cluster has no persisted config on FC, so its only
+    // credentials live in the effective (resolved) cluster. Without this
+    // second lookup a save with an untouched password field stored an empty
+    // password and failed the connectivity probe.
     const fallback = id
-      ? fallbackNodes.find((node) => node.id === id)
+      ? (effectiveNodes.find((node) => node.id === id) ?? fallbackNodes.find((node) => node.id === id))
       : looksLikeLegacyBody(body)
-        ? fallbackNodes[0]
+        ? (effectiveNodes[0] ?? fallbackNodes[0])
         : undefined;
     const { node, error } = normalizeNodeCandidate(record, fallback, index);
     if (error) {
@@ -414,10 +433,14 @@ interface NodeProbeResult {
   schemaState?: string;
   error?: string;
   errorKind?: string;
+  /** Actionable, operator-facing explanation for the coarse error label. */
+  hint?: string;
+  /** Where the password used by this probe came from (never the value itself). */
+  passwordSource?: string;
 }
 
-async function probeNode(node: DbNodeConfig, env: unknown): Promise<NodeProbeResult> {
-  const result = await testMySqlConnection(node, env);
+async function probeNode(node: DbNodeConfig, env: unknown, passwordSource?: string): Promise<NodeProbeResult> {
+  const result = await testMySqlConnection(node, env, passwordSource);
   return {
     id: node.id,
     label: node.label,
@@ -428,12 +451,48 @@ async function probeNode(node: DbNodeConfig, env: unknown): Promise<NodeProbeRes
     schemaState: result.schemaState,
     error: result.error,
     errorKind: result.errorKind,
+    hint: result.hint,
+    passwordSource,
   };
+}
+
+/**
+ * An `auth` failure is where operators lose the most time: the coarse label
+ * says "password rejected" but not *which* password was tried. Keep the coarse
+ * label on the card and return an actionable sentence for the notice instead.
+ */
+function connectionHint(kind: string, passwordSource: string | undefined, config: DbNodeConfig): string | undefined {
+  if (kind === 'auth') {
+    if (passwordSource === 'inherited-primary') {
+      return '该副库没有自己的密码，当前沿用了主库 DB_PASSWORD；请在 DB_STANDBY_NODES 的 URL 中写入（百分号编码后的）副库密码，或单独设置 DB_STANDBY_PASSWORD。';
+    }
+    if (passwordSource === 'unset' || passwordSource === 'cleared') {
+      return '密码为空：请在表单里重新填一遍密码，或检查是否误勾了「清除已保存的密码」。';
+    }
+    if (!config.ssl) {
+      return '服务端拒绝认证：请核对账号密码（云平台重置后旧值立即失效）、账号是否被锁定；此节点 TLS 关闭，若服务端要求 SSL 也会返回 Access denied，可先开启 TLS 再试。';
+    }
+    return '服务端拒绝认证：请核对账号密码（云平台重置后旧值立即失效）、账号是否被锁定，以及来源 IP 白名单 / 是否强制 SSL。';
+  }
+  if (kind === 'permission') {
+    return '服务端拒绝了建表（CREATE command denied）：库名多半是 TiDB Cloud Connect 对话框默认给的 sys，那是只读系统库，不允许建表。请在控制台新建一个业务库（如 CREATE DATABASE nodewarden），把 DB_NAME（及 DB_STANDBY_NODES 里的库名）改过去；同时确认该账号有 CREATE 权限（TiDB Cloud Starter 需在 SQL Users 里开 DDL 权限）。';
+  }
+  if (kind === 'tls') {
+    return 'TLS 握手失败：自签证书可加 DB_SSL_INSECURE=1；若服务端不支持 TLS，把该节点 URL 改为 ?ssl=false。';
+  }
+  return undefined;
+}
+
+/** Raw driver text, flattened and capped; never contains the password itself. */
+function shortDriverError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw.replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim().slice(0, 240);
 }
 
 async function testMySqlConnection(
   config: DbNodeConfig,
-  env: unknown
+  env: unknown,
+  passwordSource?: string
 ): Promise<{
   ok: boolean;
   latencyMs: number;
@@ -441,6 +500,7 @@ async function testMySqlConnection(
   schemaState?: string;
   error?: string;
   errorKind?: string;
+  hint?: string;
 }> {
   const policy = await checkHostPolicy(config.host || '', env);
   if (!policy.ok) {
@@ -463,6 +523,26 @@ async function testMySqlConnection(
   });
   try {
     const versionRow = await db.prepare('SELECT VERSION() AS version').first<{ version: string }>();
+    // `SELECT VERSION()` succeeds even on a read-only system schema, so a probe
+    // used to report a healthy green node while the app then died at startup on
+    // its very first `CREATE TABLE config`. TiDB Cloud's Connect dialog offers
+    // `sys` as the default database; that is a system schema and cannot hold
+    // application tables. Catch it here with an actionable message instead.
+    const schemaRow = await db.prepare('SELECT DATABASE() AS db').first<{ db: string | null }>();
+    const currentSchema = String(schemaRow?.db ?? config.database ?? '').toLowerCase();
+    if (SYSTEM_SCHEMAS.has(currentSchema)) {
+      console.error('[db-config] connection test rejected a system schema', {
+        host: config.host,
+        database: currentSchema,
+      });
+      return {
+        ok: false,
+        latencyMs: Date.now() - startedAt,
+        error: 'connection failed (permission)',
+        errorKind: 'permission',
+        hint: `当前连接的库 "${currentSchema}" 是系统库，不允许建表（应用启动时会报 CREATE command denied）。请在控制台新建一个业务库，例如 CREATE DATABASE nodewarden;，然后把 DB_NAME（或副库 URL 里的库名）改过去。TiDB Cloud 的 Connect 对话框默认给的是 sys，不要直接用。`,
+      };
+    }
     // The pool is capped at one connection, so this reads the very socket the
     // query above used.
     const peer = await db.peerAddress();
@@ -490,7 +570,9 @@ async function testMySqlConnection(
     console.error('[db-config] connection test failed', {
       host: config.host,
       port: config.port,
+      user: config.user,
       kind,
+      passwordSource: passwordSource ?? 'unknown',
       message: error instanceof Error ? error.message : String(error),
     });
     return {
@@ -498,6 +580,9 @@ async function testMySqlConnection(
       latencyMs: Date.now() - startedAt,
       error: `connection failed (${kind})`,
       errorKind: kind,
+      hint: [connectionHint(kind, passwordSource, config), `原始错误：${shortDriverError(error)}`]
+        .filter(Boolean)
+        .join(' '),
     };
   } finally {
     await closeQuietly(db, 'probe');
@@ -529,6 +614,51 @@ export async function handleAdminGetDbConfig(request: Request, env: Env, actorUs
   });
 }
 
+/** A node plus the metadata needed to explain where its password came from. */
+export type NodeFallback = DbNodeConfig & {
+  source?: 'env' | 'runtime';
+  passwordInherited?: boolean;
+};
+
+/**
+ * Resolve the credential an untouched form field should inherit.
+ *
+ * The UI never echoes a stored password, so an empty field means "keep the
+ * credential already in effect". For a `DB_*`-described cluster on FC there is
+ * no persisted runtime config at all: the only copy of those credentials is the
+ * effective (resolved) cluster. Taking `nodes[0]` unconditionally used to hand
+ * every env standby the *primary's* password, so the per-node "test" button
+ * reported `connection failed (auth)` even with a perfectly valid standby URL.
+ */
+export function resolveNodeFallback(
+  id: string | undefined,
+  stored: DbRuntimeConfigV2 | null,
+  effective: readonly NodeFallback[]
+): NodeFallback | null {
+  if (id) {
+    // The effective cluster is authoritative: `DB_*` shadows any saved config,
+    // and a stale saved node (possibly with an empty password from an earlier
+    // buggy save) must not override the credential actually in use.
+    const fromEffective = effective.find((node) => node.id === id);
+    if (fromEffective) return fromEffective;
+    const fromStored = stored?.nodes.find((node) => node.id === id);
+    if (fromStored) return fromStored;
+  }
+  return effective[0] ?? null;
+}
+
+/** Report *which* credential was used, never its value. */
+export function passwordSourceOf(
+  record: Record<string, unknown>,
+  fallback: NodeFallback | null
+): string {
+  if (record.clearPassword === true) return 'cleared';
+  if (typeof record.password === 'string' && record.password.length > 0) return 'form';
+  if (!fallback?.password) return 'unset';
+  if (fallback.passwordInherited) return 'inherited-primary';
+  return fallback.source === 'env' ? 'env' : 'saved';
+}
+
 /**
  * Test one candidate node, or probe every configured node.
  *
@@ -542,23 +672,17 @@ export async function handleAdminTestDbConfig(request: Request, env: Env, actorU
   const stored = await loadRuntimeConfig(env);
   const resolved = await resolveDbCluster(env);
 
-  const storedFallbackFor = (id: string | undefined) =>
-    (id ? stored?.nodes.find((node) => node.id === id) : undefined) ??
-    (resolved.nodes[0]
-      ? {
-          ...resolved.nodes[0],
-          id: resolved.nodes[0].id,
-        }
-      : null);
+  const fallbackFor = (id: string | undefined) => resolveNodeFallback(id, stored, resolved.nodes);
 
   const single = asRecord(body.node);
   const list = Array.isArray(body.nodes) ? body.nodes : null;
 
   if (single) {
     const id = typeof single.id === 'string' ? single.id : undefined;
-    const { node, error } = normalizeNodeCandidate(single, storedFallbackFor(id), 0);
+    const fallback = fallbackFor(id);
+    const { node, error } = normalizeNodeCandidate(single, fallback, 0);
     if (error) return errorResponse(error, 400);
-    const result = await probeNode(node, env);
+    const result = await probeNode(node, env, passwordSourceOf(single, fallback));
     return jsonResponse({ ...result, ok: result.ok }, result.ok ? 200 : 502);
   }
 
@@ -566,18 +690,25 @@ export async function handleAdminTestDbConfig(request: Request, env: Env, actorU
     const candidates = list.map((raw, index) => {
       const record = asRecord(raw) ?? {};
       const id = typeof record.id === 'string' ? record.id : undefined;
-      return normalizeNodeCandidate(record, storedFallbackFor(id), index);
+      const fallback = fallbackFor(id);
+      return {
+        ...normalizeNodeCandidate(record, fallback, index),
+        passwordSource: passwordSourceOf(record, fallback),
+      };
     });
     const invalid = candidates.find((entry) => entry.error);
     if (invalid) return errorResponse(invalid.error ?? 'invalid node', 400);
-    const results = await Promise.all(candidates.map((entry) => probeNode(entry.node, env)));
+    const results = await Promise.all(
+      candidates.map((entry) => probeNode(entry.node, env, entry.passwordSource))
+    );
     return jsonResponse({ ok: results.every((result) => result.ok), results }, results.every((r) => r.ok) ? 200 : 502);
   }
 
   // Legacy flat body.
-  const { node, error } = normalizeNodeCandidate(body, storedFallbackFor(undefined), 0);
+  const legacyFallback = fallbackFor(undefined);
+  const { node, error } = normalizeNodeCandidate(body, legacyFallback, 0);
   if (error) return errorResponse(error, 400);
-  const result = await probeNode(node, env);
+  const result = await probeNode(node, env, passwordSourceOf(body, legacyFallback));
   return jsonResponse(result, result.ok ? 200 : 502);
 }
 
@@ -697,7 +828,10 @@ export async function handleAdminSaveDbConfig(request: Request, env: Env, actorU
   }
 
   const stored = await loadRuntimeConfig(env);
-  const { cluster, error } = normalizeClusterCandidate(body, stored);
+  // Env-described nodes carry their credentials only in the effective cluster;
+  // pass it as a secondary fallback so an untouched password field keeps them.
+  const effective = await resolveDbCluster(env);
+  const { cluster, error } = normalizeClusterCandidate(body, stored, effective.nodes);
   if (error) return errorResponse(error, 400);
 
   const enabled = cluster.nodes.filter((node) => node.enabled);
@@ -1658,4 +1792,7 @@ export const __testing = {
   checkPeerAddress,
   normalizeClusterCandidate,
   maskNode,
+  classifyConnectionError,
+  connectionHint,
+  SYSTEM_SCHEMAS,
 };

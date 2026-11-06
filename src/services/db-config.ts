@@ -97,6 +97,12 @@ export interface ResolvedDbNode extends DbNodeConfig {
    * (primary, native replication, env-only config).
    */
   syncReady?: boolean;
+  /**
+   * An env-described standby with no password of its own silently inherited
+   * the primary's `DB_PASSWORD`. Surfaced so the settings page can warn about
+   * it instead of showing an indistinguishable "已设置".
+   */
+  passwordInherited?: boolean;
 }
 
 export interface ResolvedDbCluster {
@@ -133,6 +139,8 @@ export interface MaskedDbNode {
   syncStatus?: DbNodeSyncState;
   /** False: a write-through replica that has never completed a sync. */
   syncReady?: boolean;
+  /** This node's password was inherited from the primary's DB_PASSWORD. */
+  passwordInherited?: boolean;
 }
 
 export interface MaskedDbCluster {
@@ -158,6 +166,8 @@ export interface ResolvedDbConfig {
   database: string;
   ssl: boolean;
   connectionLimit: number;
+  /** True when this entry has no explicit password and inherited the primary's. */
+  passwordInherited?: boolean;
 }
 
 export interface MaskedDbConfig {
@@ -925,16 +935,20 @@ function parseStandbyUrl(entry: string, base: ResolvedDbConfig): ResolvedDbConfi
   const sslParam = url.searchParams.get('ssl') ?? url.searchParams.get('tls');
   const connParam =
     url.searchParams.get('conn') ?? url.searchParams.get('connectionLimit') ?? url.searchParams.get('connLimit');
+  const hasUrlPassword = url.password.length > 0;
   return {
     mode: 'mysql',
     source: 'env',
     host: url.hostname || base.host,
     port: url.port ? parsePort(url.port, base.port) : base.port,
     user: url.username ? decodeUrlPart(url.username) : base.user,
-    password: url.password ? decodeUrlPart(url.password) : base.password,
+    password: hasUrlPassword ? decodeUrlPart(url.password) : base.password,
     database,
     ssl: sslParam === null ? base.ssl : parseEnvFlag(sslParam, base.ssl),
     connectionLimit: connParam === null ? base.connectionLimit : parsePort(connParam, base.connectionLimit),
+    // `base.passwordInherited === false` means DB_STANDBY_PASSWORD was set, so
+    // even a URL without a password still gets the standby's own credential.
+    passwordInherited: !hasUrlPassword && base.passwordInherited !== false,
   };
 }
 
@@ -966,6 +980,8 @@ export function resolveStandbysFromEnv(env: Env): ResolvedDbConfig[] {
 
   // Defaults every bare entry inherits: the primary's connection unless the
   // legacy DB_STANDBY_* overrides say otherwise.
+  const explicitStandbyPassword =
+    typeof env.DB_STANDBY_PASSWORD === 'string' && env.DB_STANDBY_PASSWORD.trim().length > 0;
   const defaults: ResolvedDbConfig = {
     ...primary,
     host: (env.DB_STANDBY_HOST || '').trim() || primary.host,
@@ -974,6 +990,7 @@ export function resolveStandbysFromEnv(env: Env): ResolvedDbConfig[] {
     password: env.DB_STANDBY_PASSWORD || primary.password,
     ssl: parseEnvFlag(env.DB_STANDBY_SSL, primary.ssl),
     connectionLimit: parsePort(env.DB_STANDBY_CONN_LIMIT, primary.connectionLimit),
+    passwordInherited: !explicitStandbyPassword,
   };
 
   const standbys: ResolvedDbConfig[] = [];
@@ -1005,7 +1022,23 @@ export function resolveStandbysFromEnv(env: Env): ResolvedDbConfig[] {
       break;
     }
     seen.add(fingerprint);
-    standbys.push(parsed);
+    // Inheriting the primary account is *correct* for a second schema on the
+    // same server. It is only a trap when the standby is another server/account:
+    // then DB_PASSWORD is almost never the right credential, and the resulting
+    // `Access denied` is invisible in the API (`passwordSet` is still true).
+    const inheritedFromPrimary =
+      !!parsed.passwordInherited &&
+      (parsed.host !== primary.host || parsed.port !== primary.port || parsed.user !== primary.user);
+    if (inheritedFromPrimary) {
+      reportOnce(
+        `inherited-password:${fingerprint}`,
+        `[db-config] standby "${fingerprint}" has no password of its own (none in DB_STANDBY_NODES and ` +
+          'DB_STANDBY_PASSWORD is unset), so it inherits the primary DB_PASSWORD. Authentication will fail ' +
+          'unless both servers use the same account password. Put the URL-encoded password in the standby URL ' +
+          'or set DB_STANDBY_PASSWORD.'
+      );
+    }
+    standbys.push({ ...parsed, passwordInherited: inheritedFromPrimary });
   }
   return standbys;
 }
@@ -1124,6 +1157,7 @@ export async function resolveDbCluster(env: Env): Promise<ResolvedDbCluster> {
           ssl: standby.ssl,
           connectionLimit: standby.connectionLimit,
           source: 'env' as const,
+          passwordInherited: standby.passwordInherited,
         };
         nodes.push({ ...node, syncStatus: recordedFor(node, id) });
       });
@@ -1206,7 +1240,9 @@ export async function resolveDbConfig(env: Env): Promise<ResolvedDbConfig> {
   };
 }
 
-export function maskNode(node: DbNodeConfig & { syncStatus?: DbNodeSyncState; syncReady?: boolean }): MaskedDbNode {
+export function maskNode(
+  node: DbNodeConfig & { syncStatus?: DbNodeSyncState; syncReady?: boolean; passwordInherited?: boolean }
+): MaskedDbNode {
   return {
     id: node.id,
     label: node.label,
@@ -1222,6 +1258,7 @@ export function maskNode(node: DbNodeConfig & { syncStatus?: DbNodeSyncState; sy
     passwordSet: !!node.password,
     syncStatus: node.syncStatus,
     syncReady: node.syncReady,
+    passwordInherited: node.passwordInherited,
   };
 }
 

@@ -45,6 +45,8 @@ export interface MaskedDbNode {
   syncStatus?: DbNodeSyncState;
   /** False: a write-through replica that has never completed a sync. */
   syncReady?: boolean;
+  /** Env standby silently inherited the primary's DB_PASSWORD. */
+  passwordInherited?: boolean;
 }
 
 export interface MaskedDbConfig {
@@ -161,6 +163,10 @@ export interface NodeProbeResult {
   schemaState?: string;
   error?: string;
   errorKind?: string;
+  /** Actionable explanation for the coarse error label. */
+  hint?: string;
+  /** Which credential was used (never the value). */
+  passwordSource?: string;
 }
 
 export interface DbConfigSaveResult {

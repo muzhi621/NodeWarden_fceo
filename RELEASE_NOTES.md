@@ -21,6 +21,44 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.16 - The Test Button Was Testing the Wrong Password
+
+### Added
+
+1. **A hands-on guide for pairing a TiDB Cloud primary with a free standby.** `DB-STANDBY-TUTORIAL.md` walks from creating a business database (never the `sys` system schema) through the `<prefix>.root` username, writing `DB_STANDBY_NODES` as separate variables or an encoded URL, TLS, IP access lists, the sync gate and a full error-code table. `scripts/db-env-check.mjs` reproduces the environment-variable parser offline and reports the resolved host, credentials source and SSL for every standby without ever printing a password. Commit: [6d9cf36](https://github.com/muzhi621/NodeWarden_fceo/commit/6d9cf36).
+2. **The FC package now ships the tutorial.** The ZIP root carries three matching documents (`DEPLOY.md`, `FC-DEPLOY.md`, `DB-STANDBY-TUTORIAL.md`), and section 九 of `FC-DEPLOY.md` lists the exact package layout so a self-built package cannot silently drift from the released one. Commit: [6d9cf36](https://github.com/muzhi621/NodeWarden_fceo/commit/6d9cf36).
+
+### Improved
+
+1. **A failed connection test now says what to fix.** Instead of a bare classification like `connection failed (unknown)`, the response carries an actionable Chinese hint and a masked, truncated copy of the driver error; the server log records the username and where the password came from (`env`, `inherited-primary`, `form`, `saved` or `unset`). Commit: [2bfa92b](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfa92b).
+2. **An inherited standby password is no longer invisible.** A standby on a different host, port or account without its own password silently falls back to the primary's `DB_PASSWORD`. The startup log now warns once and the node card shows a red "密码沿用主库" badge, while same-server schemas still inherit quietly as intended. Commit: [2bfa92b](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfa92b).
+
+### Fixed
+
+1. **The "Test" button no longer tests the primary's password against a standby.** For a standby declared by `DB_STANDBY_NODES`, the old handler looked it up only in the saved cluster and then fell back to node 0 of the effective cluster — the primary — so a perfectly correct environment-variable standby kept returning `connection failed (auth)` even though real reads and writes used the right password. The effective cluster is now searched first by node id, and the "save cluster" path no longer writes an empty password. Commit: [2bfa92b](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfa92b).
+2. **A read-only system schema no longer reports a healthy node.** `SELECT VERSION()` succeeds on `sys`, so the probe used to show green while the app then died at startup on its first `CREATE TABLE config` and returned 500 for every request. The probe now checks `DATABASE()` and rejects `sys`, `mysql`, `information_schema`, `performance_schema` and `metrics_schema` with a `(permission)` hint; `CREATE command denied` is also split out of the useless `unknown` bucket. Commits: [2bfa92b](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfa92b), [6d9cf36](https://github.com/muzhi621/NodeWarden_fceo/commit/6d9cf36).
+
+---
+
+# v1.8.16 - 测试按钮拿错了密码，系统库不再假绿
+
+### 新增
+
+1. **一份 TiDB Cloud 主库 + 免费副库的照着做教程。** `DB-STANDBY-TUTORIAL.md` 从建业务库（绝不能用 `sys` 系统库）讲到 `<prefix>.root` 用户名、`DB_STANDBY_NODES` 的分离式变量与 URL 百分号编码写法、TLS、IP 访问列表、同步门禁和完整错误码对照表。`scripts/db-env-check.mjs` 离线复现环境变量解析，直接给出每个副库最终生效的地址、凭据来源与 SSL，全程不打印明文密码。提交：[6d9cf36](https://github.com/muzhi621/NodeWarden_fceo/commit/6d9cf36)。
+2. **FC 发布包带上了这份教程。** ZIP 根目录现在是三份内容一致的文档（`DEPLOY.md`、`FC-DEPLOY.md`、`DB-STANDBY-TUTORIAL.md`），`FC-DEPLOY.md` 第九节也列出了完整包结构，自行打包时不会再和发布包悄悄走样。提交：[6d9cf36](https://github.com/muzhi621/NodeWarden_fceo/commit/6d9cf36)。
+
+### 改进
+
+1. **连接测试失败会直接说清怎么修。** 不再只给一个 `connection failed (unknown)` 分类，响应里带上可执行的中文提示和脱敏、截断后的原始驱动错误；服务端日志还会记录用户名与密码来源（`env` / `inherited-primary` / `form` / `saved` / `unset`）。提交：[2bfa92b](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfa92b)。
+2. **副库沿用主库密码不再是无声的。** 不同主机、端口或账号的副库若没有自己的密码，会静默回退到主库 `DB_PASSWORD`。现在启动日志告警一次、节点卡片显示红色「密码沿用主库」标记，而同一实例上的多库仍按设计正常继承、不误报。提交：[2bfa92b](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfa92b)。
+
+### 修复
+
+1. **「测试」按钮不再拿主库密码去连副库。** 对 `DB_STANDBY_NODES` 声明的副库，旧代码只在后台保存的集群里按 id 查找，找不到就回退到生效集群的第 0 个节点（主库），于是环境变量配置完全正确、实际读写也正常，后台却一直报 `connection failed (auth)`。现在按 id 先在生效集群里查找，且「保存集群」路径不再把空密码写进配置。提交：[2bfa92b](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfa92b)。
+2. **只读系统库不会再显示为健康节点。** `SELECT VERSION()` 在 `sys` 上照样成功，所以探测会绿灯，应用却在启动第一句 `CREATE TABLE config` 失败、之后每个请求都 500。现在探测会检查 `DATABASE()`，遇到 `sys`、`mysql`、`information_schema`、`performance_schema`、`metrics_schema` 直接给出 `(permission)` 中文提示；`CREATE command denied` 也从没有信息量的 `unknown` 里拆了出来。提交：[2bfa92b](https://github.com/muzhi621/NodeWarden_fceo/commit/2bfa92b)、[6d9cf36](https://github.com/muzhi621/NodeWarden_fceo/commit/6d9cf36)。
+
+---
+
 # v1.8.15 - The Standby Was Missing a Table, Not Time
 
 ### Fixed
