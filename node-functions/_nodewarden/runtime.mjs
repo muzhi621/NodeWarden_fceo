@@ -36463,16 +36463,20 @@ function parseStandbyUrl(entry, base) {
   }
   const sslParam = url.searchParams.get("ssl") ?? url.searchParams.get("tls");
   const connParam = url.searchParams.get("conn") ?? url.searchParams.get("connectionLimit") ?? url.searchParams.get("connLimit");
+  const hasUrlPassword = url.password.length > 0;
   return {
     mode: "mysql",
     source: "env",
     host: url.hostname || base.host,
     port: url.port ? parsePort(url.port, base.port) : base.port,
     user: url.username ? decodeUrlPart(url.username) : base.user,
-    password: url.password ? decodeUrlPart(url.password) : base.password,
+    password: hasUrlPassword ? decodeUrlPart(url.password) : base.password,
     database,
     ssl: sslParam === null ? base.ssl : parseEnvFlag(sslParam, base.ssl),
-    connectionLimit: connParam === null ? base.connectionLimit : parsePort(connParam, base.connectionLimit)
+    connectionLimit: connParam === null ? base.connectionLimit : parsePort(connParam, base.connectionLimit),
+    // `base.passwordInherited === false` means DB_STANDBY_PASSWORD was set, so
+    // even a URL without a password still gets the standby's own credential.
+    passwordInherited: !hasUrlPassword && base.passwordInherited !== false
   };
 }
 function resolveStandbysFromEnv(env) {
@@ -36485,6 +36489,7 @@ function resolveStandbysFromEnv(env) {
     entries.push(...splitStandbyEntries(raw));
   }
   if (entries.length === 0) return [];
+  const explicitStandbyPassword = typeof env.DB_STANDBY_PASSWORD === "string" && env.DB_STANDBY_PASSWORD.trim().length > 0;
   const defaults = {
     ...primary,
     host: (env.DB_STANDBY_HOST || "").trim() || primary.host,
@@ -36492,7 +36497,8 @@ function resolveStandbysFromEnv(env) {
     user: (env.DB_STANDBY_USER || "").trim() || primary.user,
     password: env.DB_STANDBY_PASSWORD || primary.password,
     ssl: parseEnvFlag(env.DB_STANDBY_SSL, primary.ssl),
-    connectionLimit: parsePort(env.DB_STANDBY_CONN_LIMIT, primary.connectionLimit)
+    connectionLimit: parsePort(env.DB_STANDBY_CONN_LIMIT, primary.connectionLimit),
+    passwordInherited: !explicitStandbyPassword
   };
   const standbys = [];
   const seen = /* @__PURE__ */ new Set([`${primary.host}:${primary.port}/${primary.database}`]);
@@ -36520,7 +36526,14 @@ function resolveStandbysFromEnv(env) {
       break;
     }
     seen.add(fingerprint);
-    standbys.push(parsed);
+    const inheritedFromPrimary = !!parsed.passwordInherited && (parsed.host !== primary.host || parsed.port !== primary.port || parsed.user !== primary.user);
+    if (inheritedFromPrimary) {
+      reportOnce(
+        `inherited-password:${fingerprint}`,
+        `[db-config] standby "${fingerprint}" has no password of its own (none in DB_STANDBY_NODES and DB_STANDBY_PASSWORD is unset), so it inherits the primary DB_PASSWORD. Authentication will fail unless both servers use the same account password. Put the URL-encoded password in the standby URL or set DB_STANDBY_PASSWORD.`
+      );
+    }
+    standbys.push({ ...parsed, passwordInherited: inheritedFromPrimary });
   }
   return standbys;
 }
@@ -36602,7 +36615,8 @@ async function resolveDbCluster(env) {
           database: standby.database,
           ssl: standby.ssl,
           connectionLimit: standby.connectionLimit,
-          source: "env"
+          source: "env",
+          passwordInherited: standby.passwordInherited
         };
         nodes.push({ ...node, syncStatus: recordedFor(node, id) });
       });
@@ -36677,7 +36691,8 @@ function maskNode(node) {
     connectionLimit: node.connectionLimit,
     passwordSet: !!node.password,
     syncStatus: node.syncStatus,
-    syncReady: node.syncReady
+    syncReady: node.syncReady,
+    passwordInherited: node.passwordInherited
   };
 }
 function maskCluster(cluster) {
@@ -38283,7 +38298,7 @@ function normalizeNodeCandidate(body, fallback, index = 0) {
 function looksLikeLegacyBody(body) {
   return !Array.isArray(body.nodes) && typeof body.host === "string";
 }
-function normalizeClusterCandidate(body, stored) {
+function normalizeClusterCandidate(body, stored, effectiveNodes = []) {
   const fallbackNodes = stored?.nodes ?? [];
   const rawNodes = looksLikeLegacyBody(body) ? [body] : body.nodes;
   if (!Array.isArray(rawNodes) || rawNodes.length === 0) {
@@ -38303,7 +38318,7 @@ function normalizeClusterCandidate(body, stored) {
   for (const [index, rawNode] of rawNodes.entries()) {
     const record = asRecord2(rawNode) ?? {};
     const id = String(record.id ?? "").trim();
-    const fallback = id ? fallbackNodes.find((node2) => node2.id === id) : looksLikeLegacyBody(body) ? fallbackNodes[0] : void 0;
+    const fallback = id ? effectiveNodes.find((node2) => node2.id === id) ?? fallbackNodes.find((node2) => node2.id === id) : looksLikeLegacyBody(body) ? effectiveNodes[0] ?? fallbackNodes[0] : void 0;
     const { node, error } = normalizeNodeCandidate(record, fallback, index);
     if (error) {
       return {
@@ -38343,8 +38358,8 @@ function normalizeClusterCandidate(body, stored) {
   const policy = body.policy === void 0 && stored ? stored.policy : normalizePolicy(body.policy);
   return { cluster: { version: 2, mode: "mysql", nodes, policy } };
 }
-async function probeNode(node, env) {
-  const result = await testMySqlConnection(node, env);
+async function probeNode(node, env, passwordSource) {
+  const result = await testMySqlConnection(node, env, passwordSource);
   return {
     id: node.id,
     label: node.label,
@@ -38354,10 +38369,34 @@ async function probeNode(node, env) {
     version: result.version,
     schemaState: result.schemaState,
     error: result.error,
-    errorKind: result.errorKind
+    errorKind: result.errorKind,
+    hint: result.hint,
+    passwordSource
   };
 }
-async function testMySqlConnection(config, env) {
+function connectionHint(kind, passwordSource, config) {
+  if (kind === "auth") {
+    if (passwordSource === "inherited-primary") {
+      return "\u8BE5\u526F\u5E93\u6CA1\u6709\u81EA\u5DF1\u7684\u5BC6\u7801\uFF0C\u5F53\u524D\u6CBF\u7528\u4E86\u4E3B\u5E93 DB_PASSWORD\uFF1B\u8BF7\u5728 DB_STANDBY_NODES \u7684 URL \u4E2D\u5199\u5165\uFF08\u767E\u5206\u53F7\u7F16\u7801\u540E\u7684\uFF09\u526F\u5E93\u5BC6\u7801\uFF0C\u6216\u5355\u72EC\u8BBE\u7F6E DB_STANDBY_PASSWORD\u3002";
+    }
+    if (passwordSource === "unset" || passwordSource === "cleared") {
+      return "\u5BC6\u7801\u4E3A\u7A7A\uFF1A\u8BF7\u5728\u8868\u5355\u91CC\u91CD\u65B0\u586B\u4E00\u904D\u5BC6\u7801\uFF0C\u6216\u68C0\u67E5\u662F\u5426\u8BEF\u52FE\u4E86\u300C\u6E05\u9664\u5DF2\u4FDD\u5B58\u7684\u5BC6\u7801\u300D\u3002";
+    }
+    if (!config.ssl) {
+      return "\u670D\u52A1\u7AEF\u62D2\u7EDD\u8BA4\u8BC1\uFF1A\u8BF7\u6838\u5BF9\u8D26\u53F7\u5BC6\u7801\uFF08\u4E91\u5E73\u53F0\u91CD\u7F6E\u540E\u65E7\u503C\u7ACB\u5373\u5931\u6548\uFF09\u3001\u8D26\u53F7\u662F\u5426\u88AB\u9501\u5B9A\uFF1B\u6B64\u8282\u70B9 TLS \u5173\u95ED\uFF0C\u82E5\u670D\u52A1\u7AEF\u8981\u6C42 SSL \u4E5F\u4F1A\u8FD4\u56DE Access denied\uFF0C\u53EF\u5148\u5F00\u542F TLS \u518D\u8BD5\u3002";
+    }
+    return "\u670D\u52A1\u7AEF\u62D2\u7EDD\u8BA4\u8BC1\uFF1A\u8BF7\u6838\u5BF9\u8D26\u53F7\u5BC6\u7801\uFF08\u4E91\u5E73\u53F0\u91CD\u7F6E\u540E\u65E7\u503C\u7ACB\u5373\u5931\u6548\uFF09\u3001\u8D26\u53F7\u662F\u5426\u88AB\u9501\u5B9A\uFF0C\u4EE5\u53CA\u6765\u6E90 IP \u767D\u540D\u5355 / \u662F\u5426\u5F3A\u5236 SSL\u3002";
+  }
+  if (kind === "tls") {
+    return "TLS \u63E1\u624B\u5931\u8D25\uFF1A\u81EA\u7B7E\u8BC1\u4E66\u53EF\u52A0 DB_SSL_INSECURE=1\uFF1B\u82E5\u670D\u52A1\u7AEF\u4E0D\u652F\u6301 TLS\uFF0C\u628A\u8BE5\u8282\u70B9 URL \u6539\u4E3A ?ssl=false\u3002";
+  }
+  return void 0;
+}
+function shortDriverError(error) {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, 240);
+}
+async function testMySqlConnection(config, env, passwordSource) {
   const policy = await checkHostPolicy(config.host || "", env);
   if (!policy.ok) {
     console.error("[db-config] host rejected by policy", { host: config.host, kind: policy.kind });
@@ -38399,14 +38438,17 @@ async function testMySqlConnection(config, env) {
     console.error("[db-config] connection test failed", {
       host: config.host,
       port: config.port,
+      user: config.user,
       kind,
+      passwordSource: passwordSource ?? "unknown",
       message: error instanceof Error ? error.message : String(error)
     });
     return {
       ok: false,
       latencyMs: Date.now() - startedAt,
       error: `connection failed (${kind})`,
-      errorKind: kind
+      errorKind: kind,
+      hint: [connectionHint(kind, passwordSource, config), `\u539F\u59CB\u9519\u8BEF\uFF1A${shortDriverError(error)}`].filter(Boolean).join(" ")
     };
   } finally {
     await closeQuietly(db, "probe");
@@ -38433,38 +38475,59 @@ async function handleAdminGetDbConfig(request, env, actorUser) {
     defaultPolicy: DEFAULT_CLUSTER_POLICY
   });
 }
+function resolveNodeFallback(id, stored, effective) {
+  if (id) {
+    const fromEffective = effective.find((node) => node.id === id);
+    if (fromEffective) return fromEffective;
+    const fromStored = stored?.nodes.find((node) => node.id === id);
+    if (fromStored) return fromStored;
+  }
+  return effective[0] ?? null;
+}
+function passwordSourceOf(record, fallback) {
+  if (record.clearPassword === true) return "cleared";
+  if (typeof record.password === "string" && record.password.length > 0) return "form";
+  if (!fallback?.password) return "unset";
+  if (fallback.passwordInherited) return "inherited-primary";
+  return fallback.source === "env" ? "env" : "saved";
+}
 async function handleAdminTestDbConfig(request, env, actorUser) {
   void actorUser;
   const body = await readJsonBody3(request);
   const stored = await loadRuntimeConfig(env);
   const resolved = await resolveDbCluster(env);
-  const storedFallbackFor = (id) => (id ? stored?.nodes.find((node2) => node2.id === id) : void 0) ?? (resolved.nodes[0] ? {
-    ...resolved.nodes[0],
-    id: resolved.nodes[0].id
-  } : null);
+  const fallbackFor = (id) => resolveNodeFallback(id, stored, resolved.nodes);
   const single = asRecord2(body.node);
   const list = Array.isArray(body.nodes) ? body.nodes : null;
   if (single) {
     const id = typeof single.id === "string" ? single.id : void 0;
-    const { node: node2, error: error2 } = normalizeNodeCandidate(single, storedFallbackFor(id), 0);
+    const fallback = fallbackFor(id);
+    const { node: node2, error: error2 } = normalizeNodeCandidate(single, fallback, 0);
     if (error2) return errorResponse(error2, 400);
-    const result2 = await probeNode(node2, env);
+    const result2 = await probeNode(node2, env, passwordSourceOf(single, fallback));
     return jsonResponse({ ...result2, ok: result2.ok }, result2.ok ? 200 : 502);
   }
   if (list && list.length > 0) {
     const candidates = list.map((raw, index) => {
       const record = asRecord2(raw) ?? {};
       const id = typeof record.id === "string" ? record.id : void 0;
-      return normalizeNodeCandidate(record, storedFallbackFor(id), index);
+      const fallback = fallbackFor(id);
+      return {
+        ...normalizeNodeCandidate(record, fallback, index),
+        passwordSource: passwordSourceOf(record, fallback)
+      };
     });
     const invalid = candidates.find((entry) => entry.error);
     if (invalid) return errorResponse(invalid.error ?? "invalid node", 400);
-    const results = await Promise.all(candidates.map((entry) => probeNode(entry.node, env)));
+    const results = await Promise.all(
+      candidates.map((entry) => probeNode(entry.node, env, entry.passwordSource))
+    );
     return jsonResponse({ ok: results.every((result2) => result2.ok), results }, results.every((r) => r.ok) ? 200 : 502);
   }
-  const { node, error } = normalizeNodeCandidate(body, storedFallbackFor(void 0), 0);
+  const legacyFallback = fallbackFor(void 0);
+  const { node, error } = normalizeNodeCandidate(body, legacyFallback, 0);
   if (error) return errorResponse(error, 400);
-  const result = await probeNode(node, env);
+  const result = await probeNode(node, env, passwordSourceOf(body, legacyFallback));
   return jsonResponse(result, result.ok ? 200 : 502);
 }
 async function bootstrapSchemaOnCandidate(config) {
@@ -38543,7 +38606,8 @@ async function handleAdminSaveDbConfig(request, env, actorUser) {
     return jsonResponse({ ok: true, mode: "d1", effective: true });
   }
   const stored = await loadRuntimeConfig(env);
-  const { cluster, error } = normalizeClusterCandidate(body, stored);
+  const effective = await resolveDbCluster(env);
+  const { cluster, error } = normalizeClusterCandidate(body, stored, effective.nodes);
   if (error) return errorResponse(error, 400);
   const enabled = cluster.nodes.filter((node) => node.enabled);
   const probes = await Promise.all(enabled.map((node) => probeNode(node, env)));

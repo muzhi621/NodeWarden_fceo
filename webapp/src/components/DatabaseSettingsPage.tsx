@@ -68,6 +68,8 @@ interface NodeDraft {
   ssl: boolean;
   connectionLimit: string;
   isNew?: boolean;
+  /** Env standby inherited the primary's password; show a warning on the card. */
+  passwordInherited?: boolean;
 }
 
 type Notice = { kind: 'ok' | 'error' | 'info'; text: string };
@@ -89,6 +91,7 @@ function newDraft(index: number): NodeDraft {
     ssl: true,
     connectionLimit: '5',
     isNew: true,
+    passwordInherited: false,
   };
 }
 
@@ -108,6 +111,7 @@ function toDraft(node: MaskedDbNode): NodeDraft {
     database: node.database,
     ssl: node.ssl !== false,
     connectionLimit: String(node.connectionLimit || 5),
+    passwordInherited: node.passwordInherited,
   };
 }
 
@@ -341,7 +345,9 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
           ? `「${draft.label}」连接成功 · ${result.version || 'MySQL'} · ${result.latencyMs}ms · 数据表 ${
               result.schemaState === 'ready' ? '已就绪' : result.schemaState === 'empty' ? '为空（保存时自动建表）' : '未知'
             }`
-          : `「${draft.label}」连接失败：${result.error || 'unknown error'}`,
+          : `「${draft.label}」连接失败：${result.error || 'unknown error'}${
+              result.hint ? ` — ${result.hint}` : ''
+            }`,
       });
     } catch (error) {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : String(error) });
@@ -954,6 +960,11 @@ export default function DatabaseSettingsPage(props: DatabaseSettingsPageProps) {
                     <span>连接池 {node.connectionLimit}</span>
                     <span>{node.ssl ? 'TLS 开启' : 'TLS 关闭'}</span>
                     <span>优先级 {node.priority}</span>
+                    {node.passwordInherited && (
+                      <span className="db-node-warn" title="该副库没有自己的密码，正在沿用主库 DB_PASSWORD">
+                        密码沿用主库（请设 DB_STANDBY_PASSWORD）
+                      </span>
+                    )}
                     {probe?.ok && probe.schemaState && (
                       <span>{probe.schemaState === 'ready' ? '数据表已就绪' : probe.schemaState === 'empty' ? '空库（保存时建表）' : '数据表未知'}</span>
                     )}

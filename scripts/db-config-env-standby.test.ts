@@ -18,6 +18,7 @@ import {
   resolveDbConfigFromEnv,
   resolveStandbysFromEnv,
 } from '../src/services/db-config';
+import { passwordSourceOf, resolveNodeFallback } from '../src/handlers/admin-db-config';
 import type { Env } from '../src/types';
 
 const base = {
@@ -29,6 +30,79 @@ const base = {
 };
 
 const asEnv = (overrides: Record<string, unknown> = {}) => ({ ...base, ...overrides }) as unknown as Env;
+
+// Regression: the per-node "test" button resolved an untouched password field
+// against `stored` only, then fell back to `nodes[0]` — the primary. On FC a
+// DB_*-described cluster has no stored config, so an env standby on another
+// server was always probed with the primary password and reported
+// `connection failed (auth)` even when its URL was correct.
+test('the test button inherits the env standby password, not the primary one', async () => {
+  const env = asEnv({
+    DB_STANDBY_NODES: 'mysql://standbyuser:standbypass@other.example.com:3306/nw_bak?ssl=true&conn=2',
+  });
+  const cluster = await resolveDbCluster(env);
+  const primary = cluster.nodes.find((node) => node.id === 'env-primary');
+  const standby = cluster.nodes.find((node) => node.id === 'env-standby-1');
+  assert.ok(primary && standby);
+  assert.equal(primary.password, 'secret');
+  assert.equal(standby.password, 'standbypass');
+  assert.equal(standby.passwordInherited, false);
+
+  const fallback = resolveNodeFallback('env-standby-1', null, cluster.nodes);
+  assert.equal(fallback?.id, 'env-standby-1');
+  assert.equal(fallback?.password, 'standbypass', 'must not inherit the primary password');
+  assert.equal(passwordSourceOf({}, fallback), 'env');
+});
+
+test('a different-server standby without its own password is flagged as inherited', async () => {
+  const env = asEnv({ DB_STANDBY_NODES: 'mysql://standbyuser@other.example.com:3306/nw_bak' });
+  const cluster = await resolveDbCluster(env);
+  const standby = cluster.nodes.find((node) => node.id === 'env-standby-1');
+  assert.ok(standby);
+  assert.equal(standby.password, 'secret');
+  assert.equal(standby.passwordInherited, true);
+  const fallback = resolveNodeFallback('env-standby-1', null, cluster.nodes);
+  assert.equal(passwordSourceOf({}, fallback), 'inherited-primary');
+});
+
+test('a same-server schema correctly inherits the primary account without a warning', async () => {
+  const cluster = await resolveDbCluster(asEnv({ DB_STANDBY_NODES: 'nw_bak' }));
+  const standby = cluster.nodes.find((node) => node.id === 'env-standby-1');
+  assert.ok(standby);
+  assert.equal(standby.password, 'secret');
+  assert.equal(standby.passwordInherited, false, 'same server/account is an intentional inheritance');
+});
+
+test('DB_STANDBY_PASSWORD counts as the standby own credential', async () => {
+  const env = asEnv({ DB_STANDBY_NODES: 'nw_bak', DB_STANDBY_PASSWORD: 'ownpass' });
+  const cluster = await resolveDbCluster(env);
+  const standby = cluster.nodes.find((node) => node.id === 'env-standby-1');
+  assert.ok(standby);
+  assert.equal(standby.password, 'ownpass');
+  assert.equal(standby.passwordInherited, false);
+});
+
+test('a stale saved node never overrides the effective env credential', async () => {
+  const env = asEnv({ DB_STANDBY_NODES: 'mysql://standbyuser:standbypass@other.example.com:3306/nw_bak' });
+  const cluster = await resolveDbCluster(env);
+  const stale = {
+    version: 2,
+    mode: 'mysql',
+    nodes: [{ ...cluster.nodes[1], password: '' }],
+    policy: cluster.policy,
+  };
+  const fallback = resolveNodeFallback('env-standby-1', stale as never, cluster.nodes);
+  assert.equal(fallback?.password, 'standbypass');
+});
+
+test('a typed password wins and an unknown id falls back to the primary', async () => {
+  const cluster = await resolveDbCluster(asEnv({ DB_STANDBY_NODES: 'nw_bak' }));
+  const fallback = resolveNodeFallback('env-standby-1', null, cluster.nodes);
+  assert.equal(passwordSourceOf({ password: 'typed' }, fallback), 'form');
+  assert.equal(passwordSourceOf({ clearPassword: true }, fallback), 'cleared');
+  assert.equal(passwordSourceOf({}, null), 'unset');
+  assert.equal(resolveNodeFallback('does-not-exist', null, cluster.nodes)?.id, 'env-primary');
+});
 
 test('without a standby list the cluster stays a single node', async () => {
   const cluster = await resolveDbCluster(asEnv());
