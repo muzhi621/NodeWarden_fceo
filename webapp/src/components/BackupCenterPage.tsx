@@ -26,7 +26,7 @@ import {
   loadPersistedRemoteBrowserState,
   persistRemoteBrowserState,
 } from '@/lib/backup-center';
-import { BACKUP_PROGRESS_EVENT, type BackupProgressDetail, type BackupProgressOperation } from '@/lib/backup-restore-progress';
+import { BACKUP_PROGRESS_EVENT, dispatchBackupProgress, type BackupProgressDetail, type BackupProgressOperation } from '@/lib/backup-restore-progress';
 import { RECOMMENDED_PROVIDERS, type RecommendedProvider } from '@/lib/backup-recommendations';
 import { t } from '@/lib/i18n';
 import { BackupDestinationDetail } from './backup-center/BackupDestinationDetail';
@@ -182,6 +182,8 @@ export default function BackupCenterPage(props: BackupCenterPageProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const restoreProgressTimerRef = useRef<number | null>(null);
   const restoreProgressPendingRef = useRef<BackupProgressState | null>(null);
+  // 每次手动远程备份一个 token，避免上一次的延时收尾误关掉新一次任务的进度弹窗。
+  const remoteRunProgressTokenRef = useRef(0);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -349,7 +351,11 @@ export default function BackupCenterPage(props: BackupCenterPageProps) {
       const includeAttachments = pending?.includeAttachments || false;
       const phases = getBackupProgressPhases(operation, source, includeAttachments);
       const matchedPhaseIndex = phases.findIndex((phase) => phase.titleKey === detail.stageTitle);
-      const phaseIndex = matchedPhaseIndex >= 0 ? matchedPhaseIndex : 0;
+      // 完成/失败事件的文案不在阶段列表里；没有匹配阶段时让进度条走到最后一格，
+      // 否则 done 事件会把进度条打回第一格（看起来像卡住）。
+      const phaseIndex = matchedPhaseIndex >= 0
+        ? matchedPhaseIndex
+        : (detail.done ? Math.max(0, phases.length - 1) : 0);
       const nextState: BackupProgressState = {
         operation,
         source,
@@ -502,6 +508,35 @@ export default function BackupCenterPage(props: BackupCenterPageProps) {
     restoreProgressPendingRef.current = null;
     setRestoreProgress(null);
     setRestoreElapsedSeconds(0);
+  }
+
+  /**
+   * 手动远程备份的进度收尾。
+   *
+   * 后端的阶段进度只通过 SignalR WebSocket 广播；Node 运行时（FC / EdgeOne Pages）
+   * 不支持 WebSocket 升级，广播到达不了浏览器。而 /api/admin/backup/run 本身是
+   * 同步返回结果的请求，所以由前端在请求结束后本地补一个 done 事件，
+   * 保证弹窗在成功和失败两条路径上都能收尾，不再依赖实时通道。
+   */
+  function finishRemoteRunProgress(ok: boolean, fileLabel: string, token: number): void {
+    dispatchBackupProgress({
+      operation: 'backup-remote-run',
+      source: 'remote',
+      step: ok ? 'remote_run_complete' : 'remote_run_failed',
+      fileName: fileLabel,
+      stageTitle: ok
+        ? 'txt_backup_remote_run_progress_complete_title'
+        : 'txt_backup_remote_run_progress_failed_title',
+      stageDetail: ok
+        ? 'txt_backup_remote_run_progress_complete_detail'
+        : 'txt_backup_remote_run_progress_failed_detail',
+      done: true,
+      ok,
+    });
+    // 双保险：即使 done 事件因组件卸载/顺序问题没被消费，也要把弹窗关掉。
+    window.setTimeout(() => {
+      if (remoteRunProgressTokenRef.current === token) clearRestoreProgress();
+    }, ok ? 1000 : 1300);
   }
 
   async function inspectLocalBackupFile(file: File): Promise<BackupFileIntegrityCheckResult> {
@@ -719,10 +754,12 @@ export default function BackupCenterPage(props: BackupCenterPageProps) {
 
   async function executeRunRemoteBackup(masterPassword: string): Promise<boolean> {
     if (!selectedDestination) return false;
+    const destinationName = selectedDestination.name || t('txt_backup_run_now');
+    const token = ++remoteRunProgressTokenRef.current;
     setRunningRemoteBackup(true);
     setLocalError('');
     try {
-      startRestoreProgress('backup-remote-run', selectedDestination.name || t('txt_backup_run_now'), {
+      startRestoreProgress('backup-remote-run', destinationName, {
         source: 'remote',
         includeAttachments: !!selectedDestination.includeAttachments,
       });
@@ -730,12 +767,14 @@ export default function BackupCenterPage(props: BackupCenterPageProps) {
       setSavedSettings(result.settings);
       setSettings(result.settings);
       setSelectedDestinationId(selectedDestination.id);
-      await loadRemoteBrowser(selectedDestination.id, currentRemoteBrowserPath, { force: true });
+      // 远端列表刷新失败不代表备份失败，不要把已成功的备份误报成失败。
+      await loadRemoteBrowser(selectedDestination.id, currentRemoteBrowserPath, { force: true }).catch(() => undefined);
+      finishRemoteRunProgress(true, destinationName, token);
       props.onNotify('success', t('txt_backup_remote_run_success_verified', { name: result.result.fileName }));
       return true;
     } catch (error) {
       showActionError(error, t('txt_backup_remote_run_failed'));
-      window.setTimeout(() => clearRestoreProgress(), 1200);
+      finishRemoteRunProgress(false, destinationName, token);
       return false;
     } finally {
       setRunningRemoteBackup(false);
