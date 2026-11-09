@@ -568,14 +568,28 @@ async function runConfiguredBackupInDurableObject(
   return body;
 }
 
-async function runScheduledBackupsInDurableObject(env: Env): Promise<void> {
+/**
+ * What one scheduler tick actually did. The Durable Object already returns
+ * these counters; surface them so the cron endpoint can log/report whether a
+ * backup ran, or whether the tick was just an idle "is anything due?" check.
+ */
+export interface ScheduledBackupTickSummary {
+  completed: number;
+  failed: number;
+  /** Another backup run held the job lease; this tick intentionally did nothing. */
+  busy: boolean;
+}
+
+const EMPTY_TICK_SUMMARY: ScheduledBackupTickSummary = { completed: 0, failed: 0, busy: false };
+
+async function runScheduledBackupsInDurableObject(env: Env): Promise<ScheduledBackupTickSummary> {
   const id = env.BACKUP_TRANSFER_RUNNER.idFromName('configured-backup-runner');
   const stub = env.BACKUP_TRANSFER_RUNNER.get(id);
   const response = await stub.fetch('https://backup-transfer/internal/run-scheduled-backups', {
     method: 'POST',
   });
   if (response.status === 409) {
-    return;
+    return { ...EMPTY_TICK_SUMMARY, busy: true };
   }
   if (!response.ok) {
     let message = `Scheduled backup failed: ${response.status}`;
@@ -586,6 +600,19 @@ async function runScheduledBackupsInDurableObject(env: Env): Promise<void> {
       // Preserve the status-based message when the DO returns a non-JSON error.
     }
     throw new Error(message);
+  }
+  try {
+    const body = await response.json<{ completed?: number; failed?: number; failures?: unknown[] }>();
+    return {
+      completed: typeof body?.completed === 'number' ? body.completed : 0,
+      failed: typeof body?.failed === 'number'
+        ? body.failed
+        : (Array.isArray(body?.failures) ? body.failures.length : 0),
+      busy: false,
+    };
+  } catch {
+    // Older runners returned an empty body on success; a tick still counts as ok.
+    return { ...EMPTY_TICK_SUMMARY };
   }
 }
 
@@ -859,8 +886,8 @@ async function runImportAndAudit(
   return imported;
 }
 
-export async function runScheduledBackupIfDue(env: Env): Promise<void> {
-  await runScheduledBackupsInDurableObject(env);
+export async function runScheduledBackupIfDue(env: Env): Promise<ScheduledBackupTickSummary> {
+  return runScheduledBackupsInDurableObject(env);
 }
 
 export async function handleGetAdminBackupSettings(request: Request, env: Env, actorUser: User): Promise<Response> {

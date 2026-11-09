@@ -20,6 +20,7 @@
     "i18n:validate": "node scripts/i18n-validate.cjs",
     "test:config-compatibility": "tsx --test scripts/config-compatibility.test.ts",
     "test:fc-timer": "tsx --test scripts/fc-timer-trigger.test.ts",
+    "test:cron-tick": "node --import ./server/register-cf-stub.mjs --import tsx --test scripts/cron-tick.test.ts",
     "test:vault-compatibility": "tsx --tsconfig webapp/tsconfig.json --import ./scripts/offline-workers-loader.mjs --test scripts/vault-compatibility.test.ts",
     "test:web-crypto": "tsx --test scripts/web-crypto-availability.test.ts",
     "test:notifications-security": "tsx --test scripts/notifications-security.test.ts",

@@ -19,6 +19,14 @@ export const CRON_PATH = '/internal/cron/backup';
 /** Aliyun FC routes event invocations (timer triggers) to this path. */
 export const FC_TIMER_PATH = '/invoke';
 
+/**
+ * Informational only: lets the cron log say which scheduler entry fired. The
+ * adapter never uses this header for authorization — `x-cron-secret` still has
+ * to match CRON_SECRET. Platform logs do not show request headers, so without
+ * it every tick (timer, EdgeOne schedule, manual curl) looks identical.
+ */
+export const SCHEDULER_SOURCE_HEADER = 'x-nodewarden-scheduler';
+
 /** FC allows a 128 KB trigger message; never buffer a real upload here. */
 const MAX_PAYLOAD_BYTES = 128 * 1024;
 
@@ -105,6 +113,10 @@ export async function adaptSchedulerRequest(request: Request): Promise<Request> 
   // clean 401) instead of falling through to an unrelated 404.
   const headers = new Headers(request.headers);
   if (secret) headers.set('x-cron-secret', secret);
+  headers.set(
+    SCHEDULER_SOURCE_HEADER,
+    secret ? (isTimerPath ? 'fc-timer' : 'payload') : 'no-secret'
+  );
   if (isTimerPath) url.pathname = CRON_PATH;
   return new Request(url.toString(), { method: request.method, headers, body: raw });
 }

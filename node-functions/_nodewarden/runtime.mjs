@@ -10785,7 +10785,7 @@ async function runScheduledBackupsInDurableObject(env) {
     method: "POST"
   });
   if (response.status === 409) {
-    return;
+    return { ...EMPTY_TICK_SUMMARY, busy: true };
   }
   if (!response.ok) {
     let message = `Scheduled backup failed: ${response.status}`;
@@ -10795,6 +10795,16 @@ async function runScheduledBackupsInDurableObject(env) {
     } catch {
     }
     throw new Error(message);
+  }
+  try {
+    const body = await response.json();
+    return {
+      completed: typeof body?.completed === "number" ? body.completed : 0,
+      failed: typeof body?.failed === "number" ? body.failed : Array.isArray(body?.failures) ? body.failures.length : 0,
+      busy: false
+    };
+  } catch {
+    return { ...EMPTY_TICK_SUMMARY };
   }
 }
 async function downloadRemoteAttachmentViaDurableObject(env, destination, blobName) {
@@ -11010,7 +11020,7 @@ async function runImportAndAudit(env, request, actorUser, archiveBytes, fileName
   return imported;
 }
 async function runScheduledBackupIfDue(env) {
-  await runScheduledBackupsInDurableObject(env);
+  return runScheduledBackupsInDurableObject(env);
 }
 async function handleGetAdminBackupSettings(request, env, actorUser) {
   void request;
@@ -11429,7 +11439,7 @@ async function seedDefaultBackupSettings(env) {
   }
   await saveBackupSettings(storage, env, getDefaultBackupSettings("UTC"));
 }
-var REMOTE_ATTACHMENT_INDEX_PATH, REMOTE_ATTACHMENT_SYNC_EXTERNAL_SUBREQUEST_LIMIT, REMOTE_ATTACHMENT_SYNC_SUBREQUEST_RESERVE, REMOTE_ATTACHMENT_SYNC_MAX_WEB_DAV_BATCH_SIZE, REMOTE_ATTACHMENT_SYNC_MAX_S3_BATCH_SIZE, REMOTE_ATTACHMENT_RESTORE_BATCH_SIZE;
+var REMOTE_ATTACHMENT_INDEX_PATH, REMOTE_ATTACHMENT_SYNC_EXTERNAL_SUBREQUEST_LIMIT, REMOTE_ATTACHMENT_SYNC_SUBREQUEST_RESERVE, REMOTE_ATTACHMENT_SYNC_MAX_WEB_DAV_BATCH_SIZE, REMOTE_ATTACHMENT_SYNC_MAX_S3_BATCH_SIZE, REMOTE_ATTACHMENT_RESTORE_BATCH_SIZE, EMPTY_TICK_SUMMARY;
 var init_backup = __esm({
   "src/handlers/backup.ts"() {
     "use strict";
@@ -11452,6 +11462,7 @@ var init_backup = __esm({
     REMOTE_ATTACHMENT_SYNC_MAX_WEB_DAV_BATCH_SIZE = 18;
     REMOTE_ATTACHMENT_SYNC_MAX_S3_BATCH_SIZE = 40;
     REMOTE_ATTACHMENT_RESTORE_BATCH_SIZE = 40;
+    EMPTY_TICK_SUMMARY = { completed: 0, failed: 0, busy: false };
   }
 });
 
@@ -50808,6 +50819,7 @@ function describeAttachmentsProblem(result) {
 // server/scheduler-request.ts
 var CRON_PATH = "/internal/cron/backup";
 var FC_TIMER_PATH = "/invoke";
+var SCHEDULER_SOURCE_HEADER = "x-nodewarden-scheduler";
 var MAX_PAYLOAD_BYTES = 128 * 1024;
 function normalizePath2(raw) {
   return raw.length > 1 ? raw.replace(/\/+$/, "") : raw;
@@ -50864,8 +50876,38 @@ async function adaptSchedulerRequest(request) {
   }
   const headers = new Headers(request.headers);
   if (secret) headers.set("x-cron-secret", secret);
+  headers.set(
+    SCHEDULER_SOURCE_HEADER,
+    secret ? isTimerPath ? "fc-timer" : "payload" : "no-secret"
+  );
   if (isTimerPath) url.pathname = CRON_PATH;
   return new Request(url.toString(), { method: request.method, headers, body: raw });
+}
+
+// server/cron-tick.ts
+function sanitize(value, maxLength) {
+  const safe = value.replace(/[^A-Za-z0-9_.:-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, maxLength);
+  return safe || "-";
+}
+function formatCronTickLog(entry) {
+  const parts = [
+    `[cron] status=${entry.status}(${entry.httpStatus})`,
+    `source=${sanitize(entry.source, 32)}`
+  ];
+  if (entry.reason) parts.push(`reason=${sanitize(entry.reason, 64)}`);
+  if (entry.providedLength !== void 0) parts.push(`providedLen=${entry.providedLength}`);
+  if (entry.expectedLength !== void 0) parts.push(`expectedLen=${entry.expectedLength}`);
+  if (entry.completed !== void 0) parts.push(`completed=${entry.completed}`);
+  if (entry.failed !== void 0) parts.push(`failed=${entry.failed}`);
+  if (entry.busy !== void 0) parts.push(`busy=${entry.busy ? "true" : "false"}`);
+  if (entry.durationMs !== void 0) parts.push(`durationMs=${entry.durationMs}`);
+  return parts.join(" ");
+}
+function logCronTick(entry, logger = console) {
+  const line = formatCronTickLog(entry);
+  if (entry.status === "ok") logger.log(line);
+  else if (entry.status === "rejected") logger.warn(line);
+  else logger.error(line);
 }
 
 // server/node-runtime.ts
@@ -51209,23 +51251,57 @@ function timingSafeEqual(a, b) {
   return diff === 0;
 }
 async function handleCronTick(request, env) {
+  const startedAt = Date.now();
+  const source = request.headers.get(SCHEDULER_SOURCE_HEADER) || "direct";
+  const durationMs = () => Date.now() - startedAt;
   const cronSecret = getCronSecret();
   if (!cronSecret) {
+    logCronTick({ status: "rejected", httpStatus: 503, source, reason: "missing-secret", durationMs: durationMs() });
     return jsonResponse({ error: "cron trigger not configured (set CRON_SECRET)" }, 503);
   }
   const provided = request.headers.get("x-cron-secret") || "";
   if (!timingSafeEqual(provided, cronSecret)) {
+    logCronTick({
+      status: "rejected",
+      httpStatus: 401,
+      source,
+      reason: "invalid-secret",
+      providedLength: provided.length,
+      expectedLength: cronSecret.length,
+      durationMs: durationMs()
+    });
     return jsonResponse({ error: "Unauthorized" }, 401);
   }
   await ensureDatabaseInitialized(env);
   const dbInitError = getDbInitError();
   if (dbInitError) {
     console.error("Skipping scheduled backup because DB init failed:", dbInitError);
+    logCronTick({ status: "error", httpStatus: 503, source, reason: "database-unavailable", durationMs: durationMs() });
     return jsonResponse({ ok: false, error: "database unavailable" }, 503);
   }
   const { runScheduledBackupIfDue: runScheduledBackupIfDue2 } = await Promise.resolve().then(() => (init_backup(), backup_exports));
-  await runScheduledBackupIfDue2(env);
-  return jsonResponse({ ok: true });
+  let summary;
+  try {
+    summary = await runScheduledBackupIfDue2(env);
+  } catch (error) {
+    logCronTick({ status: "error", httpStatus: 500, source, reason: "scheduled-backup-failed", durationMs: durationMs() });
+    throw error;
+  }
+  logCronTick({
+    status: "ok",
+    httpStatus: 200,
+    source,
+    completed: summary.completed,
+    failed: summary.failed,
+    busy: summary.busy,
+    durationMs: durationMs()
+  });
+  return jsonResponse({
+    ok: true,
+    completed: summary.completed,
+    failed: summary.failed,
+    busy: summary.busy
+  });
 }
 
 // server/edgeone.ts

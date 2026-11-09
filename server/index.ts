@@ -227,6 +227,7 @@ server.listen(PORT, () => {
     );
   }
   console.log(`  cron:           POST /internal/cron/backup (x-cron-secret) | FC timer POST /invoke (payload)${cronSecret ? '' : ' — CRON_SECRET not set, endpoint disabled'}`);
+  console.log('  cron logging:   one [cron] status=... line per tick (secret-free; see FC-DEPLOY.md 5.4.1)');
   // The admin-saved MySQL cluster lives in SETTINGS_KV = $DATA_DIR/kv-store.json.
   // On a serverless host /tmp is per-instance and dies with it, so a deployment
   // that relies on the admin config (no DB_* variables) silently loses its only

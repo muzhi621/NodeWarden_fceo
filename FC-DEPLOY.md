@@ -331,6 +331,7 @@ DB_STANDBY_NODES='nodewarden-bak,mysql://10.0.0.6/nodewarden?ssl=false,mysql://b
 
 ### 5.1 前提
 - 部署**含本次修复**的代码包（`server/scheduler-request.ts`）。旧包的 `/invoke` 只会返回 404，定时触发器日志显示成功但什么都不会发生。
+- 若要靠 FC 日志直接判读结果，请用 2026-11-09 之后的包（含 `server/cron-tick.ts`）：启动时日志会多出 `[cron] ...` 提示，每次 tick 输出一行结果。
 - 环境变量 `CRON_SECRET` 已设置（随机串，≥16 位）。你当前的值不用改。
 
 ### 5.2 控制台配置
@@ -359,7 +360,7 @@ FC 定时触发器**不能设置自定义请求头**。事件调用会打到函�
 
 ### 5.4 自测（不改任何配置）
 ```bash
-# 模拟一次 FC 定时触发，期望 200 {"ok":true}
+# 模拟一次 FC 定时触发，期望 200 且带本次 tick 的结果摘要
 curl -sS -X POST https://<函数URL>/invoke \
   -H 'Content-Type: application/octet-stream' \
   -d '{"triggerTime":"2026-11-09T00:35:00Z","triggerName":"probe","payload":"<CRON_SECRET>"}'
@@ -368,8 +369,34 @@ curl -sS -X POST https://<函数URL>/invoke \
 curl -sS -X POST https://<函数URL>/internal/cron/backup -H "x-cron-secret: <CRON_SECRET>"
 ```
 
+响应体（新包）：
+```json
+{"ok":true,"completed":0,"failed":0,"busy":false}
+```
+`completed` 是本次真正上传成功的备份数。**`completed:0` 且 `ok:true` 是正常的**——说明 tick 成功、只是当时没有到期的计划；`busy:true` 表示上一次任务还占着租约，本次跳过；`failed>0` 才是备份出错。
+
 - `401` = payload / 请求头里的 secret 不对；`503` = 没设 `CRON_SECRET` 或数据库不可用；`404` = 部署的还是旧代码包。
 - 触发后看备份中心「上次成功」是否更新、WebDAV / OSS 是否新增 ZIP。
+
+### 5.4.1 从 FC 日志判读（不用 curl 也能定案）
+FC 控制台的 `FC Invoke Start/End` **不带状态码和响应体**，单看它无法区分成功与 401。新代码每次 tick 额外输出一行结构化日志（**不含密钥明文**）：
+
+```
+[cron] status=ok(200) source=fc-timer completed=0 failed=0 busy=false durationMs=238
+[cron] status=rejected(401) source=fc-timer reason=invalid-secret providedLen=34 expectedLen=32 durationMs=1
+[cron] status=rejected(503) source=fc-timer reason=missing-secret durationMs=1
+[cron] status=error(503) source=fc-timer reason=database-unavailable durationMs=812
+[cron] status=error(500) source=fc-timer reason=scheduled-backup-failed durationMs=9031
+```
+
+| 日志 | 结论 / 处理 |
+|---|---|
+| `status=ok(200) completed=0` | 链路全通，只是没到计划时间。等计划窗口，或临时把「开始时间」改到几分钟后验证 |
+| `status=ok(200) completed=1` | 备份真的跑成功了 |
+| `status=rejected(401) providedLen=34 expectedLen=32` | **触发消息 ≠ `CRON_SECRET`**（常见于多包了一层引号、复制时带了别的字符）。首尾空格会被自动忽略，其余字符不会。去控制台把环境变量与触发消息并排核对；日志只报长度，不会泄露密钥 |
+| `status=rejected(503) reason=missing-secret` | 环境变量 `CRON_SECRET` 没设或没生效（改配置后要部署新版本） |
+| `source=direct` | 老端点 `/internal/cron/backup` 带 header 的调用（例如你自己的 curl） |
+| 只有 Start/End、完全没有 `[cron]` 行 | 还是旧代码包，或请求没打到 cron 端点（404） |
 
 ### 5.5 注意事项
 - **不要**同时保留外部 cron / GitHub Actions 调用：同一时间点会被触发两次，冷启动又会丢掉进程内的 10 分钟任务租约，可能重复上传。

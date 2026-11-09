@@ -46,7 +46,9 @@ import {
   probeAttachmentsDir,
   type AttachmentsProbeResult,
 } from './attachments-probe';
-import { adaptSchedulerRequest } from './scheduler-request';
+import { adaptSchedulerRequest, SCHEDULER_SOURCE_HEADER } from './scheduler-request';
+import { logCronTick } from './cron-tick';
+import type { ScheduledBackupTickSummary } from '../src/handlers/backup';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -591,22 +593,53 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 export async function handleCronTick(request: Request, env: Env): Promise<Response> {
+  // Platform invocation logs show only "Invoke Start/End" — no status, no body.
+  // Emit one structured line per tick (never containing the secret) so a
+  // rejected trigger can be told apart from an idle but successful check.
+  const startedAt = Date.now();
+  const source = request.headers.get(SCHEDULER_SOURCE_HEADER) || 'direct';
+  const durationMs = () => Date.now() - startedAt;
+
   const cronSecret = getCronSecret();
   if (!cronSecret) {
     // Refuse to run an unauthenticated trigger: this endpoint starts backups.
+    logCronTick({ status: 'rejected', httpStatus: 503, source, reason: 'missing-secret', durationMs: durationMs() });
     return jsonResponse({ error: 'cron trigger not configured (set CRON_SECRET)' }, 503);
   }
   const provided = request.headers.get('x-cron-secret') || '';
   if (!timingSafeEqual(provided, cronSecret)) {
+    // Lengths (not values) expose a stray space/quote in the console payload.
+    logCronTick({
+      status: 'rejected', httpStatus: 401, source, reason: 'invalid-secret',
+      providedLength: provided.length, expectedLength: cronSecret.length,
+      durationMs: durationMs(),
+    });
     return jsonResponse({ error: 'Unauthorized' }, 401);
   }
   await ensureDatabaseInitialized(env);
   const dbInitError = getDbInitError();
   if (dbInitError) {
     console.error('Skipping scheduled backup because DB init failed:', dbInitError);
+    logCronTick({ status: 'error', httpStatus: 503, source, reason: 'database-unavailable', durationMs: durationMs() });
     return jsonResponse({ ok: false, error: 'database unavailable' }, 503);
   }
   const { runScheduledBackupIfDue } = await import('../src/handlers/backup');
-  await runScheduledBackupIfDue(env);
-  return jsonResponse({ ok: true });
+  let summary: ScheduledBackupTickSummary;
+  try {
+    summary = await runScheduledBackupIfDue(env);
+  } catch (error) {
+    logCronTick({ status: 'error', httpStatus: 500, source, reason: 'scheduled-backup-failed', durationMs: durationMs() });
+    throw error;
+  }
+  logCronTick({
+    status: 'ok', httpStatus: 200, source,
+    completed: summary.completed, failed: summary.failed, busy: summary.busy,
+    durationMs: durationMs(),
+  });
+  return jsonResponse({
+    ok: true,
+    completed: summary.completed,
+    failed: summary.failed,
+    busy: summary.busy,
+  });
 }

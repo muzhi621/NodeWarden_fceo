@@ -253,6 +253,7 @@ curl -X POST https://<你的域名>/internal/cron/backup -H "x-cron-secret: <CRO
 ```
 
 - 没设 `CRON_SECRET` 时该端点返回 **503**（拒绝无鉴权触发），不会静默放行。
+- 每次 tick 返回 `{"ok":true,"completed":N,"failed":M,"busy":false}`，并输出一行 `[cron] status=... source=...` 日志（不含密钥）。`completed:0` 表示本次只是检查、没有到期计划，属正常；完整判读表见 [FC-DEPLOY.md 5.4.1](FC-DEPLOY.md#541-从-fc-日志判读不用-curl-也能定案)。
 
 ---
 
