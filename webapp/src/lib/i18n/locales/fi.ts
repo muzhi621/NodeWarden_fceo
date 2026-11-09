@@ -1387,6 +1387,7 @@ const fi: Record<string, string> = {
   "txt_log_reason_bad_password": "Virheellinen salasana",
   "txt_log_reason_device_missing": "Laite puuttuu",
   "txt_log_reason_device_session_mismatch": "Laiteistunnon epäsuhta",
+  "txt_log_reason_missing_token": "Pyynnössä ei ollut päivitystunnistetta (selain ei tallentanut tai lähettänyt evästettä)",
   "txt_log_reason_token_not_found_or_expired": "Token puuttuu tai on vanhentunut",
   "txt_log_reason_user_inactive": "Käyttäjä on epäaktiivinen",
   "txt_log_reason_user_missing": "Käyttäjä puuttuu",

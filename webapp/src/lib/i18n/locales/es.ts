@@ -1387,6 +1387,7 @@ const es: Record<string, string> = {
   "txt_log_reason_bad_password": "Contraseña incorrecta",
   "txt_log_reason_device_missing": "Dispositivo no encontrado",
   "txt_log_reason_device_session_mismatch": "La sesión no coincide con el dispositivo",
+  "txt_log_reason_missing_token": "La solicitud no incluía el token de actualización (el navegador no guardó o no envió la cookie)",
   "txt_log_reason_token_not_found_or_expired": "Token no encontrado o caducado",
   "txt_log_reason_user_inactive": "Usuario inactivo",
   "txt_log_reason_user_missing": "Usuario no encontrado",

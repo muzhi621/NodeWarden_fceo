@@ -1387,6 +1387,7 @@ const de: Record<string, string> = {
   "txt_log_reason_bad_password": "Falsches Passwort",
   "txt_log_reason_device_missing": "Gerät fehlt",
   "txt_log_reason_device_session_mismatch": "Gerätesitzung stimmt nicht überein",
+  "txt_log_reason_missing_token": "Die Anfrage enthielt keinen Aktualisierungstoken (der Browser hat das Cookie nicht gespeichert oder gesendet)",
   "txt_log_reason_token_not_found_or_expired": "Token fehlt oder ist abgelaufen",
   "txt_log_reason_user_inactive": "Benutzer inaktiv",
   "txt_log_reason_user_missing": "Benutzer fehlt",

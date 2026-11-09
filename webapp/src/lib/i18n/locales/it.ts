@@ -1387,6 +1387,7 @@ const it: Record<string, string> = {
   "txt_log_reason_bad_password": "Password errata",
   "txt_log_reason_device_missing": "Dispositivo mancante",
   "txt_log_reason_device_session_mismatch": "Sessione dispositivo non corrispondente",
+  "txt_log_reason_missing_token": "La richiesta non conteneva il token di aggiornamento (il browser non ha salvato o inviato il cookie)",
   "txt_log_reason_token_not_found_or_expired": "Token mancante o scaduto",
   "txt_log_reason_user_inactive": "Utente inattivo",
   "txt_log_reason_user_missing": "Utente mancante",

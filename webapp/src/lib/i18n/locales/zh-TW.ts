@@ -1440,6 +1440,7 @@ const zhTW: Record<string, string> = {
   "txt_log_reason_bad_password": "密碼錯誤",
   "txt_log_reason_device_missing": "裝置不存在",
   "txt_log_reason_device_session_mismatch": "裝置工作階段不相符",
+  "txt_log_reason_missing_token": "請求未攜帶更新權杖（瀏覽器未保存或未傳送 Cookie）",
   "txt_log_reason_token_not_found_or_expired": "權杖不存在或已過期",
   "txt_log_reason_user_inactive": "使用者未啟用",
   "txt_log_reason_user_missing": "使用者不存在",

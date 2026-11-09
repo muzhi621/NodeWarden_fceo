@@ -1,12 +1,29 @@
 # NodeWarden BYO-DB — 阿里云 FC 部署说明
 
 > 本文件在**仓库根目录**与**部署 ZIP 根目录**各存一份，内容一致。
-> 部署包是为「阿里云函数计算 FC · Web 函数」准备的可直接上传 ZIP，版本 **v1.8.17**。
+> 部署包是为「阿里云函数计算 FC · Web 函数」准备的可直接上传 ZIP，版本 **v1.8.18**。
 > 代码来源：`main` 分支（BYO-DB + Node 运行时 + 多轮代码审查修复）。
 >
 > 注：下文的「包内容」以 **ZIP 包**为准。仓库里的 `node_modules/` 是完整开发依赖，
 > `dist/`、`server/index.mjs` 需自行构建（见第九节）；`fc-entry.mjs` 在仓库根目录，
 > 组包时原样复制到包根即可。
+>
+> **从 v1.8.17 升级**：替换 `dist/`、`server/index.mjs`（及 `node-functions/`，若用 EdgeOne）
+> 与根目录文档即可，**数据库、环境变量、`CRON_SECRET`、定时触发器配置全部不用动**；功能行为不变。
+> 这一版是安全扫描（GitHub CodeQL / Semgrep / Scorecard / zizmor）告警的系统性修复：
+>
+> - **扫描噪声大幅收敛**：新增 `.github/codeql/codeql-config.yml`，把为部署而入库的 esbuild 生成文件
+>   （`node-functions/_nodewarden/runtime.mjs`、`server/index.mjs`）与 `dist/` 排除在分析之外——
+>   原先 279 条告警中有 214 条来自这一个生成文件，源文件仍全部照常扫描。
+> - **附件写入改为原子落盘**：`server/fs-r2.ts`、`server/attachments-probe.ts`、文件 KV 现在先写
+>   随机名、`wx` 独占、`0600` 权限的临时文件，再 `rename` 到目标路径；顺带避免并发时读到半截对象。
+>   **ossfs/cosfs/NAS 挂载需支持 rename 覆盖**（常规挂载都支持）。
+> - **备份路径解析去掉多项式正则**：改用线性字符串扫描，行为等价（510 组样本逐一比对无差异），
+>   避免超长 URL / 文件名拖慢请求。
+> - **诊断脚本不再输出任何凭据字符**：`scripts/db-env-check.mjs` 现在只报长度与首尾字符的类别，
+>   副库 URL 也只打印协议/主机/路径，不打印 userinfo。
+> - **CI 权限收敛**：工作流顶层 token 改为只读，写权限下沉到具体 job；OSV 可复用工作流固定到
+>   commit SHA；Dependabot 增加 7 天 cooldown；`SECURITY.md` 补上私有漏洞上报链接。
 >
 > **从 v1.8.16 升级**：替换 `dist/`、`server/index.mjs`（及 `node-functions/`，若用 EdgeOne）
 > 与根目录文档即可，**数据库不用动，环境变量也不用改**（`CRON_SECRET` 保持原值，定时触发器配置也不用改）。

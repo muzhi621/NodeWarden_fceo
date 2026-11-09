@@ -1387,6 +1387,7 @@ const fr: Record<string, string> = {
   "txt_log_reason_bad_password": "Mauvais mot de passe",
   "txt_log_reason_device_missing": "Appareil manquant",
   "txt_log_reason_device_session_mismatch": "Incohérence de session de l'appareil",
+  "txt_log_reason_missing_token": "La requête ne contenait aucun jeton d'actualisation (le navigateur n'a pas conservé ou envoyé le cookie)",
   "txt_log_reason_token_not_found_or_expired": "Jeton manquant ou expiré",
   "txt_log_reason_user_inactive": "Utilisateur inactif",
   "txt_log_reason_user_missing": "Utilisateur manquant",

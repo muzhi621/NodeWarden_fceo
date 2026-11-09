@@ -21,6 +21,44 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.18 - Clearing the Code Scanning Backlog
+
+### Added
+
+1. **A CodeQL config that stops scanning generated artifacts.** `.github/codeql/codeql-config.yml` excludes the committed esbuild bundles and `dist/` from analysis while keeping every TypeScript source in scope. Of the 279 open alerts, 214 came from a single generated file — including findings inside a bundled third-party library that cannot be fixed in this repository. Commit: [ca9544b](https://github.com/muzhi621/NodeWarden_fceo/commit/ca9544b).
+
+### Improved
+
+1. **Attachment and settings writes now land atomically.** Object bodies, sidecar metadata, the startup write probe and the file-backed KV are staged under a random, exclusive, owner-only name and then renamed into place. On hosts where the bucket root falls back to a shared temporary directory, a predictable name could previously be pre-created as a symlink; readers can also no longer see a half-written object. Commit: [ca9544b](https://github.com/muzhi621/NodeWarden_fceo/commit/ca9544b).
+2. **Path and URL normalisation no longer uses polynomial regular expressions.** Six replacements were turned into linear scans in `shared/string-utils.ts`; a 510-sample comparison against the old regexes found no behaviour difference, but a crafted long URL can no longer make the request spend time in backtracking. Commit: [ca9544b](https://github.com/muzhi621/NodeWarden_fceo/commit/ca9544b).
+3. **CI permissions and supply-chain settings are tightened.** Workflow-level tokens are read-only with write scopes pushed down to the jobs that need them, the OSV reusable workflow is pinned to a commit SHA, Dependabot gets a 7-day cooldown, and `SECURITY.md` now links straight to private vulnerability reporting. Commit: [ca9544b](https://github.com/muzhi621/NodeWarden_fceo/commit/ca9544b).
+
+### Fixed
+
+1. **The offline database diagnostic no longer prints any credential characters.** It reports only length and the class of the first/last character, and standby URLs are printed without their userinfo. A stray quote or space is still obvious, but no part of a password reaches the log. Commit: [ca9544b](https://github.com/muzhi621/NodeWarden_fceo/commit/ca9544b).
+2. **Several small hardening gaps are closed.** The vault decryption worker verifies message origin, nested request reads only touch own properties, console calls use literal format strings, locale file names are allowlisted before being joined to a path, and the app's `createCipher` REST helper is renamed to `createVaultCipher` so it is no longer confused with the deprecated Node crypto API. Commit: [ca9544b](https://github.com/muzhi621/NodeWarden_fceo/commit/ca9544b).
+
+---
+
+# v1.8.18 - 清掉代码扫描告警积压
+
+### 新增
+
+1. **新增 CodeQL 配置，不再扫描生成产物。** `.github/codeql/codeql-config.yml` 把为部署而入库的 esbuild bundle 与 `dist/` 排除在分析之外，所有 TypeScript 源码照常扫描。原本 279 条告警里有 214 条来自同一个生成文件，其中还包括被打包进来的第三方库内部问题，在本仓库根本无从修改。提交：[ca9544b](https://github.com/muzhi621/NodeWarden_fceo/commit/ca9544b)。
+
+### 改进
+
+1. **附件与设置写入改为原子落盘。** 对象内容、sidecar 元数据、启动写探针和文件 KV 都先写到随机名、`wx` 独占、`0600` 权限的暂存文件，再 rename 到目标路径。在没有持久盘、桶根目录退化到共享临时目录的环境里，可预测文件名原本可能被预先创建成符号链接；现在也不会再让读请求看到写了一半的对象。提交：[ca9544b](https://github.com/muzhi621/NodeWarden_fceo/commit/ca9544b)。
+2. **路径与 URL 归一化不再使用多项式正则。** 六处替换改成 `shared/string-utils.ts` 里的线性扫描；与原正则做 510 组样本逐一比对，行为完全一致，但构造超长 URL 已无法让请求耗在回溯上。提交：[ca9544b](https://github.com/muzhi621/NodeWarden_fceo/commit/ca9544b)。
+3. **CI 权限与供应链配置收紧。** 工作流顶层 token 改为只读、写权限下沉到实际需要的 job；OSV 可复用工作流固定到 commit SHA；Dependabot 增加 7 天 cooldown；`SECURITY.md` 补上私有漏洞上报直达链接。提交：[ca9544b](https://github.com/muzhi621/NodeWarden_fceo/commit/ca9544b)。
+
+### 修复
+
+1. **离线数据库自检脚本不再输出任何凭据字符。** 只报长度与首尾字符的类别，副库 URL 也只打印协议、主机和路径。多了引号或空格照样一眼能看出来，但密码的任何字符都不会进日志。提交：[ca9544b](https://github.com/muzhi621/NodeWarden_fceo/commit/ca9544b)。
+2. **补齐若干小加固点。** 保险库解密 Worker 现在校验消息来源；嵌套读取请求体只取自有属性；console 调用改用字面量格式串；语言文件名在拼接路径前先过白名单；应用里的 `createCipher` REST 辅助函数改名为 `createVaultCipher`，不再被误认为 Node crypto 的废弃 API。提交：[ca9544b](https://github.com/muzhi621/NodeWarden_fceo/commit/ca9544b)。
+
+---
+
 # v1.8.17 - Scheduled Backups Run on Aliyun FC's Own Timer
 
 ### Added

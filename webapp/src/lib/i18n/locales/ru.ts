@@ -1387,6 +1387,7 @@ const ru: Record<string, string> = {
   "txt_log_reason_bad_password": "Неверный пароль",
   "txt_log_reason_device_missing": "Устройство не найдено",
   "txt_log_reason_device_session_mismatch": "Сессия не соответствует устройству",
+  "txt_log_reason_missing_token": "В запросе нет токена обновления (браузер не сохранил или не отправил cookie)",
   "txt_log_reason_token_not_found_or_expired": "Токен отсутствует или истек",
   "txt_log_reason_user_inactive": "Пользователь неактивен",
   "txt_log_reason_user_missing": "Пользователь не найден",

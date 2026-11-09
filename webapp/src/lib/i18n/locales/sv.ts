@@ -1387,6 +1387,7 @@ const sv: Record<string, string> = {
   "txt_log_reason_bad_password": "Dåligt lösenord",
   "txt_log_reason_device_missing": "Enhet saknas",
   "txt_log_reason_device_session_mismatch": "Missmatchning i enhetssession",
+  "txt_log_reason_missing_token": "Begäran innehöll ingen uppdateringstoken (webbläsaren sparade eller skickade inte cookien)",
   "txt_log_reason_token_not_found_or_expired": "Token saknas eller har löpt ut",
   "txt_log_reason_user_inactive": "Användaren inaktiv",
   "txt_log_reason_user_missing": "Användare saknas",
