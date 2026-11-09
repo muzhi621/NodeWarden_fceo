@@ -21,6 +21,40 @@ Release note writing rules:
 7. The English and Chinese versions should match in content and ordering, not be two different summaries.
 -->
 
+# v1.8.17 - Scheduled Backups Run on Aliyun FC's Own Timer
+
+### Added
+
+1. **Aliyun FC's built-in timer trigger can now drive scheduled backups.** FC event invocations arrive at `POST /invoke` with the trigger message as payload and cannot carry custom headers, so the old cron endpoint was unreachable from a timer trigger. The server now adapts that payload into `x-cron-secret` and routes it to the cron handler: a 5-minute timer in the FC console is all that is needed, with no GitHub Actions, cloud monitor or external bot. Commits: [7d197df](https://github.com/muzhi621/NodeWarden_fceo/commit/7d197df), [69ae285](https://github.com/muzhi621/NodeWarden_fceo/commit/69ae285).
+2. **Every tick leaves one readable line in the platform log.** FC only records "FC Invoke Start/End", so a trigger rejected with 401 looked exactly like a successful one. Each tick now emits `[cron] status=... source=... completed/failed/busy` (never the secret itself) and the response reports whether a backup actually ran, so an idle but healthy check is no longer a black box. Commit: [69ae285](https://github.com/muzhi621/NodeWarden_fceo/commit/69ae285).
+
+### Improved
+
+1. **The deployment docs now cover the whole timer setup and its failure modes.** `FC-DEPLOY.md` section 5 explains the console configuration, the `/invoke` event shape, why the interval must be 5 minutes, a log-reading table and a fallback for HTTP-only functions; `EDGEONE-DEPLOY.md` shares the same adapter. Commits: [7d197df](https://github.com/muzhi621/NodeWarden_fceo/commit/7d197df), [69ae285](https://github.com/muzhi621/NodeWarden_fceo/commit/69ae285).
+
+### Fixed
+
+1. **The "remote backup completed" progress dialog no longer freezes on the first phase.** Node-based runtimes reject WebSocket upgrades, so the backend's progress events — including the `done` event that closes the dialog — never reached the browser. The manual run now dispatches a local completion event when the request settles, handles success and failure alike, and no longer lets a failed remote-list refresh misreport a successful backup. Commit: [68f74c9](https://github.com/muzhi621/NodeWarden_fceo/commit/68f74c9).
+
+---
+
+# v1.8.17 - 计划备份终于能用阿里 FC 自带定时器跑起来
+
+### 新增
+
+1. **阿里云 FC 自带定时触发器现在能驱动计划备份。** FC 的事件调用固定打到 `POST /invoke`，触发消息只能放在 payload 里，且不能自定义请求头，原来的 cron 端点根本收不到定时触发。现在服务端会把 payload 里的密钥映射成 `x-cron-secret` 并转到 cron 端点：控制台配一个 5 分钟的定时触发器就够了，不需要 GitHub Actions、云监控或任何外部机器人。提交：[7d197df](https://github.com/muzhi621/NodeWarden_fceo/commit/7d197df)、[69ae285](https://github.com/muzhi621/NodeWarden_fceo/commit/69ae285)。
+2. **每次 tick 都会在平台日志里留下一行可读结果。** FC 只记录 `FC Invoke Start/End`，被 401 拒绝的触发和成功触发长得一模一样。现在每次 tick 输出一行 `[cron] status=... source=... completed/failed/busy`（不含密钥明文），响应体也会说明本次是否真的跑了备份，「检查成功但没到计划时间」不再是黑盒。提交：[69ae285](https://github.com/muzhi621/NodeWarden_fceo/commit/69ae285)。
+
+### 改进
+
+1. **部署文档补齐了定时器的完整配置与排障。** `FC-DEPLOY.md` 第五节写清控制台配置、`/invoke` 事件形态、为什么必须 5 分钟间隔、日志判读表，以及纯 HTTP 函数的备用方案；`EDGEONE-DEPLOY.md` 共用同一套适配说明。提交：[7d197df](https://github.com/muzhi621/NodeWarden_fceo/commit/7d197df)、[69ae285](https://github.com/muzhi621/NodeWarden_fceo/commit/69ae285)。
+
+### 修复
+
+1. **「远程备份已完成」的进度弹窗不再卡在第一阶段。** Node 运行时不支持 WebSocket 升级，后端推的进度事件（包括负责关闭弹窗的 `done`）根本到不了浏览器。现在手动执行在请求结束后由前端本地补一个完成事件，成功和失败都会正常收尾，远端列表刷新失败也不会把已成功的备份误报成失败。提交：[68f74c9](https://github.com/muzhi621/NodeWarden_fceo/commit/68f74c9)。
+
+---
+
 # v1.8.16 - The Test Button Was Testing the Wrong Password
 
 ### Added

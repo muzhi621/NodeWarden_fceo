@@ -1,6 +1,6 @@
 # NodeWarden BYO-DB — 腾讯 EdgeOne Pages 部署说明
 
-> 版本 **v1.8.16**，与 `FC-DEPLOY.md`（阿里云 FC）同源同库，只是换了一个托管平台。
+> 版本 **v1.8.17**，与 `FC-DEPLOY.md`（阿里云 FC）同源同库，只是换了一个托管平台。
 > 代码来源：`main` 分支。
 >
 > **两个平台可以同时在线**：它们连同一个外接 MySQL 即可（同一份数据，互不影响；但不要让浏览器同时
@@ -100,7 +100,8 @@ EdgeOne 按 `node-functions/` 的目录结构生成路由。因为后端路径�
 
 ### 1. 建项目
 1. 打开 [EdgeOne Pages 控制台](https://console.cloud.tencent.com/edgeone/pages) → 新建项目 → **导入 Git 仓库**；
-2. 选 `muzhi621/NodeWarden_fceo`，分支 **`edgeone`**（该分支已与 `main` 同步，同为 v1.8.16；直接选 `main` 也可以）；
+2. 选 `muzhi621/NodeWarden_fceo`，分支 **`main`**（v1.8.17）。`edgeone` 分支目前仍停在 v1.8.16，
+   本次备份相关修复没有同步过去；若要继续用 `edgeone` 部署，需自行把 `main` 合进去；
 3. 构建配置由仓库根的 `edgeone.json` 决定，无需手填（控制台里也应显示）：
 
    | 项 | 值 |
