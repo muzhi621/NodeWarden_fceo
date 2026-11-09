@@ -227,8 +227,9 @@ curl -s https://<你的域名>/api/config | jq -r .environment.vault
 
 ## 六、计划备份（两种触发方式）
 
-平台自带的定时任务（`edgeone.json → schedules`）**不支持自定义请求头**，所以本分支额外支持
-「把 secret 放进 JSON body」：
+平台自带的定时任务（`edgeone.json → schedules`）**不支持自定义请求头**，所以服务端会把 payload 里的
+secret 映射成 `x-cron-secret` 再交给 cron 端点（统一在 `server/scheduler-request.ts`；阿里云 FC 定时
+触发器的 `POST /invoke` 走同一套适配，见 [FC-DEPLOY.md 第五节](FC-DEPLOY.md#五定时备份fc-自带定时触发器不需要外部-cron)）：
 
 ```json
 {

@@ -26,8 +26,6 @@ export interface EdgeOneContext {
   uuid?: string;
 }
 
-const CRON_PATH = '/internal/cron/backup';
-
 function isPrivateIpv4Literal(host: string): boolean {
   const octets = host.split('.').map(Number);
   if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
@@ -226,45 +224,12 @@ function adaptRequest(incoming: Request, context: EdgeOneContext): Request {
 }
 
 /**
- * Platforms whose scheduler cannot set request headers may pass the shared
- * secret in the JSON payload instead (`edgeone.json` → `schedules[].payload`).
- * The header stays the primary mechanism; this only fills the gap.
- */
-async function withSchedulerSecret(request: Request): Promise<Request> {
-  if (request.method !== 'POST') return request;
-  let pathname: string;
-  try {
-    pathname = new URL(request.url).pathname.replace(/\/+$/, '');
-  } catch {
-    return request;
-  }
-  if (pathname !== CRON_PATH) return request;
-  if (request.headers.get('x-cron-secret')) return request;
-  // A scheduler payload is a tiny JSON document; anything else is a regular
-  // client body and must not be slurped just to look for a secret (EdgeOne
-  // allows up to 6 MB — cloning it used to hold two copies in memory).
-  const contentType = request.headers.get('content-type') || '';
-  if (!contentType.toLowerCase().includes('application/json')) return request;
-
-  // Read the original body once and rebuild the request from the buffered
-  // text: reusing the original stream on top of the parse would keep both the
-  // platform's buffer and ours alive for the whole request.
-  const raw = await request.text();
-  let secret = '';
-  try {
-    const payload = JSON.parse(raw) as { secret?: unknown };
-    secret = typeof payload?.secret === 'string' ? payload.secret : '';
-  } catch {
-    secret = '';
-  }
-  const headers = new Headers(request.headers);
-  if (secret) headers.set('x-cron-secret', secret);
-  return new Request(request.url, { method: request.method, headers, body: raw });
-}
-
-/**
  * The single entry point used by every `node-functions/**` file.
  * Exported as `default` as well, so a function file may simply re-export it.
+ *
+ * Scheduler payloads (`edgeone.json` → `schedules[].payload`, Aliyun FC timer
+ * `POST /invoke`) are normalised inside the shared pipeline — see
+ * server/scheduler-request.ts — so every host gets the same authentication.
  */
 export async function handleEdgeOneRequest(context: EdgeOneContext): Promise<Response> {
   // EdgeOne Pages injects project variables here; the platform is the only
@@ -279,7 +244,7 @@ export async function handleEdgeOneRequest(context: EdgeOneContext): Promise<Res
     });
   }
 
-  const request = await withSchedulerSecret(adaptRequest(incoming, context));
+  const request = adaptRequest(incoming, context);
   // The asset layer MUST be stubbed here: the platform serves dist/ itself and
   // node-functions/ is read-only, so a disk-mode fallback would point dataDir
   // and distDir into the code directory (review notes O-1/C-5).

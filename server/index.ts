@@ -226,7 +226,7 @@ server.listen(PORT, () => {
         .join(', ')}`
     );
   }
-  console.log(`  cron:           POST /internal/cron/backup (x-cron-secret)${cronSecret ? '' : ' — CRON_SECRET not set, endpoint disabled'}`);
+  console.log(`  cron:           POST /internal/cron/backup (x-cron-secret) | FC timer POST /invoke (payload)${cronSecret ? '' : ' — CRON_SECRET not set, endpoint disabled'}`);
   // The admin-saved MySQL cluster lives in SETTINGS_KV = $DATA_DIR/kv-store.json.
   // On a serverless host /tmp is per-instance and dies with it, so a deployment
   // that relies on the admin config (no DB_* variables) silently loses its only

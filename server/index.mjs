@@ -50815,6 +50815,69 @@ function describeAttachmentsProblem(result) {
   }
 }
 
+// server/scheduler-request.ts
+var CRON_PATH = "/internal/cron/backup";
+var FC_TIMER_PATH = "/invoke";
+var MAX_PAYLOAD_BYTES = 128 * 1024;
+function normalizePath2(raw) {
+  return raw.length > 1 ? raw.replace(/\/+$/, "") : raw;
+}
+function extractSecret(value) {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed?.secret === "string" && parsed.secret) return parsed.secret;
+    } catch {
+    }
+  }
+  return trimmed;
+}
+async function adaptSchedulerRequest(request) {
+  if (request.method !== "POST") return request;
+  let url;
+  try {
+    url = new URL(request.url);
+  } catch {
+    return request;
+  }
+  const pathname = normalizePath2(url.pathname);
+  const isCronPath = pathname === CRON_PATH;
+  const isTimerPath = pathname === FC_TIMER_PATH;
+  if (!isCronPath && !isTimerPath) return request;
+  if (request.headers.get("x-cron-secret")) return request;
+  const declared = Number(request.headers.get("content-length") ?? NaN);
+  if (Number.isFinite(declared) && declared > MAX_PAYLOAD_BYTES) return request;
+  const contentType = request.headers.get("content-type") || "";
+  if (contentType && !/(application\/json|application\/octet-stream|text\/plain)/i.test(contentType)) {
+    return request;
+  }
+  let raw;
+  try {
+    raw = await request.text();
+  } catch {
+    return request;
+  }
+  let secret = "";
+  if (raw.length <= MAX_PAYLOAD_BYTES) {
+    try {
+      const body = JSON.parse(raw);
+      secret = extractSecret(body?.payload) || extractSecret(body?.secret) || "";
+      if (!secret && body?.payload && typeof body.payload === "object") {
+        secret = extractSecret(body.payload.secret);
+      }
+    } catch {
+      secret = extractSecret(raw);
+    }
+  }
+  const headers = new Headers(request.headers);
+  if (secret) headers.set("x-cron-secret", secret);
+  if (isTimerPath) url.pathname = CRON_PATH;
+  return new Request(url.toString(), { method: request.method, headers, body: raw });
+}
+
 // server/node-runtime.ts
 var __dirname = path3.dirname(fileURLToPath(import.meta.url));
 var state = null;
@@ -51069,6 +51132,7 @@ async function handleHealthz(env) {
   );
 }
 async function pipeline2(request, env) {
+  request = await adaptSchedulerRequest(request);
   const url = new URL(request.url);
   let pathname = url.pathname;
   if (pathname.length > 1) pathname = pathname.replace(/\/+$/, "");
@@ -51276,7 +51340,7 @@ server.listen(PORT, () => {
       `  standbys:       ${standbys.length} \xB7 ${standbys.map((node) => `${node.database}@${node.host}:${node.port}`).join(", ")}`
     );
   }
-  console.log(`  cron:           POST /internal/cron/backup (x-cron-secret)${cronSecret ? "" : " \u2014 CRON_SECRET not set, endpoint disabled"}`);
+  console.log(`  cron:           POST /internal/cron/backup (x-cron-secret) | FC timer POST /invoke (payload)${cronSecret ? "" : " \u2014 CRON_SECRET not set, endpoint disabled"}`);
   if (isDataDirEphemeral(runtime.dataDir)) {
     console.warn(
       `  WARNING:        data dir ${runtime.dataDir} is inside the temporary directory. A database cluster saved in the admin page, node sync records and write watermarks are lost when the instance is recycled. Mount NAS (or set DATA_DIR to a persistent path) before removing the DB_* variables.`

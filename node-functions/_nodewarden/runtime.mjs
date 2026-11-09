@@ -50805,6 +50805,69 @@ function describeAttachmentsProblem(result) {
   }
 }
 
+// server/scheduler-request.ts
+var CRON_PATH = "/internal/cron/backup";
+var FC_TIMER_PATH = "/invoke";
+var MAX_PAYLOAD_BYTES = 128 * 1024;
+function normalizePath2(raw) {
+  return raw.length > 1 ? raw.replace(/\/+$/, "") : raw;
+}
+function extractSecret(value) {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed?.secret === "string" && parsed.secret) return parsed.secret;
+    } catch {
+    }
+  }
+  return trimmed;
+}
+async function adaptSchedulerRequest(request) {
+  if (request.method !== "POST") return request;
+  let url;
+  try {
+    url = new URL(request.url);
+  } catch {
+    return request;
+  }
+  const pathname = normalizePath2(url.pathname);
+  const isCronPath = pathname === CRON_PATH;
+  const isTimerPath = pathname === FC_TIMER_PATH;
+  if (!isCronPath && !isTimerPath) return request;
+  if (request.headers.get("x-cron-secret")) return request;
+  const declared = Number(request.headers.get("content-length") ?? NaN);
+  if (Number.isFinite(declared) && declared > MAX_PAYLOAD_BYTES) return request;
+  const contentType = request.headers.get("content-type") || "";
+  if (contentType && !/(application\/json|application\/octet-stream|text\/plain)/i.test(contentType)) {
+    return request;
+  }
+  let raw;
+  try {
+    raw = await request.text();
+  } catch {
+    return request;
+  }
+  let secret = "";
+  if (raw.length <= MAX_PAYLOAD_BYTES) {
+    try {
+      const body = JSON.parse(raw);
+      secret = extractSecret(body?.payload) || extractSecret(body?.secret) || "";
+      if (!secret && body?.payload && typeof body.payload === "object") {
+        secret = extractSecret(body.payload.secret);
+      }
+    } catch {
+      secret = extractSecret(raw);
+    }
+  }
+  const headers = new Headers(request.headers);
+  if (secret) headers.set("x-cron-secret", secret);
+  if (isTimerPath) url.pathname = CRON_PATH;
+  return new Request(url.toString(), { method: request.method, headers, body: raw });
+}
+
 // server/node-runtime.ts
 var __dirname = path3.dirname(fileURLToPath(import.meta.url));
 var state = null;
@@ -51068,6 +51131,7 @@ async function handleHealthz(env) {
   );
 }
 async function pipeline2(request, env) {
+  request = await adaptSchedulerRequest(request);
   const url = new URL(request.url);
   let pathname = url.pathname;
   if (pathname.length > 1) pathname = pathname.replace(/\/+$/, "");
@@ -51165,7 +51229,6 @@ async function handleCronTick(request, env) {
 }
 
 // server/edgeone.ts
-var CRON_PATH = "/internal/cron/backup";
 function isPrivateIpv4Literal(host) {
   const octets = host.split(".").map(Number);
   if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
@@ -51274,30 +51337,6 @@ function adaptRequest(incoming, context) {
   }
   return new Request(url ? url.toString() : incoming.url, init);
 }
-async function withSchedulerSecret(request) {
-  if (request.method !== "POST") return request;
-  let pathname;
-  try {
-    pathname = new URL(request.url).pathname.replace(/\/+$/, "");
-  } catch {
-    return request;
-  }
-  if (pathname !== CRON_PATH) return request;
-  if (request.headers.get("x-cron-secret")) return request;
-  const contentType = request.headers.get("content-type") || "";
-  if (!contentType.toLowerCase().includes("application/json")) return request;
-  const raw = await request.text();
-  let secret = "";
-  try {
-    const payload = JSON.parse(raw);
-    secret = typeof payload?.secret === "string" ? payload.secret : "";
-  } catch {
-    secret = "";
-  }
-  const headers = new Headers(request.headers);
-  if (secret) headers.set("x-cron-secret", secret);
-  return new Request(request.url, { method: request.method, headers, body: raw });
-}
 async function handleEdgeOneRequest(context) {
   applyEnvFromRecord(context?.env);
   const incoming = context?.request;
@@ -51307,7 +51346,7 @@ async function handleEdgeOneRequest(context) {
       headers: { "Content-Type": "application/json; charset=utf-8" }
     });
   }
-  const request = await withSchedulerSecret(adaptRequest(incoming, context));
+  const request = adaptRequest(incoming, context);
   return handleNodeFetch(request, { assets: "stub" });
 }
 function onRequest(context) {

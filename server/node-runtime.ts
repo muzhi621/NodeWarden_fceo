@@ -46,6 +46,7 @@ import {
   probeAttachmentsDir,
   type AttachmentsProbeResult,
 } from './attachments-probe';
+import { adaptSchedulerRequest } from './scheduler-request';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -459,6 +460,10 @@ async function handleHealthz(env: Env): Promise<Response> {
 }
 
 export async function pipeline(request: Request, env: Env): Promise<Response> {
+  // Platform timer triggers (Aliyun FC `POST /invoke`, EdgeOne `schedules`)
+  // cannot set `x-cron-secret`; map their payload onto the authenticated cron
+  // endpoint before any routing decision is made.
+  request = await adaptSchedulerRequest(request);
   const url = new URL(request.url);
   let pathname = url.pathname;
   if (pathname.length > 1) pathname = pathname.replace(/\/+$/, '');

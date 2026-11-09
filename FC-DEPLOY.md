@@ -324,17 +324,74 @@ DB_STANDBY_NODES='nodewarden-bak,mysql://10.0.0.6/nodewarden?ssl=false,mysql://b
 6. 授予「允许默认网络访问公网」（否则连不上外部 MySQL）。
 7. 打开函数 URL → 注册管理员 → 后台 `/admin/database` 确认「外接 MySQL · 已就绪」。
 
-## 五、定时备份（本轮有变化，务必看）
+## 五、定时备份（FC 自带定时触发器，不需要外部 cron）
 旧版本用进程内 `setInterval` 每 5 分钟跑一次计划备份。在 FC 上这是错的：缩容到 0 后不触发、多实例会各跑一遍（重复上传到同一个 WebDAV）。
 
-现在改为**平台定时触发**：
-1. 设环境变量 `CRON_SECRET`（随机串，≥16 位）。
-2. FC 函数 → 触发器 → 创建**定时触发器**：`0 */5 * * * * *`（每 5 分钟）。
-   若定时触发器不支持自定义请求头，则用「云监控/事件总线」或任意外部 cron（如 GitHub Actions、Uptime 机器人）调用：
-   ```bash
-   curl -X POST https://<函数URL>/internal/cron/backup -H "x-cron-secret: <CRON_SECRET>"
-   ```
-3. 未设 `CRON_SECRET` 时该端点返回 503（拒绝无鉴权触发），不会静默放行。
+现在由 **FC 定时触发器**驱动：平台每 5 分钟调用一次函数，全部在阿里云 FC 内完成，不需要 GitHub Actions、云监控或任何外部机器人。
+
+### 5.1 前提
+- 部署**含本次修复**的代码包（`server/scheduler-request.ts`）。旧包的 `/invoke` 只会返回 404，定时触发器日志显示成功但什么都不会发生。
+- 环境变量 `CRON_SECRET` 已设置（随机串，≥16 位）。你当前的值不用改。
+
+### 5.2 控制台配置
+函数详情 → **触发器** → 创建触发器：
+
+| 项 | 填写 |
+|---|---|
+| 触发器类型 | **定时触发器** |
+| 名称 | `nodewarden-backup-tick`（随意） |
+| 版本或别名 | LATEST |
+| 触发方式 | **时间间隔 = 5**（每 5 分钟）；或「自定义」填 `CRON_TZ=Asia/Shanghai 0 */5 * * * *` |
+| 触发消息 | 填 `CRON_SECRET` 的值（裸字符串），或 `{"secret":"<CRON_SECRET>"}` |
+
+> **为什么必须 5 分钟**：服务端 `BACKUP_SCHEDULER_WINDOW_MINUTES = 5`，`hasBackupSlotBetween()` 只补本次 tick 之后 5 分钟内的漏跑，跨 tick 不补。间隔大于 5 分钟会直接错过计划时间点。
+> 「时间间隔」按平台时钟整 5 分钟触发，无时区问题；自定义 CRON 默认按 UTC 解析，但中国时区与 UTC 相差整 8 小时，分钟对齐不受影响。业务侧「开始时间」仍按 `Asia/Shanghai` 判定。
+> 官方 Cron 是 **6 位**（秒 分 时 日 月 周），不是 7 位的 Quartz 写法。
+
+### 5.3 原理（排障用）
+FC 定时触发器**不能设置自定义请求头**。事件调用会打到函数 HTTP Server 的 `POST /invoke`，`Content-Type` 通常是 `application/octet-stream`，请求体为：
+
+```json
+{"triggerTime":"2026-11-09T00:35:00Z","triggerName":"nodewarden-backup-tick","payload":"<触发消息>"}
+```
+
+服务端 `server/scheduler-request.ts` 把 payload 里的密钥映射成 `x-cron-secret`，并把 `/invoke` 改写为 `/internal/cron/backup`，再交给 `handleCronTick()` 校验并调用 `runScheduledBackupIfDue()`。`handleCronTick` 本身仍**只认 header**，不会放行无鉴权触发。EdgeOne 的 `schedules[].payload` 走同一套适配。
+
+### 5.4 自测（不改任何配置）
+```bash
+# 模拟一次 FC 定时触发，期望 200 {"ok":true}
+curl -sS -X POST https://<函数URL>/invoke \
+  -H 'Content-Type: application/octet-stream' \
+  -d '{"triggerTime":"2026-11-09T00:35:00Z","triggerName":"probe","payload":"<CRON_SECRET>"}'
+
+# 老的 HTTP 方式仍然可用，期望同样的 200
+curl -sS -X POST https://<函数URL>/internal/cron/backup -H "x-cron-secret: <CRON_SECRET>"
+```
+
+- `401` = payload / 请求头里的 secret 不对；`503` = 没设 `CRON_SECRET` 或数据库不可用；`404` = 部署的还是旧代码包。
+- 触发后看备份中心「上次成功」是否更新、WebDAV / OSS 是否新增 ZIP。
+
+### 5.5 注意事项
+- **不要**同时保留外部 cron / GitHub Actions 调用：同一时间点会被触发两次，冷启动又会丢掉进程内的 10 分钟任务租约，可能重复上传。
+- **不要**设 `INPROCESS_CRON=1`：FC 多实例会各跑一份并阻止缩容。
+- 函数「执行超时」≥ 300s；含大量附件的备份可能更久。
+- 最小实例 0 可用：定时触发器会冷启动一个实例执行 tick，跑完自动回收。
+
+### 5.6 控制台不给这个函数加定时触发器时
+FC 2.0 的「HTTP 函数」只能挂一个 HTTP 触发器，不支持定时触发器（FC 3.0 的 Web 函数可以同时实现 `/` 与 `/invoke`）。若触发器页里看不到「定时触发器」，**不用改造主函数**：在同一个服务下新建一个「任务函数 / 事件函数」即可，仍然全部在阿里云 FC 内、不依赖外部：
+
+```js
+// Node.js 内置运行时，事件函数 handler
+exports.handler = async () => {
+  const res = await fetch('https://<函数URL>/internal/cron/backup', {
+    method: 'POST',
+    headers: { 'x-cron-secret': process.env.CRON_SECRET },
+  });
+  return { statusCode: res.status, body: await res.text() };
+};
+```
+
+给这个新函数设同一个 `CRON_SECRET`、加定时触发器（时间间隔 5 分钟，触发消息可留空）。它只负责把 tick 转给主函数，不碰数据、不占主函数的 HTTP 触发器。
 
 ## 六、从旧版本升级（重要）
 数据库结构在本轮有两处修正，**旧库需要手动修一次**（新库自动正确）：
