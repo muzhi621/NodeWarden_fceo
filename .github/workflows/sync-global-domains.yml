@@ -11,13 +11,19 @@ on:
         default: "main"
         type: string
 
+# Read-only by default; the sync job alone is allowed to push its branch and
+# open a PR. Workflow-level write grants are flagged by Scorecard and zizmor.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   sync-global-domains:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 

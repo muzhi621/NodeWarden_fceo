@@ -12,7 +12,8 @@
  *
  * Windows PowerShell 可用 $env:DB_HOST="..." 逐个设置后运行。
  *
- * 安全：不发起任何网络连接，不打印明文密码，只输出长度与首尾字符。
+ * 安全：不发起任何网络连接，不打印密码的任何原始字符；只输出长度与
+ *       首尾字符的类别（普通字符 / 空白 / 引号），足以定位空格与引号问题。
  * 依据：nodewarden-git/src/services/db-config.ts 的
  *       resolveDbConfigFromEnv / resolveStandbysFromEnv / parseStandbyUrl，
  *       以及 server/node-runtime.ts 的 buildNodeEnv() 白名单。
@@ -31,11 +32,18 @@ const READ_KEYS = [
 // 这些由 readEnv() 直读 process.env，不经过白名单
 const DIRECT_KEYS = ['DB_SSL_INSECURE', 'DB_SSL_CA', 'DB_TIMEZONE', 'DB_HOST_ALLOWLIST'];
 
+// Never emit any character of a credential: only its length and the *class* of
+// the first/last character (a stray space or quote is the usual misconfig).
+function characterClass(ch) {
+  if (/\s/.test(ch)) return '空白';
+  if (/["']/.test(ch)) return '引号';
+  return '普通字符';
+}
 function brief(v) {
   if (v === undefined) return '未设置';
-  if (v === '') return '空字符串 —— 会被 || 回退，等同没设';
+  if (v === '' || v === null) return '空字符串 —— 会被 || 回退，等同没设';
   const s = String(v);
-  return `len=${s.length}  ${s.slice(0, 1)}…${s.slice(-1)}`;
+  return `len=${s.length}  首=${characterClass(s[0])} 尾=${characterClass(s[s.length - 1])}`;
 }
 function flag(raw, fallback) {
   const v = String(raw ?? '').trim().toLowerCase();
@@ -51,6 +59,17 @@ function decode(v) {
 }
 function line(k, v) { console.log(`  ${k.padEnd(26)} ${v}`); }
 function rule() { console.log('─'.repeat(66)); }
+// A standby entry may be a full mysql:// URL with an inline password. Print
+// only protocol/host/path — never the userinfo — even when the URL is malformed.
+function summarizeEntry(entry) {
+  if (!entry.includes('://')) return entry;
+  try {
+    const url = new URL(entry);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return '(URL 无法解析，credentials 已隐藏)';
+  }
+}
 
 console.log('\nNodeWarden FC 环境变量自检（离线，不连库，不打印明文密码）\n');
 rule();
@@ -128,7 +147,7 @@ if (entries.length === 0) {
 let riskCount = 0;
 entries.forEach((entry, i) => {
   const n = i + 1;
-  console.log(`\n  副库 ${n}  条目原文：${entry.replace(/\/\/([^/@:]*):[^/]*@/, '//$1:***@')}`);
+  console.log(`\n  副库 ${n}  条目（凭据已隐藏）：${summarizeEntry(entry)}`);
 
   let parsed;
   let passwordSource;
@@ -218,4 +237,4 @@ if (riskCount > 0) {
 }
 console.log('\n  ⚠ buildNodeEnv() 有 sharedEnv 进程内缓存：改完 FC 环境变量必须重新部署，');
 console.log('    并确认旧实例已回收（预留实例会一直用旧值），否则改了也不生效。');
-console.log('  ⚠ 数据库密码不要贴给我或任何公开环境；本脚本只输出长度与首尾字符。\n');
+console.log('  ⚠ 数据库密码不要贴给我或任何公开环境；本脚本只输出长度与首尾字符的类别，不输出任何原始字符。\n');

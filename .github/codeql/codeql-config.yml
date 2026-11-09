@@ -1,0 +1,19 @@
+name: "NodeWarden CodeQL config"
+
+# Generated artifacts are committed because Aliyun FC / EdgeOne Pages deploy
+# straight from the repository (no build step on the platform). Analysing them
+# duplicates every finding from their TypeScript sources and adds hundreds of
+# minifier-induced quality findings that cannot be fixed in the generated file.
+# The real sources (*.ts / *.tsx / *.mjs) remain fully scanned.
+paths-ignore:
+  - node-functions/_nodewarden/runtime.mjs
+  - server/index.mjs
+  - dist
+  - webapp/dist
+  - node_modules
+  - "**/*.min.js"
+  - "**/*.min.mjs"
+
+queries:
+  - uses: security-extended
+  - uses: security-and-quality

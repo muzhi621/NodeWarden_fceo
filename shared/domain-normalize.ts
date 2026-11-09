@@ -114,10 +114,20 @@ function extractHost(input: string): string {
     if (colonIndex > -1 && raw.indexOf(':') === colonIndex) raw = raw.slice(0, colonIndex);
   }
 
-  return raw
-    .replace(/^\*+\./, '')
-    .replace(/^\.+/, '')
-    .replace(/\.+$/, '');
+  // Equivalent to the three anchored replaces below, but as linear scans:
+  // `/^\*+\./`, `/^\.+/` and `/\.+$/` are flagged as polynomial ReDoS on
+  // attacker-controlled URLs with long runs of '*' or '.'.
+  //   1. drop a leading wildcard label ("*." / "**.")
+  //   2. drop leading dots
+  //   3. drop trailing dots
+  let start = 0;
+  let end = raw.length;
+  let cursor = start;
+  while (cursor < end && raw[cursor] === '*') cursor += 1;
+  if (cursor > start && cursor < end && raw[cursor] === '.') start = cursor + 1;
+  while (start < end && raw[start] === '.') start += 1;
+  while (end > start && raw[end - 1] === '.') end -= 1;
+  return raw.slice(start, end);
 }
 
 function isValidHost(host: string): boolean {

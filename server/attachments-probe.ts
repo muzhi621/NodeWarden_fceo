@@ -10,6 +10,7 @@
 // path is a separate mount, whether it accepts writes, and lets the caller wait
 // for a mount that comes up a second after the process starts.
 
+import { randomUUID } from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
@@ -70,13 +71,19 @@ async function probeOnce(dir: string, expectMount: boolean): Promise<Attachments
         };
       }
     }
-    const file = path.join(dir, `${PROBE_FILE}-${process.pid}`);
+    // Unpredictable name + exclusive create + owner-only mode: a predictable
+    // name in a shared temporary directory can be pre-created as a symlink by
+    // another local user and used to clobber arbitrary files.
+    const file = path.join(dir, `${PROBE_FILE}-${process.pid}-${randomUUID()}`);
     const payload = `nodewarden ${Date.now()}`;
-    await fsp.writeFile(file, payload);
-    const echo = await fsp.readFile(file, 'utf8');
-    await fsp.rm(file, { force: true });
-    if (echo !== payload) {
-      return { dir, status: 'unwritable', detail: 'wrote a probe file and read back different bytes' };
+    try {
+      await fsp.writeFile(file, payload, { flag: 'wx', mode: 0o600 });
+      const echo = await fsp.readFile(file, 'utf8');
+      if (echo !== payload) {
+        return { dir, status: 'unwritable', detail: 'wrote a probe file and read back different bytes' };
+      }
+    } finally {
+      await fsp.rm(file, { force: true });
     }
     return { dir, status: 'ok' };
   } catch (error) {

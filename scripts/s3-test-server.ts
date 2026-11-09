@@ -72,11 +72,18 @@ function canonicalQuery(rawQuery: string): string {
     .join('&');
 }
 
+const AUTH_SCHEME = 'AWS4-HMAC-SHA256';
+
 function parseAuthorization(header: string): { accessKeyId: string; scope: string; signedHeaders: string; signature: string } | null {
-  const match = /^AWS4-HMAC-SHA256\s+(.*)$/.exec(header.trim());
-  if (!match) return null;
+  // Parsed without a regex: `/^AWS4-HMAC-SHA256\s+(.*)$/` lets `\s+` and `.*`
+  // overlap on long whitespace runs, which is polynomial-time backtracking on
+  // an untrusted Authorization header.
+  const trimmed = header.trim();
+  if (!trimmed.startsWith(AUTH_SCHEME)) return null;
+  const rest = trimmed.slice(AUTH_SCHEME.length);
+  if (rest.length === 0 || rest === rest.trimStart()) return null;
   const fields = new Map<string, string>();
-  for (const part of match[1].split(',')) {
+  for (const part of rest.trimStart().split(',')) {
     const index = part.indexOf('=');
     if (index === -1) continue;
     fields.set(part.slice(0, index).trim(), part.slice(index + 1).trim());

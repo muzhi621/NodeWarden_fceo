@@ -5,16 +5,22 @@ on:
     branches:
       - "**"
 
+# Keep the workflow-level token read-only. The one job that needs to publish
+# SARIF results gets `security-events: write` at job scope (OpenSSF Scorecard
+# Token-Permissions / zizmor excessive-permissions).
 permissions:
   contents: read
-  actions: read
-  security-events: write
-  packages: read
 
 jobs:
   analyze:
     name: CodeQL Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+      packages: read
 
     strategy:
       fail-fast: false
@@ -36,7 +42,7 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-          queries: security-extended,security-and-quality
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@411bbbe57033eedfc1a82d68c01345aa96c737d7

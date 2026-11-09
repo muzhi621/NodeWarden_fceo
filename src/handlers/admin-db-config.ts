@@ -793,7 +793,7 @@ async function closeQuietly(pool: { close: () => Promise<void> }, label: string)
   try {
     await pool.close();
   } catch (error) {
-    console.warn(`[db-config] closing the ${label} pool failed:`, error);
+    console.warn('[db-config] closing the %s pool failed:', label, error);
   }
 }
 

@@ -34,7 +34,7 @@ import {
   bulkPermanentDeleteCiphers,
   bulkRestoreCiphers,
   bulkUnarchiveCiphers,
-  createCipher,
+  createVaultCipher,
   createFolder,
   deleteCipher,
   deleteCipherAttachment,
@@ -540,7 +540,7 @@ export default function useVaultSendActions(options: UseVaultSendActionsOptions)
         const optimistic = optimisticCipherFromDraft(draft, null);
         patchDecryptedCiphers((prev) => [optimistic, ...prev.filter((cipher) => cipher.id !== optimistic.id)]);
         try {
-          const created = await createCipher(authedFetch, session, draft);
+          const created = await createVaultCipher(authedFetch, session, draft);
           for (const file of attachments) {
             setUploadingAttachmentName(file.name);
             setAttachmentUploadPercent(0);

@@ -1447,7 +1447,7 @@ export async function buildCipherImportPayload(session: SessionState, draft: Vau
   return buildCipherPayload(session, draft, null);
 }
 
-export async function createCipher(
+export async function createVaultCipher(
   authedFetch: AuthedFetch,
   session: SessionState,
   draft: VaultDraft

@@ -21,6 +21,7 @@
 //      is rethrown, so the API answers 5xx instead of telling the user their
 //      attachment no longer exists.
 
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -79,8 +80,36 @@ function sidecarPath(full: string): string {
   return `${full}.meta.json`;
 }
 
+/**
+ * Stage every write under a fresh, unpredictable, exclusive, owner-only name in
+ * the target directory, then atomically rename it into place.
+ *
+ * On hosts without a persistent disk the bucket root defaults to os.tmpdir(),
+ * which is world-writable: writing straight to a predictable path can be
+ * redirected by a pre-created symlink. As a bonus, readers can no longer see a
+ * partially written object, which reinforces the `incomplete` sidecar marker.
+ */
+function stagingPath(full: string): string {
+  return path.join(path.dirname(full), `.${path.basename(full)}.${process.pid}.${randomUUID()}.tmp`);
+}
+
+async function dropStaging(staging: string): Promise<void> {
+  await fsp.rm(staging, { force: true }).catch(() => {});
+}
+
+async function writeObjectAtomic(full: string, data: string | Uint8Array): Promise<void> {
+  const staging = stagingPath(full);
+  try {
+    await fsp.writeFile(staging, data, { flag: 'wx', mode: 0o600 });
+    await fsp.rename(staging, full);
+  } catch (error) {
+    await dropStaging(staging);
+    throw error;
+  }
+}
+
 async function writeSidecar(full: string, meta: FsR2Sidecar): Promise<void> {
-  await fsp.writeFile(sidecarPath(full), JSON.stringify(meta));
+  await writeObjectAtomic(sidecarPath(full), JSON.stringify(meta));
 }
 
 /** Best-effort removal of a half-written object; never masks the original error. */
@@ -121,14 +150,14 @@ function toBytes(value: unknown): Uint8Array | null {
 async function writeBody(full: string, value: unknown): Promise<number> {
   const bytes = toBytes(value);
   if (bytes) {
-    await fsp.writeFile(full, bytes);
+    await writeObjectAtomic(full, bytes);
     return bytes.byteLength;
   }
 
   const source = toNodeReadable(value);
   if (!source) {
     // Unknown body type: store an empty object rather than a file of garbage.
-    await fsp.writeFile(full, new Uint8Array(0));
+    await writeObjectAtomic(full, new Uint8Array(0));
     return 0;
   }
 
@@ -139,7 +168,14 @@ async function writeBody(full: string, value: unknown): Promise<number> {
       callback(null, chunk);
     },
   });
-  await pipeline(source, counter, fs.createWriteStream(full));
+  const staging = stagingPath(full);
+  try {
+    await pipeline(source, counter, fs.createWriteStream(staging, { flags: 'wx', mode: 0o600 }));
+    await fsp.rename(staging, full);
+  } catch (error) {
+    await dropStaging(staging);
+    throw error;
+  }
   return size;
 }
 

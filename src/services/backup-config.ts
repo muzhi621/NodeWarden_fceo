@@ -1,4 +1,5 @@
 import type { Env, User } from '../types';
+import { stripSurroundingSlashes, stripTrailingSlashes } from '../../shared/string-utils';
 import { StorageService } from './storage';
 import {
   type BackupSettingsPortableEnvelope,
@@ -65,7 +66,7 @@ function asTrimmedString(value: unknown): string {
 }
 
 function normalizePath(value: unknown): string {
-  return asTrimmedString(value).replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  return stripSurroundingSlashes(asTrimmedString(value).replace(/\\/g, '/'));
 }
 
 function normalizeHostnameForPolicy(hostname: string): string {
@@ -264,7 +265,7 @@ export function normalizeBackupEndpointUrl(value: string, label: string): string
     throw new Error(`${label} must not include query or fragment`);
   }
   assertBackupEndpointHostAllowed(parsed.hostname, label);
-  return parsed.toString().replace(/\/+$/, '');
+  return stripTrailingSlashes(parsed.toString());
 }
 
 function assertValidTimeZone(timezone: string): string {

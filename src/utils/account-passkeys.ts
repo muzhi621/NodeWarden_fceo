@@ -4,6 +4,7 @@ import type {
   RegistrationResponseJSON,
   WebAuthnCredential,
 } from '@simplewebauthn/server';
+import { stripTrailingChar } from '../../shared/string-utils';
 import type {
   AccountPasskeyChallengeScope,
   AccountPasskeyCredential,
@@ -68,7 +69,9 @@ function uuidToDotNetGuidBytes(value: string): Uint8Array | null {
 }
 
 function normalizeWebAuthnBase64(value: unknown): string {
-  return String(value || '').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  // The padding strip uses a linear scan instead of /=+$/ (polynomial ReDoS on
+  // a long run of '=' from an untrusted WebAuthn response).
+  return stripTrailingChar(String(value || '').replace(/\+/g, '-').replace(/\//g, '_'), '=');
 }
 
 async function importHmacKey(secret: string): Promise<CryptoKey> {

@@ -5,6 +5,10 @@ type WorkerRequest =
   | { id: number; kind: 'sends'; payload: DecryptSendsArgs };
 
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
+  // A dedicated worker is same-origin by construction and reports an empty
+  // MessageEvent.origin, but verify it anyway: this handler receives decryption
+  // keys and must never answer a message from another origin.
+  if (event.origin && event.origin !== self.location.origin) return;
   const request = event.data;
   try {
     if (request.kind === 'vault-core') {

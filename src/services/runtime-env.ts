@@ -57,7 +57,9 @@ export async function readEnvFile(name: string, label: string): Promise<string |
     const fs = (await import(/* @vite-ignore */ fsName)) as { readFileSync(path: string, encoding: string): string };
     return fs.readFileSync(filePath, 'utf8');
   } catch (error) {
-    console.error(`[runtime-env] failed to read ${label} (${filePath}):`, error);
+    // Literal format string: a path/env value containing %s or %d must not be
+    // interpreted as a util.format specifier by console.error.
+    console.error('[runtime-env] failed to read %s (%s):', label, filePath, error);
     return undefined;
   }
 }

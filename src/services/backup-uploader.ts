@@ -5,6 +5,7 @@ import {
   WebDavBackupDestination,
   normalizeBackupEndpointUrl,
 } from './backup-config';
+import { stripTrailingSlashes } from '../../shared/string-utils';
 
 export interface BackupUploadResult {
   provider: BackupDestinationType;
@@ -128,6 +129,8 @@ function parseHttpDate(value: string): string | null {
 }
 
 function extractXmlBlocks(xml: string, tagName: string): string[] {
+  // `tagName` is a hard-coded XML tag name from the S3/WebDAV response parser.
+  // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
   const pattern = new RegExp(`<(?:[^:>]+:)?${tagName}\\b[^>]*>([\\s\\S]*?)</(?:[^:>]+:)?${tagName}>`, 'gi');
   const blocks: string[] = [];
   let match: RegExpExecArray | null;
@@ -138,6 +141,8 @@ function extractXmlBlocks(xml: string, tagName: string): string[] {
 }
 
 function extractXmlFirst(xml: string, tagName: string): string | null {
+  // `tagName` is a hard-coded XML tag name from the S3/WebDAV response parser.
+  // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
   const pattern = new RegExp(`<(?:[^:>]+:)?${tagName}\\b[^>]*>([\\s\\S]*?)</(?:[^:>]+:)?${tagName}>`, 'i');
   const match = xml.match(pattern);
   return match?.[1] ? decodeXmlText(match[1].trim()) : null;
@@ -286,7 +291,7 @@ function ensureDestinationConfigReady(destination: BackupDestinationRecord): voi
 }
 
 function buildWebDavUrl(baseUrl: string, relativePath: string): string {
-  const trimmedBase = baseUrl.replace(/\/+$/, '');
+  const trimmedBase = stripTrailingSlashes(baseUrl);
   const normalized = normalizeRelativePath(relativePath);
   return normalized ? `${trimmedBase}/${encodePathSegments(normalized)}` : trimmedBase;
 }
@@ -615,7 +620,7 @@ function assertProviderAddressingSupported(endpoint: string, addressingStyle: st
 }
 
 function s3BucketBaseUrl(config: S3BackupDestination): URL {
-  const endpoint = new URL(config.endpoint.replace(/\/+$/, ''));
+  const endpoint = new URL(stripTrailingSlashes(config.endpoint));
   const bucket = config.bucket.trim();
 
   if (config.addressingStyle === 'virtual-hosted-style') {
@@ -624,11 +629,11 @@ function s3BucketBaseUrl(config: S3BackupDestination): URL {
     return endpoint;
   }
 
-  return new URL(`${endpoint.toString().replace(/\/+$/, '')}/${encodeURIComponent(bucket)}`);
+  return new URL(`${stripTrailingSlashes(endpoint.toString())}/${encodeURIComponent(bucket)}`);
 }
 
 function s3ObjectUrl(config: S3BackupDestination, objectKey: string): URL {
-  return new URL(`${s3BucketBaseUrl(config).toString().replace(/\/+$/, '')}/${encodePathSegments(objectKey)}`);
+  return new URL(`${stripTrailingSlashes(s3BucketBaseUrl(config).toString())}/${encodePathSegments(objectKey)}`);
 }
 
 function normalizeS3ObjectKey(config: S3BackupDestination, relativePath: string): string {
@@ -720,7 +725,7 @@ async function listS3Entries(config: S3BackupDestination, relativePath: string):
     const queryString = queryPairs
       .map(([key, value]) => `${encodeRfc3986(key)}=${encodeRfc3986(value)}`)
       .join('&');
-    const url = new URL(`${s3BucketBaseUrl(config).toString().replace(/\/+$/, '')}?${queryString}`);
+    const url = new URL(`${stripTrailingSlashes(s3BucketBaseUrl(config).toString())}?${queryString}`);
 
     const response = await signedS3Request(config, 'GET', url);
     if (!response.ok) {
@@ -741,7 +746,7 @@ async function listS3Entries(config: S3BackupDestination, relativePath: string):
         : fullPrefix;
       const normalizedRelative = trimSlashes(relative);
       if (!normalizedRelative) continue;
-      const itemPath = normalizedRelative.replace(/\/+$/, '');
+      const itemPath = stripTrailingSlashes(normalizedRelative);
       if ((parentPath(itemPath) || '') !== currentPath) continue;
       items.push({
         path: itemPath,

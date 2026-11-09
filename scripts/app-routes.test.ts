@@ -27,9 +27,13 @@ function resolveArrayItem(token: string): string[] {
   }
   if (token.startsWith('...')) {
     const name = token.slice(3).trim();
+    // `name` is a literal parsed out of this repository's own App.tsx source.
+    // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
     const arrayMatch = appSource.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\] as const;`));
     return arrayMatch ? [...arrayMatch[1].matchAll(/['"]([^'"]+)['"]/g)].map((m) => m[1]) : [];
   }
+  // `token` is a literal parsed out of this repository's own App.tsx source.
+  // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
   const constMatch = appSource.match(new RegExp(`const ${token} = ['"]([^'"]+)['"];`));
   return constMatch ? [constMatch[1]] : [];
 }

@@ -186,20 +186,28 @@ function readBodyString(body: Record<string, unknown>, names: string[]): string 
   return '';
 }
 
+/** Own-property-only traversal: never read `__proto__` or prototype getters. */
+function ownValue(current: unknown, key: string): unknown {
+  if (!current || typeof current !== 'object') return undefined;
+  return Object.prototype.hasOwnProperty.call(current, key)
+    ? (current as Record<string, unknown>)[key]
+    : undefined;
+}
+
 function readNestedString(source: unknown, path: string[]): string {
-  let current = source;
+  let current: unknown = source;
   for (const key of path) {
     if (!current || typeof current !== 'object') return '';
-    current = (current as Record<string, unknown>)[key];
+    current = ownValue(current, key);
   }
   return typeof current === 'string' ? current : '';
 }
 
 function readNestedNumber(source: unknown, path: string[]): number | undefined {
-  let current = source;
+  let current: unknown = source;
   for (const key of path) {
     if (!current || typeof current !== 'object') return undefined;
-    current = (current as Record<string, unknown>)[key];
+    current = ownValue(current, key);
   }
   return typeof current === 'number' ? current : undefined;
 }

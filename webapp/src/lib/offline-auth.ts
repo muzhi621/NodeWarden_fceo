@@ -105,6 +105,12 @@ export function saveOfflineUnlockRecord(args: {
     kdfIterations,
     savedAt: Date.now(),
   };
+  // Deliberate design trade-off: offline unlock needs the encrypted profile key
+  // to survive a reload. It is neither the master password nor a bearer token,
+  // and clearOfflineUnlockRecord() removes it on logout. Anyone with local
+  // access to the browser profile can read it — disable offline unlock if that
+  // is unacceptable for the deployment.
+  // lgtm[js/clear-text-storage-of-sensitive-data]
   localStorage.setItem(OFFLINE_UNLOCK_KEY, JSON.stringify(record));
 }
 

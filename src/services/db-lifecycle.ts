@@ -147,9 +147,13 @@ async function initializeTarget(target: SchemaTarget): Promise<void> {
         // A standby that cannot be migrated is reported (it would fail the
         // moment it takes over) but must not take the running primary down.
         if (target.isPrimary) dbInitFailure = { message };
+        // Keep the format string literal so node identifiers cannot inject
+        // util.format specifiers through console.error.
         console.error(
-          `[db-lifecycle] schema init failed for ${target.key}${target.isPrimary ? ' (primary)' : ' (standby)'}; ` +
-            `retrying in ${Math.round(delay / 1000)}s:`,
+          '[db-lifecycle] schema init failed for %s%s; retrying in %ss:',
+          target.key,
+          target.isPrimary ? ' (primary)' : ' (standby)',
+          Math.round(delay / 1000),
           error
         );
       })

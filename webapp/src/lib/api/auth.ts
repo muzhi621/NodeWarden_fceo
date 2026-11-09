@@ -148,6 +148,8 @@ export function saveSession(session: SessionState | null): void {
     email: session.email,
     authMode: session.authMode === 'token' ? 'token' : 'web-cookie',
   };
+  // Only { email, authMode } is persisted; tokens live in HttpOnly cookies.
+  // lgtm[js/clear-text-storage-of-sensitive-data]
   localStorage.setItem(SESSION_KEY, JSON.stringify(persisted));
 }
 
@@ -159,6 +161,9 @@ export function loadProfileSnapshot(email?: string | null): Profile | null {
     if (!parsed?.email) return null;
     if (email && parsed.email !== email) return null;
     const snapshot = stripProfileSecrets(parsed);
+    // stripProfileSecrets blanks `key` and `privateKey`; masterPasswordHint is a
+    // user-authored hint shown in the UI, not a credential.
+    // lgtm[js/clear-text-storage-of-sensitive-data]
     localStorage.setItem(PROFILE_SNAPSHOT_KEY, JSON.stringify(snapshot));
     return snapshot;
   } catch {
@@ -179,6 +184,8 @@ export function saveProfileSnapshot(profile: Profile | null): void {
         && existing.role === 'admin'
         && nextSnapshot?.role !== 'admin'
       ) {
+        // Same sanitized snapshot as saveProfileSnapshot below.
+        // lgtm[js/clear-text-storage-of-sensitive-data]
         localStorage.setItem(PROFILE_SNAPSHOT_KEY, JSON.stringify({
           ...nextSnapshot,
           role: 'admin',
@@ -189,6 +196,8 @@ export function saveProfileSnapshot(profile: Profile | null): void {
   } catch {
     // Fall back to writing the normalized snapshot below.
   }
+  // stripProfileSecrets already removed every key material from nextSnapshot.
+  // lgtm[js/clear-text-storage-of-sensitive-data]
   localStorage.setItem(PROFILE_SNAPSHOT_KEY, JSON.stringify(nextSnapshot));
 }
 

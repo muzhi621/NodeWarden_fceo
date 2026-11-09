@@ -8,6 +8,10 @@ updates:
       day: "monday"
       time: "05:00"
       timezone: "Asia/Shanghai"
+    # Wait a week before proposing a freshly published release: this is the
+    # standard mitigation against compromised-package supply-chain attacks.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     groups:
       npm-minor-and-patch:
@@ -29,6 +33,8 @@ updates:
       day: "monday"
       time: "05:10"
       timezone: "Asia/Shanghai"
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 0
     groups:
       github-actions:

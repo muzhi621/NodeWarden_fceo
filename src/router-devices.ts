@@ -23,6 +23,8 @@ import {
 } from './handlers/devices';
 
 function devicesPath(pattern: string): RegExp {
+  // `pattern` is a compile-time route fragment authored in this module, never request data.
+  // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
   return new RegExp(`^/(?:api/)?devices${pattern}$`, 'i');
 }
 

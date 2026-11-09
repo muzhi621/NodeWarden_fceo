@@ -971,7 +971,7 @@ async function repairMillisecondColumns(db) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!/no such table|does not exist|unknown database|information_schema/i.test(message)) {
-        console.warn(`[schema] could not verify ${table}.${column}:`, message);
+        console.warn("[schema] could not verify %s.%s:", table, column, message);
       }
     }
   }
@@ -2623,7 +2623,14 @@ function extractHost(input) {
     const colonIndex = raw.lastIndexOf(":");
     if (colonIndex > -1 && raw.indexOf(":") === colonIndex) raw = raw.slice(0, colonIndex);
   }
-  return raw.replace(/^\*+\./, "").replace(/^\.+/, "").replace(/\.+$/, "");
+  let start = 0;
+  let end = raw.length;
+  let cursor = start;
+  while (cursor < end && raw[cursor] === "*") cursor += 1;
+  if (cursor > start && cursor < end && raw[cursor] === ".") start = cursor + 1;
+  while (start < end && raw[start] === ".") start += 1;
+  while (end > start && raw[end - 1] === ".") end -= 1;
+  return raw.slice(start, end);
 }
 function isValidHost(host) {
   if (!host || host.length > 253 || !host.includes(".")) return false;
@@ -5402,6 +5409,31 @@ var init_blob_store = __esm({
   }
 });
 
+// shared/string-utils.ts
+function stripSurroundingSlashes(value) {
+  let start = 0;
+  let end = value.length;
+  while (start < end && value[start] === "/") start += 1;
+  while (end > start && value[end - 1] === "/") end -= 1;
+  return value.slice(start, end);
+}
+function stripTrailingSlashes(value) {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end -= 1;
+  return value.slice(0, end);
+}
+function stripTrailingChar(value, char) {
+  if (char.length !== 1) throw new Error("stripTrailingChar expects one character");
+  let end = value.length;
+  while (end > 0 && value[end - 1] === char) end -= 1;
+  return value.slice(0, end);
+}
+var init_string_utils = __esm({
+  "shared/string-utils.ts"() {
+    "use strict";
+  }
+});
+
 // src/utils/passkey.ts
 function bytesToBase64Url(bytes) {
   let binary = "";
@@ -6714,7 +6746,7 @@ function asTrimmedString(value) {
   return String(value ?? "").trim();
 }
 function normalizePath(value) {
-  return asTrimmedString(value).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  return stripSurroundingSlashes(asTrimmedString(value).replace(/\\/g, "/"));
 }
 function normalizeHostnameForPolicy(hostname) {
   return hostname.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
@@ -6836,7 +6868,7 @@ function normalizeBackupEndpointUrl(value, label) {
     throw new Error(`${label} must not include query or fragment`);
   }
   assertBackupEndpointHostAllowed(parsed.hostname, label);
-  return parsed.toString().replace(/\/+$/, "");
+  return stripTrailingSlashes(parsed.toString());
 }
 function assertValidTimeZone(timezone) {
   try {
@@ -7415,6 +7447,7 @@ var BACKUP_SETTINGS_CONFIG_KEY, BACKUP_RUNTIME_CONFIG_KEY, BACKUP_SCHEDULER_WIND
 var init_backup_config = __esm({
   "src/services/backup-config.ts"() {
     "use strict";
+    init_string_utils();
     init_backup_settings_crypto();
     init_backup_schema();
     BACKUP_SETTINGS_CONFIG_KEY = "backup.settings.v1";
@@ -8348,7 +8381,7 @@ async function readEnvFile(name, label) {
     );
     return fs3.readFileSync(filePath, "utf8");
   } catch (error) {
-    console.error(`[runtime-env] failed to read ${label} (${filePath}):`, error);
+    console.error("[runtime-env] failed to read %s (%s):", label, filePath, error);
     return void 0;
   }
 }
@@ -9742,7 +9775,7 @@ function ensureDestinationConfigReady(destination) {
   }
 }
 function buildWebDavUrl(baseUrl, relativePath) {
-  const trimmedBase = baseUrl.replace(/\/+$/, "");
+  const trimmedBase = stripTrailingSlashes(baseUrl);
   const normalized = normalizeRelativePath(relativePath);
   return normalized ? `${trimmedBase}/${encodePathSegments(normalized)}` : trimmedBase;
 }
@@ -10004,17 +10037,17 @@ function assertProviderAddressingSupported(endpoint, addressingStyle) {
   }
 }
 function s3BucketBaseUrl(config) {
-  const endpoint = new URL(config.endpoint.replace(/\/+$/, ""));
+  const endpoint = new URL(stripTrailingSlashes(config.endpoint));
   const bucket = config.bucket.trim();
   if (config.addressingStyle === "virtual-hosted-style") {
     if (isBucketHostedS3Endpoint(endpoint, bucket)) return endpoint;
     endpoint.hostname = `${bucket}.${endpoint.hostname}`;
     return endpoint;
   }
-  return new URL(`${endpoint.toString().replace(/\/+$/, "")}/${encodeURIComponent(bucket)}`);
+  return new URL(`${stripTrailingSlashes(endpoint.toString())}/${encodeURIComponent(bucket)}`);
 }
 function s3ObjectUrl(config, objectKey) {
-  return new URL(`${s3BucketBaseUrl(config).toString().replace(/\/+$/, "")}/${encodePathSegments(objectKey)}`);
+  return new URL(`${stripTrailingSlashes(s3BucketBaseUrl(config).toString())}/${encodePathSegments(objectKey)}`);
 }
 function normalizeS3ObjectKey(config, relativePath) {
   return buildJoinedPath(config.rootPath, normalizeRelativePath(relativePath));
@@ -10082,7 +10115,7 @@ async function listS3Entries(config, relativePath) {
     if (targetPrefix) queryPairs.push(["prefix", targetPrefix]);
     if (continuationToken) queryPairs.push(["continuation-token", continuationToken]);
     const queryString = queryPairs.map(([key, value]) => `${encodeRfc3986(key)}=${encodeRfc3986(value)}`).join("&");
-    const url = new URL(`${s3BucketBaseUrl(config).toString().replace(/\/+$/, "")}?${queryString}`);
+    const url = new URL(`${stripTrailingSlashes(s3BucketBaseUrl(config).toString())}?${queryString}`);
     const response = await signedS3Request(config, "GET", url);
     if (!response.ok) {
       await throwS3Error(response, "listing");
@@ -10094,7 +10127,7 @@ async function listS3Entries(config, relativePath) {
       const relative = rootPrefix ? fullPrefix === rootPrefix ? "" : fullPrefix.startsWith(`${rootPrefix}/`) ? fullPrefix.slice(rootPrefix.length + 1) : "" : fullPrefix;
       const normalizedRelative = trimSlashes(relative);
       if (!normalizedRelative) continue;
-      const itemPath = normalizedRelative.replace(/\/+$/, "");
+      const itemPath = stripTrailingSlashes(normalizedRelative);
       if ((parentPath(itemPath) || "") !== currentPath) continue;
       items.push({
         path: itemPath,
@@ -10277,6 +10310,7 @@ var init_backup_uploader = __esm({
   "src/services/backup-uploader.ts"() {
     "use strict";
     init_backup_config();
+    init_string_utils();
     S3_MAX_ATTEMPTS = 3;
   }
 });
@@ -10434,7 +10468,7 @@ function getBackupDestinationSummary(destination) {
   };
 }
 function ensureBackupBlobName(value) {
-  const normalized = String(value || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const normalized = stripSurroundingSlashes(String(value || "").trim().replace(/\\/g, "/"));
   if (!normalized) {
     throw new Error("Backup attachment blob is required");
   }
@@ -11422,6 +11456,7 @@ var REMOTE_ATTACHMENT_INDEX_PATH, REMOTE_ATTACHMENT_SYNC_EXTERNAL_SUBREQUEST_LIM
 var init_backup = __esm({
   "src/handlers/backup.ts"() {
     "use strict";
+    init_string_utils();
     init_response();
     init_backup_archive();
     init_backup_config();
@@ -30171,6 +30206,7 @@ function hasConfigStore(env) {
 }
 
 // server/node-runtime.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
 import fs2 from "node:fs";
 import fsp3 from "node:fs/promises";
 import os from "node:os";
@@ -30822,11 +30858,15 @@ function readBodyString(body, names) {
   }
   return "";
 }
+function ownValue(current, key) {
+  if (!current || typeof current !== "object") return void 0;
+  return Object.prototype.hasOwnProperty.call(current, key) ? current[key] : void 0;
+}
 function readNestedString(source, path4) {
   let current = source;
   for (const key of path4) {
     if (!current || typeof current !== "object") return "";
-    current = current[key];
+    current = ownValue(current, key);
   }
   return typeof current === "string" ? current : "";
 }
@@ -30834,7 +30874,7 @@ function readNestedNumber(source, path4) {
   let current = source;
   for (const key of path4) {
     if (!current || typeof current !== "object") return void 0;
-    current = current[key];
+    current = ownValue(current, key);
   }
   return typeof current === "number" ? current : void 0;
 }
@@ -35162,6 +35202,7 @@ init_limits();
 init_domain_rules();
 
 // src/utils/account-passkeys.ts
+init_string_utils();
 init_passkey();
 init_origins();
 var ACCOUNT_PASSKEY_TOKEN_TYPE = "nodewarden.account-passkey.challenge.v1";
@@ -35214,7 +35255,7 @@ function uuidToDotNetGuidBytes(value) {
   ]);
 }
 function normalizeWebAuthnBase64(value) {
-  return String(value || "").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return stripTrailingChar(String(value || "").replace(/\+/g, "-").replace(/\//g, "_"), "=");
 }
 async function importHmacKey(secret) {
   return crypto.subtle.importKey("raw", textBytes(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
@@ -38097,7 +38138,10 @@ async function initializeTarget(target) {
       retryAfter.set(target.key, Date.now() + delay2);
       if (target.isPrimary) dbInitFailure = { message };
       console.error(
-        `[db-lifecycle] schema init failed for ${target.key}${target.isPrimary ? " (primary)" : " (standby)"}; retrying in ${Math.round(delay2 / 1e3)}s:`,
+        "[db-lifecycle] schema init failed for %s%s; retrying in %ss:",
+        target.key,
+        target.isPrimary ? " (primary)" : " (standby)",
+        Math.round(delay2 / 1e3),
         error
       );
     }).finally(() => {
@@ -38626,7 +38670,7 @@ async function closeQuietly(pool, label) {
   try {
     await pool.close();
   } catch (error) {
-    console.warn(`[db-config] closing the ${label} pool failed:`, error);
+    console.warn("[db-config] closing the %s pool failed:", label, error);
   }
 }
 function wantsForce(request) {
@@ -50621,6 +50665,7 @@ function createLocalBackupRunnerNamespace(getEnv) {
 }
 
 // server/fs-r2.ts
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -50642,8 +50687,25 @@ function resolveObjectPath(attachmentsDir, key) {
 function sidecarPath(full) {
   return `${full}.meta.json`;
 }
+function stagingPath(full) {
+  return path.join(path.dirname(full), `.${path.basename(full)}.${process.pid}.${randomUUID()}.tmp`);
+}
+async function dropStaging(staging) {
+  await fsp.rm(staging, { force: true }).catch(() => {
+  });
+}
+async function writeObjectAtomic(full, data) {
+  const staging = stagingPath(full);
+  try {
+    await fsp.writeFile(staging, data, { flag: "wx", mode: 384 });
+    await fsp.rename(staging, full);
+  } catch (error) {
+    await dropStaging(staging);
+    throw error;
+  }
+}
 async function writeSidecar(full, meta) {
-  await fsp.writeFile(sidecarPath(full), JSON.stringify(meta));
+  await writeObjectAtomic(sidecarPath(full), JSON.stringify(meta));
 }
 async function discard(full) {
   await Promise.all([
@@ -50673,12 +50735,12 @@ function toBytes(value) {
 async function writeBody(full, value) {
   const bytes = toBytes(value);
   if (bytes) {
-    await fsp.writeFile(full, bytes);
+    await writeObjectAtomic(full, bytes);
     return bytes.byteLength;
   }
   const source = toNodeReadable(value);
   if (!source) {
-    await fsp.writeFile(full, new Uint8Array(0));
+    await writeObjectAtomic(full, new Uint8Array(0));
     return 0;
   }
   let size = 0;
@@ -50688,7 +50750,14 @@ async function writeBody(full, value) {
       callback(null, chunk);
     }
   });
-  await pipeline(source, counter, fs.createWriteStream(full));
+  const staging = stagingPath(full);
+  try {
+    await pipeline(source, counter, fs.createWriteStream(staging, { flags: "wx", mode: 384 }));
+    await fsp.rename(staging, full);
+  } catch (error) {
+    await dropStaging(staging);
+    throw error;
+  }
   return size;
 }
 function createFsR2(attachmentsDir) {
@@ -50752,6 +50821,7 @@ function createFsR2(attachmentsDir) {
 }
 
 // server/attachments-probe.ts
+import { randomUUID as randomUUID2 } from "node:crypto";
 import fsp2 from "node:fs/promises";
 import path2 from "node:path";
 var PROBE_FILE = ".nodewarden-write-probe";
@@ -50786,13 +50856,16 @@ async function probeOnce(dir, expectMount) {
         };
       }
     }
-    const file = path2.join(dir, `${PROBE_FILE}-${process.pid}`);
+    const file = path2.join(dir, `${PROBE_FILE}-${process.pid}-${randomUUID2()}`);
     const payload = `nodewarden ${Date.now()}`;
-    await fsp2.writeFile(file, payload);
-    const echo = await fsp2.readFile(file, "utf8");
-    await fsp2.rm(file, { force: true });
-    if (echo !== payload) {
-      return { dir, status: "unwritable", detail: "wrote a probe file and read back different bytes" };
+    try {
+      await fsp2.writeFile(file, payload, { flag: "wx", mode: 384 });
+      const echo = await fsp2.readFile(file, "utf8");
+      if (echo !== payload) {
+        return { dir, status: "unwritable", detail: "wrote a probe file and read back different bytes" };
+      }
+    } finally {
+      await fsp2.rm(file, { force: true });
     }
     return { dir, status: "ok" };
   } catch (error) {
@@ -51002,7 +51075,20 @@ function readKvFile(kvFile) {
   }
 }
 function writeKvFile(kvFile, data) {
-  fs2.writeFileSync(kvFile, JSON.stringify(data), "utf8");
+  const staging = path3.join(
+    path3.dirname(kvFile),
+    `.${path3.basename(kvFile)}.${process.pid}.${randomUUID3()}.tmp`
+  );
+  try {
+    fs2.writeFileSync(staging, JSON.stringify(data), { encoding: "utf8", flag: "wx", mode: 384 });
+    fs2.renameSync(staging, kvFile);
+  } catch (error) {
+    try {
+      fs2.rmSync(staging, { force: true });
+    } catch {
+    }
+    throw error;
+  }
 }
 function createFileKv(dataDir) {
   const kvFile = path3.join(dataDir, "kv-store.json");

@@ -7,11 +7,11 @@ Thank you for helping keep NodeWarden safe.
 Please **do not report security vulnerabilities through public GitHub issues, discussions, pull requests, or chat groups**.
 
 Use GitHub Private Vulnerability Reporting instead:
+[Report a vulnerability privately](https://github.com/muzhi621/NodeWarden_fceo/security/advisories/new).
 
-1. Open the NodeWarden repository on GitHub.
-2. Go to **Security and quality**.
-3. Click **Report a vulnerability**.
-4. Submit the report privately.
+1. Open that link (or go to the repository → **Security and quality** → **Report a vulnerability**).
+2. Fill in the private advisory form.
+3. Submit the report privately.
 
 NodeWarden is independent from Bitwarden. Please do not report NodeWarden-specific issues to the official Bitwarden team.
 

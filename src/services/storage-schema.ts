@@ -250,7 +250,7 @@ export async function repairMillisecondColumns(db: D1Database): Promise<string[]
       // table, and the truncated timestamps will keep sweeping the sessions.
       const message = error instanceof Error ? error.message : String(error);
       if (!/no such table|does not exist|unknown database|information_schema/i.test(message)) {
-        console.warn(`[schema] could not verify ${table}.${column}:`, message);
+        console.warn('[schema] could not verify %s.%s:', table, column, message);
       }
     }
   }

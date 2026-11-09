@@ -20,6 +20,8 @@ function assert(condition, message) {
 }
 
 function sqlTouchesTable(sql, table) {
+  // `table` is one of this test's own SQL fixtures, never external input.
+  // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
   return new RegExp(`\\b(?:from|into|table)\\s+[\"']?${table}\\b`, 'i').test(sql);
 }
 

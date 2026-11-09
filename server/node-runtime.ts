@@ -19,6 +19,7 @@
 //     WebSocket upgrades are rejected (clients fall back to polling).
 //   - caches.default is an in-memory cache (per instance).
 
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -236,7 +237,21 @@ function readKvFile(kvFile: string): Record<string, string> {
 }
 
 function writeKvFile(kvFile: string, data: Record<string, string>): void {
-  fs.writeFileSync(kvFile, JSON.stringify(data), 'utf8');
+  // Atomic replace. The KV file may live under os.tmpdir() on serverless hosts,
+  // so writing directly to its predictable name would let a pre-created
+  // symlink redirect the write. Stage to a fresh random, exclusive, owner-only
+  // file in the same directory, then rename it into place.
+  const staging = path.join(
+    path.dirname(kvFile),
+    `.${path.basename(kvFile)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  try {
+    fs.writeFileSync(staging, JSON.stringify(data), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    fs.renameSync(staging, kvFile);
+  } catch (error) {
+    try { fs.rmSync(staging, { force: true }); } catch { /* best effort */ }
+    throw error;
+  }
 }
 
 function createFileKv(dataDir: string) {

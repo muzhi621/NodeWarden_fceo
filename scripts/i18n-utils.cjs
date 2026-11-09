@@ -20,8 +20,18 @@ const localeFiles = [
   ['sv', 'sv.ts', 'sv', 'Swedish'],
 ];
 
+// Only the hard-coded locale file names may be opened. Joining an unvalidated
+// caller-supplied file name to localeDir would allow path traversal, and the
+// check keeps that from becoming possible as this helper gains new callers.
+function checkedLocalePath(fileName) {
+  if (!localeFiles.some((entry) => entry[1] === fileName)) {
+    throw new Error(`Unknown locale file: ${fileName}`);
+  }
+  return path.join(localeDir, fileName);
+}
+
 function readLocale(fileName, variableName) {
-  let code = fs.readFileSync(path.join(localeDir, fileName), 'utf8');
+  let code = fs.readFileSync(checkedLocalePath(fileName), 'utf8');
   code = code
     .replace(/const (\w+): Record<string, string> =/g, 'const $1 =')
     .replace(/export default \w+;\s*$/m, '');
@@ -35,7 +45,7 @@ function readLocale(fileName, variableName) {
 function writeLocale(fileName, variableName, table, header) {
   const body = JSON.stringify(table, null, 2);
   fs.writeFileSync(
-    path.join(localeDir, fileName),
+    checkedLocalePath(fileName),
     `${header}\nconst ${variableName}: Record<string, string> = ${body};\n\nexport default ${variableName};\n`,
     'utf8'
   );
