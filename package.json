@@ -22,6 +22,7 @@
     "test:fc-timer": "tsx --test scripts/fc-timer-trigger.test.ts",
     "test:cron-tick": "node --import ./server/register-cf-stub.mjs --import tsx --test scripts/cron-tick.test.ts",
     "test:vault-compatibility": "tsx --tsconfig webapp/tsconfig.json --import ./scripts/offline-workers-loader.mjs --test scripts/vault-compatibility.test.ts",
+    "test:folder-tree": "tsx --test scripts/folder-tree.test.ts",
     "test:web-crypto": "tsx --test scripts/web-crypto-availability.test.ts",
     "test:notifications-security": "tsx --test scripts/notifications-security.test.ts",
     "test:webauthn-mobile": "node --test scripts/webauthn-mobile-connector.test.mjs",
