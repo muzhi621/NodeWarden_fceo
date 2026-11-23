@@ -788,7 +788,7 @@ var init_storage_schema = __esm({
   "src/services/storage-schema.ts"() {
     "use strict";
     SCHEMA_STATEMENTS = [
-      "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT, master_password_hint TEXT, master_password_hash TEXT NOT NULL, key TEXT NOT NULL, private_key TEXT, public_key TEXT, kdf_type INTEGER NOT NULL, kdf_iterations INTEGER NOT NULL, kdf_memory INTEGER, kdf_parallelism INTEGER, security_stamp TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', status TEXT NOT NULL DEFAULT 'active', verify_devices INTEGER NOT NULL DEFAULT 0, totp_secret TEXT, totp_recovery_code TEXT, yubikey_key1 TEXT, yubikey_key2 TEXT, yubikey_key3 TEXT, yubikey_key4 TEXT, yubikey_key5 TEXT, yubikey_nfc INTEGER NOT NULL DEFAULT 0, api_key TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT, master_password_hint TEXT, master_password_hash TEXT NOT NULL, key TEXT NOT NULL, private_key TEXT, public_key TEXT, kdf_type INTEGER NOT NULL, kdf_iterations INTEGER NOT NULL, kdf_memory INTEGER, kdf_parallelism INTEGER, security_stamp TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', status TEXT NOT NULL DEFAULT 'active', verify_devices INTEGER NOT NULL DEFAULT 0, totp_secret TEXT, totp_recovery_code TEXT, yubikey_key1 TEXT, yubikey_key2 TEXT, yubikey_key3 TEXT, yubikey_key4 TEXT, yubikey_key5 TEXT, yubikey_nfc INTEGER NOT NULL DEFAULT 0, api_key TEXT, user_key_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
       "ALTER TABLE users ADD COLUMN master_password_hint TEXT",
       "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
       "ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
@@ -802,6 +802,7 @@ var init_storage_schema = __esm({
       "ALTER TABLE users ADD COLUMN yubikey_key5 TEXT",
       "ALTER TABLE users ADD COLUMN yubikey_nfc INTEGER NOT NULL DEFAULT 0",
       "ALTER TABLE users ADD COLUMN api_key TEXT",
+      "ALTER TABLE users ADD COLUMN user_key_id TEXT",
       "CREATE TABLE IF NOT EXISTS domain_settings (user_id TEXT PRIMARY KEY, equivalent_domains TEXT NOT NULL DEFAULT '[]', custom_equivalent_domains TEXT NOT NULL DEFAULT '[]', excluded_global_equivalent_domains TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
       "ALTER TABLE domain_settings ADD COLUMN custom_equivalent_domains TEXT NOT NULL DEFAULT '[]'",
       "CREATE TABLE IF NOT EXISTS user_revisions (user_id TEXT PRIMARY KEY, revision_date TEXT NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)",
@@ -934,6 +935,7 @@ function mapUserRow(row) {
     yubikeyKey5: row.yubikey_key5 ?? null,
     yubikeyNfc: !!row.yubikey_nfc,
     apiKey: row.api_key ?? null,
+    userKeyId: row.user_key_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -1032,6 +1034,12 @@ async function upgradePasswordVerifier(db, userId, expectedVerifier, securitySta
   ).bind(newVerifier, userId, expectedVerifier, securityStamp).run();
   return (result.meta.changes ?? 0) > 0;
 }
+async function setUserKeyId(db, userId, userKeyId) {
+  const result = await db.prepare(
+    "UPDATE users SET user_key_id = ? WHERE id = ? AND user_key_id IS NULL"
+  ).bind(userKeyId, userId).run();
+  return (result.meta.changes ?? 0) > 0;
+}
 async function createFirstUser(db, safeBind, user) {
   const email = user.email.toLowerCase();
   const stmt = db.prepare(
@@ -1078,7 +1086,7 @@ var init_storage_user_repo = __esm({
   "src/services/storage-user-repo.ts"() {
     "use strict";
     init_sql_hints();
-    USER_SELECT_COLUMNS = "id, email, name, master_password_hint, master_password_hash, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, role, status, verify_devices, totp_secret, totp_recovery_code, yubikey_key1, yubikey_key2, yubikey_key3, yubikey_key4, yubikey_key5, yubikey_nfc, api_key, created_at, updated_at";
+    USER_SELECT_COLUMNS = "id, email, name, master_password_hint, master_password_hash, key, private_key, public_key, kdf_type, kdf_iterations, kdf_memory, kdf_parallelism, security_stamp, role, status, verify_devices, totp_secret, totp_recovery_code, yubikey_key1, yubikey_key2, yubikey_key3, yubikey_key4, yubikey_key5, yubikey_nfc, api_key, user_key_id, created_at, updated_at";
   }
 });
 
@@ -2993,7 +3001,7 @@ var init_storage = __esm({
     init_storage_account_passkey_repo();
     TWO_FACTOR_REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
     STORAGE_SCHEMA_VERSION_KEY = "schema.version";
-    STORAGE_SCHEMA_VERSION = "2026-11-02-mysql-bigint-epoch-columns";
+    STORAGE_SCHEMA_VERSION = "2026-11-04-user-key-id";
     REQUIRED_SCHEMA_TABLES = ["webauthn_credentials", "webauthn_challenges", "auth_requests", "totp_login_replays"];
     StorageService = class _StorageService {
       constructor(db) {
@@ -3142,6 +3150,9 @@ var init_storage = __esm({
       }
       async upgradePasswordVerifier(userId, expectedVerifier, securityStamp, newVerifier) {
         return upgradePasswordVerifier(this.db, userId, expectedVerifier, securityStamp, newVerifier);
+      }
+      async setUserKeyId(userId, userKeyId) {
+        return setUserKeyId(this.db, userId, userKeyId);
       }
       async createFirstUser(user) {
         return createFirstUser(this.db, this.safeBind.bind(this), user);
@@ -6472,7 +6483,7 @@ var APP_VERSION;
 var init_app_version = __esm({
   "shared/app-version.ts"() {
     "use strict";
-    APP_VERSION = "1.8.18";
+    APP_VERSION = "1.8.19";
   }
 });
 
@@ -31138,6 +31149,37 @@ async function handleGetRevisionDate(request, env, userId) {
   const timestamp = new Date(revisionDate).getTime();
   return jsonResponse(timestamp);
 }
+async function handleSetUserKeyId(request, env, userId) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse("Invalid JSON", 400);
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return errorResponse("Request body must be a JSON object", 400);
+  }
+  const payload = body;
+  const userKeyId = payload.userKeyId ?? payload.UserKeyId;
+  if (typeof userKeyId !== "string" || !/^[0-9a-f]{32}$/.test(userKeyId)) {
+    return errorResponse("userKeyId must be a 32-character lowercase hex string", 400);
+  }
+  const storage = new StorageService(env.DB);
+  const user = await storage.getUserById(userId);
+  if (!user) return errorResponse("User not found", 404);
+  if (user.userKeyId === userKeyId) return new Response(null, { status: 200 });
+  if (user.userKeyId) {
+    return errorResponse("User key id is already set.", 400);
+  }
+  if (!await storage.setUserKeyId(userId, userKeyId)) {
+    const currentUser = await storage.getUserById(userId);
+    if (!currentUser) return errorResponse("User not found", 404);
+    if (currentUser.userKeyId === userKeyId) return new Response(null, { status: 200 });
+    return errorResponse("User key id is already set.", 400);
+  }
+  await storage.updateRevisionDate(userId);
+  return new Response(null, { status: 200 });
+}
 async function handleVerifyPassword(request, env, userId) {
   const storage = new StorageService(env.DB);
   const auth = new AuthService(env);
@@ -31660,9 +31702,7 @@ async function handleDeleteAttachment(request, env, userId, cipherId, attachment
   const attachments = await storage.getAttachmentsByCipher(cipherId);
   const cipherResponse = cipherToResponse(updatedCipher, attachments);
   return jsonResponse({
-    Cipher: cipherResponse,
     cipher: cipherResponse,
-    Object: "deleteAttachment",
     object: "deleteAttachment"
   });
 }
@@ -31815,15 +31855,13 @@ function readCipherArchivedAt(source, fallback = null) {
   const archived = getAliasedProp(source, ["archivedAt", "ArchivedAt", "archivedDate", "ArchivedDate"]);
   return archived.present ? normalizeCipherTimestamp(archived.value) : fallback;
 }
-function readCipherRevisionDate(source) {
-  const revision = getAliasedProp(source, ["lastKnownRevisionDate", "LastKnownRevisionDate"]);
-  return revision.present ? normalizeCipherTimestamp(revision.value) : null;
-}
 function isStaleCipherUpdate(existingUpdatedAt, clientRevisionDate) {
-  if (!clientRevisionDate) return false;
+  const normalizedRevisionDate = normalizeCipherTimestamp(clientRevisionDate);
+  if (!normalizedRevisionDate) return false;
   const existingTs = Date.parse(existingUpdatedAt);
-  const clientTs = Date.parse(clientRevisionDate);
-  if (Number.isNaN(existingTs) || Number.isNaN(clientTs)) return false;
+  const clientTs = Date.parse(normalizedRevisionDate);
+  const wholeSeconds = typeof clientRevisionDate === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$/i.test(clientRevisionDate);
+  if (wholeSeconds) return Math.floor(existingTs / 1e3) * 1e3 > clientTs;
   return existingTs > clientTs;
 }
 function syncCipherComputedAliases(cipher) {
@@ -32507,7 +32545,6 @@ async function handleUpdateCipher(request, env, userId, id) {
     return errorResponse("Invalid JSON", 400);
   }
   const cipherData = body.Cipher || body.cipher || body;
-  const incomingFolderId = readCipherProp(cipherData, ["folderId", "FolderId"]);
   const incomingKey = readCipherProp(cipherData, ["key", "Key"]);
   const incomingLogin = readCipherProp(cipherData, ["login", "Login"]);
   const incomingCard = readCipherProp(cipherData, ["card", "Card"]);
@@ -32518,7 +32555,7 @@ async function handleUpdateCipher(request, env, userId, id) {
   const incomingDriversLicense = readCipherProp(cipherData, ["driversLicense", "DriversLicense"]);
   const incomingPassport = readCipherProp(cipherData, ["passport", "Passport"]);
   const incomingPasswordHistory = readCipherProp(cipherData, ["passwordHistory", "PasswordHistory"]);
-  const incomingRevisionDate = readCipherRevisionDate(cipherData);
+  const incomingRevisionDate = readCipherProp(cipherData, ["lastKnownRevisionDate", "LastKnownRevisionDate"]).value;
   const preserveRevisionDate = shouldPreserveRepairableCipherUris(request) && (body.preserveRevisionDate === true || cipherData.preserveRevisionDate === true);
   if (incomingKey.present && !shouldAcceptCipherKey(incomingKey.value)) {
     return errorResponse("Cipher key encryption is not supported by this server. Resync the client and try again.", 400);
@@ -32550,9 +32587,6 @@ async function handleUpdateCipher(request, env, userId, id) {
     archivedAt: readCipherArchivedAt(cipherData, existingCipher.archivedAt ?? null),
     deletedAt: existingCipher.deletedAt
   };
-  if (incomingFolderId.present) {
-    cipher.folderId = normalizeOptionalId3(incomingFolderId.value);
-  }
   if (incomingKey.present) {
     const normalizedIncomingKey = normalizeCipherKeyForStorage(incomingKey.value);
     cipher.key = normalizedIncomingKey || normalizeCipherKeyForStorage(existingCipher.key);
@@ -32570,6 +32604,7 @@ async function handleUpdateCipher(request, env, userId, id) {
   if (incomingPasswordHistory.present) {
     cipher.passwordHistory = incomingPasswordHistory.value ?? null;
   }
+  cipher.folderId = normalizeOptionalId3(readNullableFullUpdateField(cipherData, ["folderId", "FolderId"]));
   cipher.notes = readNullableFullUpdateField(cipherData, ["notes", "Notes"]);
   cipher.fields = readNullableFullUpdateField(cipherData, ["fields", "Fields"]);
   normalizeCipherForStorage(cipher);
@@ -34762,6 +34797,7 @@ async function handleSync(request, env, userId) {
       WebAuthnPrfOption: webAuthnPrfOptions[0] || null,
       WebAuthnPrfOptions: webAuthnPrfOptions,
       V2UpgradeToken: null,
+      UserKeyId: user.userKeyId ?? null,
       Object: "userDecryption"
     },
     UserDecryptionOptions: userDecryptionOptions,
@@ -48010,6 +48046,9 @@ async function handleAuthenticatedRoute(request, env, userId, currentUser, path4
   if (path4 === "/api/accounts/revision-date" && method === "GET") {
     return handleGetRevisionDate(request, env, userId);
   }
+  if (path4 === "/api/accounts/key-management/user-key-id" && method === "POST") {
+    return handleSetUserKeyId(request, env, userId);
+  }
   if (path4 === "/api/accounts/verify-password" && method === "POST") {
     return handleVerifyPassword(request, env, userId);
   }
@@ -49446,7 +49485,8 @@ function buildConfigResponse(origin) {
       "pm-4516-devices-add-last-activity-date": true,
       "pm-30529-webauthn-related-origins": true,
       "unauth-ui-refresh": true,
-      "web-push": false
+      "web-push": false,
+      "windows-native-credential-sync": true
     },
     object: "config"
   };
